@@ -174,21 +174,23 @@ function ScheduleSlotEditor({
 
       {local.enabled && (
         <>
-          <div className="flex items-center gap-3">
-            <span className="text-text-secondary text-sm w-12">Start</span>
-            <TimePicker
-              hour={local.start_hour}
-              minute={local.start_minute}
-              onChange={(h, m) => setLocal((l) => ({ ...l, start_hour: h, start_minute: m }))}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="text-text-secondary text-sm w-12">End</span>
-            <TimePicker
-              hour={local.end_hour}
-              minute={local.end_minute}
-              onChange={(h, m) => setLocal((l) => ({ ...l, end_hour: h, end_minute: m }))}
-            />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex items-center gap-3">
+              <span className="text-text-secondary text-sm w-12">Start</span>
+              <TimePicker
+                hour={local.start_hour}
+                minute={local.start_minute}
+                onChange={(h, m) => setLocal((l) => ({ ...l, start_hour: h, start_minute: m }))}
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-text-secondary text-sm w-12">End</span>
+              <TimePicker
+                hour={local.end_hour}
+                minute={local.end_minute}
+                onChange={(h, m) => setLocal((l) => ({ ...l, end_hour: h, end_minute: m }))}
+              />
+            </div>
           </div>
 
           {showTargetSoc && (
@@ -236,11 +238,11 @@ export default function ControlPage() {
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
 
   // Default slots if snapshot doesn't have them
+  // Only 2 charge slots are supported by the inverter registers
   const chargeSlots: ScheduleSlot[] =
-    snapshot?.charge_slots?.length === 3
-      ? snapshot.charge_slots
+    snapshot?.charge_slots?.length != null && snapshot.charge_slots.length >= 2
+      ? snapshot.charge_slots.slice(0, 2)
       : [
-          { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
           { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
           { enabled: false, start_hour: 0, start_minute: 0, end_hour: 6, end_minute: 0, target_soc: 100 },
         ];
@@ -255,8 +257,17 @@ export default function ControlPage() {
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
 
-  const handleSlotSave = async (_index: number, slot: ScheduleSlot, path: string) => {
-    await apiPost(path, { ...slot, slot_index: _index });
+  const handleSlotSave = async (index: number, slot: ScheduleSlot, path: string) => {
+    // API expects 1-based slot number
+    await apiPost(path, {
+      slot: index + 1,
+      enabled: slot.enabled,
+      start_hour: slot.start_hour,
+      start_minute: slot.start_minute,
+      end_hour: slot.end_hour,
+      end_minute: slot.end_minute,
+      target_soc: slot.target_soc,
+    });
   };
 
   const handleReserveSave = async () => {
@@ -348,7 +359,7 @@ export default function ControlPage() {
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
             <ScheduleSlotEditor
-              key={i}
+              key={`charge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}-${slot.target_soc}`}
               slotIndex={i}
               slot={slot}
               onSave={handleSlotSave}
@@ -364,7 +375,7 @@ export default function ControlPage() {
         <div className="space-y-3">
           {dischargeSlots.map((slot, i) => (
             <ScheduleSlotEditor
-              key={i}
+              key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}`}
               slotIndex={i}
               slot={slot}
               onSave={handleSlotSave}

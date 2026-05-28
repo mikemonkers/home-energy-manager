@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::inverter::decoder::decode_snapshot;
+use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::InverterSnapshot;
 use crate::modbus::client::ModbusClient;
 
@@ -109,6 +110,9 @@ pub struct AppState {
     pub tx: broadcast::Sender<PollMessage>,
     /// Runtime configuration (host, serial, interval, etc.).
     pub settings: Arc<Mutex<PollSettings>>,
+    /// Pending register writes queued by the control API.
+    /// The poll loop drains this queue and writes to the inverter.
+    pub pending_writes: Arc<Mutex<Vec<Vec<RegisterWrite>>>>,
 }
 
 impl AppState {
@@ -123,6 +127,7 @@ impl AppState {
             connection_state: Arc::new(Mutex::new(ConnectionState::Disconnected)),
             tx,
             settings: Arc::new(Mutex::new(PollSettings::default())),
+            pending_writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -205,6 +210,60 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                 // ---- Inner poll loop ----
                 loop {
+                    // Drain and execute any pending register writes from the
+                    // control API before reading the latest state.
+                    let pending: Vec<Vec<RegisterWrite>> = {
+                        let mut pw = state.pending_writes.lock().await;
+                        std::mem::take(&mut *pw)
+                    };
+                    if !pending.is_empty() {
+                        // Give the dongle a moment after the previous poll's
+                        // reads before we start writing.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+
+                        for writes in &pending {
+                            for group in group_contiguous(writes) {
+                                let values: Vec<u16> = group.iter().map(|w| w.value).collect();
+                                let addr = group[0].address;
+                                let count = group.len();
+
+                                // Retry up to 3 times on exception 67 (dongle busy).
+                                let mut success = false;
+                                for attempt in 0..3 {
+                                    match client.write_registers(addr, &values).await {
+                                        Ok(()) => {
+                                            tracing::info!(
+                                                "Wrote {} register(s) starting at {}",
+                                                count, addr
+                                            );
+                                            success = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Write attempt {}/{} at {} failed: {e}",
+                                                attempt + 1, 3, addr
+                                            );
+                                            if attempt < 2 {
+                                                tokio::time::sleep(
+                                                    Duration::from_millis(500 * (attempt as u64 + 1))
+                                                ).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                if !success {
+                                    tracing::error!(
+                                        "All write attempts failed for {} register(s) at {}",
+                                        count, addr
+                                    );
+                                }
+                                // Pause between write groups
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                            }
+                        }
+                    }
+
                     let poll_result = async {
                         match client.read_all_standard().await {
                             Ok(blocks) => {
@@ -392,6 +451,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(60));
     }
+}
+
+/// Group register writes into contiguous runs that can be sent as
+/// a single Modbus write-multiple-registers command.
+fn group_contiguous(writes: &[RegisterWrite]) -> Vec<Vec<&RegisterWrite>> {
+    if writes.is_empty() {
+        return Vec::new();
+    }
+    let mut groups: Vec<Vec<&RegisterWrite>> = Vec::new();
+    let mut current = vec![&writes[0]];
+    for w in &writes[1..] {
+        let prev = current.last().unwrap();
+        if w.address == prev.address + 1 {
+            current.push(w);
+        } else {
+            groups.push(current);
+            current = vec![w];
+        }
+    }
+    groups.push(current);
+    groups
 }
 
 // ---------------------------------------------------------------------------

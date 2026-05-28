@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::response::Json;
 use serde_json::{json, Value};
 
-use crate::inverter::encoder::ControlCommand;
+use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::poll::{AppState, PollSettings};
 use crate::modbus::registers::encode_hhmm;
 
@@ -20,6 +20,13 @@ fn ok_response(message: &str) -> Json<Value> {
 
 fn error_response(error: &str) -> Json<Value> {
     Json(json!({ "ok": false, "error": error }))
+}
+
+/// Queue register writes for execution by the poll loop.
+async fn queue_writes(state: &Arc<AppState>, writes: Vec<RegisterWrite>) {
+    let mut pw = state.pending_writes.lock().await;
+    tracing::info!("Queued {} register write(s)", writes.len());
+    pw.push(writes);
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +156,7 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
 /// Body: `{"mode": "eco"}` or `{"mode": "timed_export"}`, etc.
 /// Optionally include `soc_reserve` (defaults to 4).
 pub async fn set_mode(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
     let mode_str = match body["mode"].as_str() {
@@ -170,6 +177,7 @@ pub async fn set_mode(
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("Mode command encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
             ok_response(&format!("Mode set to {}", mode_str))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -178,33 +186,90 @@ pub async fn set_mode(
 
 /// POST /api/control/charge-slot — configure a charge schedule slot.
 ///
-/// Body: `{"slot": 1, "start_hour": 6, "start_minute": 0, "end_hour": 10, "end_minute": 0}`
+/// Body: `{"slot": 1, "start_hour": 6, "start_minute": 0, "end_hour": 10, "end_minute": 0,
+///         "enabled": true, "target_soc": 100}`
+///
+/// If `enabled` is false, the slot times are set to the disabled sentinel (60).
+/// `target_soc` sets the global charge target SOC register.
+/// Also updates `enable_charge` based on whether any charge slot remains active.
 pub async fn set_charge_slot(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
     let slot: u8 = match body["slot"].as_u64() {
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
+    if !(1..=2).contains(&slot) {
+        return error_response("Slot must be 1 or 2");
+    }
+
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
 
     let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
+    let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
-    let start = encode_hhmm(start_hour, start_minute);
-    let end = encode_hhmm(end_hour, end_minute);
+    let (start, end) = if enabled {
+        (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
+    } else {
+        // Disabled: set times to the sentinel value 60
+        (60, 60)
+    };
 
     let cmd = match slot {
         1 => ControlCommand::SetChargeSlot1 { start, end },
         2 => ControlCommand::SetChargeSlot2 { start, end },
-        _ => return error_response("Slot must be 1 or 2"),
+        _ => unreachable!(),
     };
 
     match cmd.encode() {
-        Ok(writes) => {
+        Ok(mut writes) => {
+            // If enabled and target_soc provided, also set the charge target SOC
+            if enabled && target_soc > 0 {
+                if let Ok(target_writes) =
+                    (ControlCommand::SetChargeTargetSoc { soc: target_soc as u16 }).encode()
+                {
+                    writes.extend(target_writes);
+                }
+            }
+
+            // Determine whether enable_charge should be on or off.
+            // Read the latest snapshot to check other slots' states,
+            // then factor in the slot we're about to write.
+            let any_enabled = {
+                let snap = state.latest_snapshot.lock().await;
+                match snap.as_ref() {
+                    Some(s) => {
+                        // Check all charge slots: are any enabled (other than this one)?
+                        let mut found_enabled = false;
+                        for (i, cs) in s.charge_slots.iter().enumerate() {
+                            let slot_idx = (slot - 1) as usize;
+                            if i == slot_idx {
+                                // This is the slot we're updating — use the new state
+                                if enabled {
+                                    found_enabled = true;
+                                }
+                            } else if cs.enabled {
+                                found_enabled = true;
+                            }
+                        }
+                        found_enabled
+                    }
+                    None => enabled, // No snapshot yet — just use this slot's state
+                }
+            };
+
+            if let Ok(enable_writes) =
+                (ControlCommand::SetEnableCharge { enabled: any_enabled }).encode()
+            {
+                writes.extend(enable_writes);
+            }
+
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
+            queue_writes(&state, writes).await;
             ok_response(&format!("Charge slot {} configured", slot))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -212,32 +277,75 @@ pub async fn set_charge_slot(
 }
 
 /// POST /api/control/discharge-slot — configure a discharge schedule slot.
+///
+/// Body: `{"slot": 1, "start_hour": 16, "start_minute": 0, "end_hour": 19, "end_minute": 0,
+///         "enabled": true}`
+///
+/// If `enabled` is false, the slot times are set to the disabled sentinel (60).
+/// Also updates `enable_discharge` based on whether any discharge slot remains active.
 pub async fn set_discharge_slot(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
     let slot: u8 = match body["slot"].as_u64() {
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
+    if !(1..=2).contains(&slot) {
+        return error_response("Slot must be 1 or 2");
+    }
+
+    let enabled = body["enabled"].as_bool().unwrap_or(true);
 
     let start_hour = body["start_hour"].as_u64().unwrap_or(0) as u8;
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
 
-    let start = encode_hhmm(start_hour, start_minute);
-    let end = encode_hhmm(end_hour, end_minute);
+    let (start, end) = if enabled {
+        (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
+    } else {
+        (60, 60)
+    };
 
     let cmd = match slot {
         1 => ControlCommand::SetDischargeSlot1 { start, end },
         2 => ControlCommand::SetDischargeSlot2 { start, end },
-        _ => return error_response("Slot must be 1 or 2"),
+        _ => unreachable!(),
     };
 
     match cmd.encode() {
-        Ok(writes) => {
+        Ok(mut writes) => {
+            // Determine whether enable_discharge should be on or off.
+            let any_enabled = {
+                let snap = state.latest_snapshot.lock().await;
+                match snap.as_ref() {
+                    Some(s) => {
+                        let mut found_enabled = false;
+                        for (i, ds) in s.discharge_slots.iter().enumerate() {
+                            let slot_idx = (slot - 1) as usize;
+                            if i == slot_idx {
+                                if enabled {
+                                    found_enabled = true;
+                                }
+                            } else if ds.enabled {
+                                found_enabled = true;
+                            }
+                        }
+                        found_enabled
+                    }
+                    None => enabled,
+                }
+            };
+
+            if let Ok(enable_writes) =
+                (ControlCommand::SetEnableDischarge { enabled: any_enabled }).encode()
+            {
+                writes.extend(enable_writes);
+            }
+
             tracing::info!("SetDischargeSlot {} encoded: {:?}", slot, writes);
+            queue_writes(&state, writes).await;
             ok_response(&format!("Discharge slot {} configured", slot))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -246,7 +354,7 @@ pub async fn set_discharge_slot(
 
 /// POST /api/control/reserve — set battery reserve SoC percentage.
 pub async fn set_reserve(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
     let soc: u16 = match body["soc"].as_u64() {
@@ -258,6 +366,7 @@ pub async fn set_reserve(
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetReserve encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
             ok_response(&format!("Battery reserve set to {}%", soc))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -266,7 +375,7 @@ pub async fn set_reserve(
 
 /// POST /api/control/charge-rate — set battery charge limit percentage.
 pub async fn set_charge_rate(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
     let limit: u16 = match body["limit"].as_u64() {
@@ -278,6 +387,7 @@ pub async fn set_charge_rate(
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetChargeLimit encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
             ok_response(&format!("Charge limit set to {}%", limit))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -286,7 +396,7 @@ pub async fn set_charge_rate(
 
 /// POST /api/control/discharge-rate — set battery discharge limit percentage.
 pub async fn set_discharge_rate(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<Value> {
     let limit: u16 = match body["limit"].as_u64() {
@@ -298,6 +408,7 @@ pub async fn set_discharge_rate(
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetDischargeLimit encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
             ok_response(&format!("Discharge limit set to {}%", limit))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
@@ -305,11 +416,12 @@ pub async fn set_discharge_rate(
 }
 
 /// POST /api/control/pause — pause the battery.
-pub async fn pause_battery(State(_state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cmd = ControlCommand::PauseBattery;
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("PauseBattery encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
             ok_response("Battery paused")
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
