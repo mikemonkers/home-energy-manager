@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-05-29
+
+### Fixed
+
+- **Live snapshot sanitization**: Garbled register values are now corrected *before*
+  reaching the frontend, not just filtered from history. When a reading is physically
+  impossible (battery power >10kW, SOC=0 with live power, SOC=100 while charging),
+  the previous known-good value is used instead. Warns to the log when corrections happen.
+- Covers: battery power, SOC, grid power, solar power, and home power — all clamped
+  to residential system limits with fallback to the previous snapshot.
+
 ## [0.5.4] - 2026-05-29
 
 ### Fixed

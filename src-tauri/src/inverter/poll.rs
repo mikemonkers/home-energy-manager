@@ -159,6 +159,76 @@ impl AppState {
 /// If `settings.serial` is empty the dongle serial is auto-discovered from
 /// the first response frame header and persisted to settings — only the host
 /// IP is required to connect.
+
+/// Sanitize a snapshot against physically impossible register values.
+/// Compares against the previous snapshot to detect and correct garbled
+/// readings before they reach the frontend or history database.
+fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot>) {
+    let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
+
+    // Battery power: reject impossible spikes (>10 kW)
+    if snap.battery_power.abs() > max_battery_power {
+        if let Some(p) = prev {
+            tracing::warn!(
+                raw = snap.battery_power,
+                prev = p.battery_power,
+                "Battery power out of range — using previous value"
+            );
+            snap.battery_power = p.battery_power;
+        } else {
+            snap.battery_power = 0;
+        }
+    }
+
+    // SOC: if 0 but power is flowing, clearly a garbled register
+    if snap.soc == 0 && (snap.solar_power > 0 || snap.battery_power != 0 || snap.grid_power != 0) {
+        if let Some(p) = prev {
+            tracing::warn!(prev_soc = p.soc, "SOC=0 with live power — using previous SOC");
+            snap.soc = p.soc;
+        }
+    }
+
+    // SOC: if 100 but battery is actively charging at high power, impossible
+    if snap.soc == 100 && snap.battery_power > 500 {
+        if let Some(p) = prev {
+            tracing::warn!(prev_soc = p.soc, "SOC=100 while charging >500W — using previous SOC");
+            snap.soc = p.soc;
+        }
+    }
+
+    // Grid power: reject impossible spikes (>25 kW for a residential supply)
+    let max_grid_power: i32 = 25_000;
+    if snap.grid_power.abs() > max_grid_power {
+        if let Some(p) = prev {
+            tracing::warn!(raw = snap.grid_power, prev = p.grid_power, "Grid power out of range — using previous");
+            snap.grid_power = p.grid_power;
+        } else {
+            snap.grid_power = 0;
+        }
+    }
+
+    // Solar power: reject impossible spikes (>20 kW residential)
+    let max_solar_power: i32 = 20_000;
+    if snap.solar_power > max_solar_power {
+        if let Some(p) = prev {
+            tracing::warn!(raw = snap.solar_power, prev = p.solar_power, "Solar power out of range — using previous");
+            snap.solar_power = p.solar_power;
+        } else {
+            snap.solar_power = 0;
+        }
+    }
+
+    // Home power: reject impossible spikes (>25 kW)
+    if snap.home_power.abs() > max_grid_power {
+        if let Some(p) = prev {
+            tracing::warn!(raw = snap.home_power, prev = p.home_power, "Home power out of range — using previous");
+            snap.home_power = p.home_power;
+        } else {
+            snap.home_power = 0;
+        }
+    }
+}
+
 pub async fn run_poll_loop(state: Arc<AppState>) {
     let mut backoff = Duration::from_secs(5);
 
@@ -372,6 +442,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // Store latest snapshot.
+                                // Sanitize against physically impossible values first.
+                                {
+                                    let prev = state.latest_snapshot.lock().await;
+                                    sanitize_snapshot(&mut snapshot, prev.as_ref());
+                                }
+
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;
                                     *latest = Some(snapshot.clone());
@@ -381,19 +457,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let _ = state.tx.send(PollMessage::Snapshot(snapshot.clone()));
 
                                 // Persist to history database.
-                                // Skip if telemetry looks garbled:
-                                //  - SOC=0 but power flows are live (bad IR(59))
-                                //  - SOC=100 but battery is actively charging at high power
+                                // The snapshot has already been sanitized, so skip
+                                // only if SOC is still 0 (no previous fallback available).
                                 {
                                     let h = state.history.lock().await;
                                     if let Some(ref db) = *h {
-                                        let soc_suspicious = (snapshot.soc == 0
-                                            && (snapshot.solar_power > 0
-                                                || snapshot.battery_power != 0
-                                                || snapshot.grid_power != 0))
-                                            || (snapshot.soc == 100
-                                                && snapshot.battery_power > 500);
-                                        if !soc_suspicious {
+                                        if snapshot.soc > 0 {
                                             db.insert_reading(&snapshot);
                                         }
                                     }
