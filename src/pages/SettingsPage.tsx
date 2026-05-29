@@ -164,21 +164,21 @@ export default function SettingsPage() {
         </div>
 
         <label className="flex flex-col gap-1">
-          <span className="text-text-secondary text-xs font-sans">Inverter IP</span>
-          <div className="row" style={{ display: 'flex', gap: '0.5rem' }}>
-          <input
-            type="text"
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
-            placeholder="192.168.x.x"
-            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-          />
-          <input
-            type="number"
-            value={port}
-            onChange={(e) => setPort(Number(e.target.value))}
-            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors w-32"
-          />
+          <span className="text-text-secondary text-xs font-sans">Inverter Address</span>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={host}
+              onChange={(e) => setHost(e.target.value)}
+              placeholder="192.168.x.x"
+              className="min-w-0 flex-1 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
+            <input
+              type="number"
+              value={port}
+              onChange={(e) => setPort(Number(e.target.value))}
+              className="w-[5.5em] shrink-0 bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
           </div>
         </label>
 
