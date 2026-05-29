@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { apiGet, apiPost, getApiBase, isTauri } from '../lib/api';
+import { apiGet, apiPost, getApiBase } from '../lib/api';
 import type { PollSettings, DiscoveredInverter } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
+import { isTauri } from '../lib/api';
 
 export default function SettingsPage() {
   const { connectionState, connectedHost } = useInverterStore();
@@ -18,6 +19,10 @@ export default function SettingsPage() {
 
   // Refresh interval
   const [intervalSecs, setIntervalSecs] = useState(60);
+
+  // Tariffs
+  const [importTariff, setImportTariff] = useState(0.285);
+  const [exportTariff, setExportTariff] = useState(0.15);
 
   // General
   const [saving, setSaving] = useState(false);
@@ -39,6 +44,8 @@ export default function SettingsPage() {
         setPort(s.port ?? 8899);
         setSerial(s.serial ?? '');
         setIntervalSecs(s.interval_secs ?? 60);
+        setImportTariff(s.import_tariff ?? 0.285);
+        setExportTariff(s.export_tariff ?? 0.15);
         setSettingsLoaded(true);
       } catch {
         setSettingsLoaded(true);
@@ -70,6 +77,18 @@ export default function SettingsPage() {
     } catch {
       flash('Failed to update interval', false);
     }
+  };
+
+  // Save tariffs
+  const handleTariffSave = async () => {
+    setSaving(true);
+    try {
+      await apiPost('/api/settings', { import_tariff: importTariff, export_tariff: exportTariff });
+      flash('Tariff rates saved', true);
+    } catch {
+      flash('Failed to save tariffs', false);
+    }
+    setSaving(false);
   };
 
   // Discover
@@ -268,7 +287,46 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* ─── Section 4: Desktop-only ─── */}
+      {/* ─── Section 4: Energy Tariffs ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">Energy Tariffs</h2>
+        <p className="text-text-secondary text-xs font-sans">
+          Used for cost calculations on the History page
+        </p>
+        <div className="grid grid-cols-2 gap-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-text-secondary text-xs font-sans">Import (£/kWh)</span>
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              value={importTariff}
+              onChange={(e) => setImportTariff(Number(e.target.value))}
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-text-secondary text-xs font-sans">Export (£/kWh)</span>
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              value={exportTariff}
+              onChange={(e) => setExportTariff(Number(e.target.value))}
+              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+            />
+          </label>
+        </div>
+        <button
+          onClick={handleTariffSave}
+          disabled={saving}
+          className="bg-flow-active text-bg-base font-sans font-semibold text-sm px-5 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity self-start"
+        >
+          {saving ? 'Saving…' : 'Save Tariffs'}
+        </button>
+      </section>
+
+      {/* ─── Section 5: Desktop-only ─── */}
       {isTauri && (
         <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
           <h2 className="text-text-primary text-lg font-semibold font-sans">Desktop Settings</h2>
@@ -297,7 +355,7 @@ export default function SettingsPage() {
         </section>
       )}
 
-      {/* ─── Section 5: About ─── */}
+      {/* ─── Section 6: About ─── */}
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-2">
         <h2 className="text-text-primary text-lg font-semibold font-sans">About</h2>
 

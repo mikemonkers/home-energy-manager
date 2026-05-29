@@ -29,6 +29,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/settings",
             get(api::get_settings).post(api::update_settings),
         )
+        .route("/api/history", get(api::get_history))
         // Control endpoints
         .route("/api/control/mode", post(api::set_mode))
         .route("/api/control/charge-slot", post(api::set_charge_slot))

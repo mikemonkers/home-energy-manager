@@ -1,9 +1,11 @@
 //! REST API routes and handlers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Json;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
@@ -58,15 +60,17 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// GET /api/settings
-pub async fn get_settings(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let settings = state.settings.lock().await;
+pub async fn get_settings(State(_state): State<Arc<AppState>>) -> Json<Value> {
+    let settings = crate::settings::Settings::load();
     Json(json!({
         "ok": true,
         "data": {
             "host": settings.host,
             "port": settings.port,
             "serial": settings.serial,
-            "interval_secs": settings.interval_secs,
+            "interval_secs": settings.poll_interval,
+            "import_tariff": settings.import_tariff,
+            "export_tariff": settings.export_tariff,
         }
     }))
 }
@@ -100,6 +104,20 @@ pub async fn update_settings(
         settings.interval_secs = incoming.interval_secs;
     }
 
+    // Update tariffs if provided
+    let import_tariff = body
+        .get("import_tariff")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| {
+            crate::settings::Settings::load().import_tariff
+        });
+    let export_tariff = body
+        .get("export_tariff")
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| {
+            crate::settings::Settings::load().export_tariff
+        });
+
     // Bump version so the poll loop notices the change and reconnects.
     settings.version = settings.version.wrapping_add(1);
 
@@ -110,6 +128,8 @@ pub async fn update_settings(
         serial: settings.serial.clone(),
         poll_interval: settings.interval_secs,
         auto_connect: true,
+        import_tariff,
+        export_tariff,
     };
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
@@ -429,6 +449,67 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
             ok_response("Battery paused")
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// History endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct HistoryQuery {
+    /// Time range shorthand: "1h", "6h", "24h", "7d", "30d", "6m", "1y"
+    pub range: Option<String>,
+    /// Comma-separated field names
+    pub fields: Option<String>,
+    /// Number of windows to page back (default 0)
+    pub offset: Option<i64>,
+}
+
+/// GET /api/history — aggregated time-series data for charts.
+///
+/// Query params: `range`, `fields`, `offset`.
+/// Returns `{ok: true, data: {field: [{t, v}, ...]}}`.
+pub async fn get_history(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HistoryQuery>,
+) -> Json<Value> {
+    let range_str = params.range.as_deref().unwrap_or("24h");
+    let fields_str = params.fields.as_deref().unwrap_or("soc");
+    let offset = params.offset.unwrap_or(0);
+
+    let (range_secs, bucket_secs) = match range_str {
+        "1h" => (3600, 30),
+        "6h" => (3600 * 6, 60),
+        "24h" => (86400, 300),
+        "7d" => (86400 * 7, 1800),
+        "30d" => (86400 * 30, 7200),
+        "6m" => (86400 * 180, 43200),
+        "1y" => (86400 * 365, 86400),
+        _ => return error_response("Invalid range. Use: 1h, 6h, 24h, 7d, 30d, 6m, 1y"),
+    };
+
+    let fields: Vec<String> = fields_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if fields.is_empty() {
+        return error_response("No fields specified");
+    }
+
+    let history = state.history.lock().await;
+    match history.as_ref() {
+        Some(db) => match db.query_history(range_secs, bucket_secs, offset, &fields) {
+            Ok(data) => {
+                let map: HashMap<String, Value> =
+                    data.into_iter().collect();
+                Json(json!({ "ok": true, "data": map }))
+            }
+            Err(e) => error_response(&e),
+        },
+        None => error_response("History database not available"),
     }
 }
 

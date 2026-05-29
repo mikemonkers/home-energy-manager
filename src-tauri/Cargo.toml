@@ -1,6 +1,6 @@
 [package]
 name = "givenergy-local"
-version = "0.4.0"
+version = "0.5.0"
 description = "GivEnergy inverter local monitoring and control"
 authors = ["Stuart Harding"]
 license = "MIT"
@@ -42,10 +42,13 @@ anyhow = "1"
 
 # Tracing
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Futures utilities (join_all for discovery)
 futures-util = "0.3"
 
 # Network interface detection
 local-ip-address = "0.6"
+
+# SQLite for history storage
+rusqlite = { version = "0.32", features = ["bundled"] }
