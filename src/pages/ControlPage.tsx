@@ -228,7 +228,7 @@ export default function ControlPage() {
   const { snapshot } = useInverterStore();
   const modeAction = useAction();
 
-  // Battery limits local state
+  // Battery limits local state (synced from snapshot)
   const [reserveSoc, setReserveSoc] = useState<number>(snapshot?.battery_reserve ?? 4);
   const [chargeRate, setChargeRate] = useState<number>(snapshot?.charge_rate ?? 100);
   const [dischargeRate, setDischargeRate] = useState<number>(snapshot?.discharge_rate ?? 100);

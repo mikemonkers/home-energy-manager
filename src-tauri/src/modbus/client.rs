@@ -510,7 +510,12 @@ impl ModbusClient {
             &payload,
         );
 
-        let max_attempts = 30u8;
+        // GivEnergy dongles return exception code 67 (busy) frequently.
+        // We retry a few times with moderate delays, but fail fast rather
+        // than blocking the entire poll loop.  Some registers (e.g. HR 32)
+        // appear to be persistently unwritable on certain inverter models —
+        // no amount of retrying will help.
+        let max_attempts: u8 = 6;
         let mut need_resend = true;
 
         for attempt in 0..max_attempts {
@@ -535,14 +540,11 @@ impl ModbusClient {
             if decoded.function >= 0x80 {
                 let code = decoded.payload.first().copied().unwrap_or(0);
                 if code == 67 && attempt + 1 < max_attempts {
-                    // Exponential backoff: 1s, 2s, 4s, 8s, ... up to 10s max.
-                    // The dongle needs increasing recovery time for adjacent writes.
-                    let delay_secs = (1u64 << attempt.min(3)).min(10);
                     tracing::debug!(
-                        "Write at {register} got exception 67 (busy), retrying ({}/{}) after {delay_secs}s",
+                        "Write at {register} got exception 67 (busy), retrying ({}/{})",
                         attempt + 1, max_attempts
                     );
-                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                     need_resend = true;
                     continue;
                 }

@@ -51,8 +51,14 @@ pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
     let app = create_router(state);
     let addr = format!("{}:{}", bind_addr, port);
     tracing::info!("HTTP server starting on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .expect("Failed to bind HTTP server");
-    axum::serve(listener, app).await.expect("HTTP server error");
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind HTTP server on {}: {e}", addr);
+            return;
+        }
+    };
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("HTTP server error: {e}");
+    }
 }

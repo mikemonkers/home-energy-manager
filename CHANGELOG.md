@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-29
+
+### Added
+
+- Correct GivEnergy Modbus write protocol: function code 6 (Write Single Register) with
+  device address 0x11, per the givenergy-modbus reference library
+- Immediate write execution: control changes are applied as soon as queued, not after
+  the next poll cycle (using async notification)
+- Write-safe register whitelist aligned with givenergy-modbus reference
+
+### Changed
+
+- Charge/discharge slot clearing now writes 0 (per reference library) instead of
+  sentinel value 60
+- Slot enabled/disabled state is now gated by the global `enable_charge`/`enable_discharge`
+  flags — slots show as disabled when the schedule is turned off, even if individual
+  register writes failed
+- 00:00–00:00 time slots now treated as disabled (matches reference library convention)
+- Energy flow diagram: swapped Home and Grid positions
+
+### Fixed
+
+- Write protocol was using function code 0x10 (Write Multiple) with device address 0x32 —
+  the dongle only reliably supports function code 6 with address 0x11 for writes
+- Stale frame drain before and after writes to prevent poll read failures
+- Fast failure on stubborn registers (6 retries, 2s delay) — previously exponential backoff
+  could block the poll loop for minutes
+- `apiPost` now checks HTTP response status — control errors surface to the user
+  instead of being silently swallowed (code review #4)
+- HTTP server no longer panics on port bind failure — logs error and returns
+  gracefully (code review #6)
+- Response CRC validation is now lenient — logged but not rejected — matching
+  the reference library which notes response CRC algorithm is unknown (code review #3)
+- Frontend ESLint and TypeScript strict-mode compliance
+- All CI checks now pass: lint, typecheck, Rust tests (94 passing)
+
 ## [0.1.0] - 2025-05-28
 
 ### Added

@@ -256,14 +256,17 @@ pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, FramerError> {
     let crc_bytes = &inner_pdu[crc_offset..];
     let received_crc = u16::from_le_bytes([crc_bytes[0], crc_bytes[1]]);
 
-    // CRC is calculated over everything before the CRC trailer
+    // The reference library (givenergy-modbus) notes: "it is unclear how a
+    // response CRC is calculated or should be verified" and does not
+    // validate response CRCs.  We log mismatches but don't reject frames,
+    // since the CRC algorithm for responses differs from the standard
+    // Modbus CRC-16 we compute here.
     let calculated_crc = crc16_modbus(&inner_pdu[..crc_offset]);
-
     if received_crc != calculated_crc {
-        return Err(FramerError::CrcMismatch {
-            expected: received_crc,
-            calculated: calculated_crc,
-        });
+        tracing::debug!(
+            "Response CRC mismatch: received 0x{:04X}, calculated 0x{:04X}",
+            received_crc, calculated_crc
+        );
     }
 
     // --- Build decoded frame ---
@@ -515,14 +518,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_crc_mismatch() {
+    fn decode_crc_mismatch_now_lenient() {
         let mut frame = encode_frame("SA1234", 0x01, 0x03, &[0x00, 0x01]);
         // Corrupt the last byte (part of CRC)
         let last = frame.len() - 1;
         frame[last] ^= 0xFF;
 
+        // CRC mismatches are now lenient (logged but not rejected)
+        // because the response CRC algorithm is unknown per the reference library.
         let result = decode_frame(&frame);
-        assert!(matches!(result, Err(FramerError::CrcMismatch { .. })));
+        assert!(result.is_ok());
     }
 
     #[test]

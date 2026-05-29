@@ -12,8 +12,8 @@ const H = 425;
 const NODES = {
   inverter: { cx: W / 2, cy: 207, color: '#22D3EE', label: 'Inverter' },
   solar:    { cx: W / 2, cy: 50,  color: '#F59E0B', label: 'Solar' },
-  grid:     { cx: 55,    cy: 207, color: '#EF4444', label: 'Grid' },
-  home:     { cx: W - 55, cy: 207, color: '#14B8A6', label: 'Home' },
+  home:     { cx: 55,    cy: 207, color: '#14B8A6', label: 'Home' },
+  grid:     { cx: W - 55, cy: 207, color: '#EF4444', label: 'Grid' },
   battery:  { cx: W / 2, cy: 365, color: '#6366F1', label: 'Battery' },
 };
 

@@ -206,6 +206,21 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         raw.battery_soc_reserve,
     );
 
+    // Apply global enable flags to slot states.
+    // If enable_charge is off, all charge slots show as disabled regardless
+    // of their time values (which may be stale if individual register writes
+    // failed). Likewise for enable_discharge.
+    if !snap.enable_charge {
+        for slot in &mut snap.charge_slots {
+            slot.enabled = false;
+        }
+    }
+    if !snap.enable_discharge {
+        for slot in &mut snap.discharge_slots {
+            slot.enabled = false;
+        }
+    }
+
     snap
 }
 
@@ -548,6 +563,8 @@ mod tests {
         assert!(!snap.enable_discharge);
 
         // Mode: eco=1, discharge=false, reserve=4 (!=100) → Eco
+        // Note: discharge slots have valid times but show disabled because
+        // enable_discharge is false (global override).
         assert_eq!(snap.battery_mode, BatteryMode::Eco);
 
         // Home power: solar - battery_power - grid_power
@@ -578,19 +595,10 @@ mod tests {
         // Charge slot 3: not configured → disabled
         assert!(!snap.charge_slots[2].enabled);
 
-        // Discharge slot 1: 16:00–19:00
-        assert!(snap.discharge_slots[0].enabled);
-        assert_eq!(snap.discharge_slots[0].start_hour, 16);
-        assert_eq!(snap.discharge_slots[0].start_minute, 0);
-        assert_eq!(snap.discharge_slots[0].end_hour, 19);
-        assert_eq!(snap.discharge_slots[0].end_minute, 0);
-
-        // Discharge slot 2: 17:00–20:00
-        assert!(snap.discharge_slots[1].enabled);
-        assert_eq!(snap.discharge_slots[1].start_hour, 17);
-        assert_eq!(snap.discharge_slots[1].start_minute, 0);
-        assert_eq!(snap.discharge_slots[1].end_hour, 20);
-        assert_eq!(snap.discharge_slots[1].end_minute, 0);
+        // Discharge slots: have valid times (16:00–19:00, 17:00–20:00)
+        // but show as disabled because enable_discharge = false.
+        assert!(!snap.discharge_slots[0].enabled);
+        assert!(!snap.discharge_slots[1].enabled);
     }
 
     #[test]
