@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-05-29
+
+### Fixed
+
+- **Battery SOC graph spikes to zero**: IR(59) intermittently returns 0 from the inverter.
+  Now uses the more reliable BMS module SOC (IR 100) when available.
+- **History recording of garbage data**: Snapshots with SOC=0 but live power telemetry
+  are no longer written to the history database.
+- **Chart rendering of missing data**: Frontend now uses `connectNulls` and treats missing
+  data points as gaps instead of zero, preventing visual dips.
+- **Purged 51 bad zero-SOC readings** from existing history database (52% of all records).
+
 ## [0.5.1] - 2026-05-29
 
 ### Fixed

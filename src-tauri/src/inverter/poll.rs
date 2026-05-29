@@ -309,6 +309,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             &data, 0, &mut snapshot, "",
                                         );
                                         tracing::debug!("Battery #1 BMS read OK");
+
+                                        // Override SOC with BMS module SOC (IR 100) which is
+                                        // more reliable than the inverter-level IR(59) that
+                                        // intermittently returns 0.
+                                        if let Some(bms) = snapshot.battery_modules.first() {
+                                            if bms.soc > 0 {
+                                                snapshot.soc = bms.soc;
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::debug!("Battery #1 BMS read skipped: {e}");
@@ -355,10 +364,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let _ = state.tx.send(PollMessage::Snapshot(snapshot.clone()));
 
                                 // Persist to history database.
+                                // Skip if SOC is 0 but other telemetry is live — this
+                                // indicates a garbled register read, not an empty battery.
                                 {
                                     let h = state.history.lock().await;
                                     if let Some(ref db) = *h {
-                                        db.insert_reading(&snapshot);
+                                        let appears_valid = snapshot.soc > 0
+                                            || (snapshot.solar_power == 0
+                                                && snapshot.battery_power == 0
+                                                && snapshot.grid_power == 0);
+                                        if appears_valid {
+                                            db.insert_reading(&snapshot);
+                                        }
                                     }
                                 }
 

@@ -223,11 +223,12 @@ function ChartCard({ chart, data, range }: {
   });
 
   const seriesData = merged.map((row) => {
-    const out: Record<string, number> = { t: row.t };
+    const out: Record<string, number | null> = { t: row.t };
     chart.fields.forEach((f, i) => {
       const name = seriesNames[i];
       const raw = row[f.field];
-      out[name] = raw !== undefined && f.transform ? f.transform(raw) : (raw ?? 0);
+      const value = raw !== undefined && f.transform ? f.transform(raw) : (raw ?? null);
+      out[name] = value ?? null;
     });
     return out;
   });
@@ -295,6 +296,7 @@ function ChartCard({ chart, data, range }: {
               strokeWidth={2}
               dot={false}
               isAnimationActive={false}
+              connectNulls
             />
           ))}
         </AreaChart>
