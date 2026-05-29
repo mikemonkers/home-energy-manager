@@ -19,6 +19,20 @@ pub struct Settings {
     pub poll_interval: u64,
     /// Whether to auto-connect on startup.
     pub auto_connect: bool,
+    /// Import electricity tariff in £/kWh.
+    #[serde(default = "default_import_tariff")]
+    pub import_tariff: f64,
+    /// Export electricity tariff in £/kWh.
+    #[serde(default = "default_export_tariff")]
+    pub export_tariff: f64,
+}
+
+fn default_import_tariff() -> f64 {
+    0.285
+}
+
+fn default_export_tariff() -> f64 {
+    0.15
 }
 
 impl Default for Settings {
@@ -29,6 +43,8 @@ impl Default for Settings {
             serial: String::new(),
             poll_interval: 60,
             auto_connect: true,
+            import_tariff: default_import_tariff(),
+            export_tariff: default_export_tariff(),
         }
     }
 }
@@ -106,6 +122,8 @@ mod tests {
             serial: "TEST123".to_string(),
             poll_interval: 10,
             auto_connect: false,
+            import_tariff: 0.30,
+            export_tariff: 0.15,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -128,6 +146,8 @@ mod tests {
             serial: "TEST99".to_string(),
             poll_interval: 15,
             auto_connect: true,
+            import_tariff: 0.285,
+            export_tariff: 0.15,
         };
 
         // We can't easily override the settings path for testing,

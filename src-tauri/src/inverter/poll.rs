@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use tokio::sync::{broadcast, Mutex, Notify};
 
+use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
 use crate::inverter::encoder::RegisterWrite;
 use crate::inverter::model::InverterSnapshot;
@@ -115,6 +116,8 @@ pub struct AppState {
     pub pending_writes: Arc<Mutex<Vec<Vec<RegisterWrite>>>>,
     /// Signaled when new writes are queued so the poll loop wakes immediately.
     pub write_notify: Arc<Notify>,
+    /// SQLite history database (set after startup).
+    pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
 }
 
 impl AppState {
@@ -131,6 +134,7 @@ impl AppState {
             settings: Arc::new(Mutex::new(PollSettings::default())),
             pending_writes: Arc::new(Mutex::new(Vec::new())),
             write_notify: Arc::new(Notify::new()),
+            history: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -272,6 +276,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         serial: discovered,
                                         poll_interval: settings.interval_secs,
                                         auto_connect: true,
+                                        import_tariff: crate::settings::Settings::default().import_tariff,
+                                        export_tariff: crate::settings::Settings::default().export_tariff,
                                     };
                                     if let Err(e) = persist.save() {
                                         tracing::warn!("Failed to persist discovered serial: {e}");
@@ -346,7 +352,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // Broadcast to WebSocket subscribers.
-                                let _ = state.tx.send(PollMessage::Snapshot(snapshot));
+                                let _ = state.tx.send(PollMessage::Snapshot(snapshot.clone()));
+
+                                // Persist to history database.
+                                {
+                                    let h = state.history.lock().await;
+                                    if let Some(ref db) = *h {
+                                        db.insert_reading(&snapshot);
+                                    }
+                                }
 
                                 Ok(())
                             }

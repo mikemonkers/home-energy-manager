@@ -66,6 +66,8 @@ export interface PollSettings {
   port: number;
   serial: string;
   interval_secs: number;
+  import_tariff: number;
+  export_tariff: number;
 }
 
 export interface DiscoveredInverter {
@@ -88,3 +90,10 @@ export interface WsConnectionMessage {
   state: ConnectionState;
   host: string;
 }
+
+export interface TimePoint {
+  t: number;
+  v: number;
+}
+
+export type HistoryRange = '1h' | '6h' | '24h' | '7d' | '30d' | '6m' | '1y';

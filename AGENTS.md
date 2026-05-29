@@ -23,7 +23,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
 | `npm run preview` | `vite preview` |
-| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (94 tests) |
+| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (98 tests) |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
 
@@ -46,7 +46,9 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 
 ### Backend (`src-tauri/src/`)
 
-- **`lib.rs`** — Tauri app setup; spawns Axum server (port 7337) + Modbus polling loop
+- **`lib.rs`** — Tauri app setup + headless CLI entry; spawns Axum server (port 7337) + Modbus polling loop
+- **`history/`** — SQLite-backed history storage (`~/.givenergy-local/history.db`)
+  - `mod.rs` — `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG
 - **`inverter/`** — data model, register decode/encode, discovery, poll loop
   - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`
   - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; applies global `enable_charge`/`enable_discharge` flags to slot states
@@ -72,6 +74,7 @@ Central `Arc<Mutex<…>>`-based state shared between poll loop, API handlers, an
 - `pending_writes` — queue of `Vec<RegisterWrite>` batches from the API
 - `write_notify` — `Notify` that wakes the poll loop immediately when writes are queued
 - `settings` — live `PollSettings` (host, port, serial, interval)
+- `history` — `HistoryDb` for time-series storage
 
 ## Modbus write protocol
 
@@ -105,6 +108,25 @@ No integration tests or test fixtures exist. The Modbus client tests use a mock 
 - `dist/` — Vite output (frontend)
 - `src-tauri/target/` — Rust build output
 - `node_modules/.tmp/tsconfig.*.tsbuildinfo` — TypeScript incremental build info
+
+## Headless server mode (Linux)
+
+Run without a Tauri window — just the Axum HTTP/WS server and Modbus poll loop. Ideal for Raspberry Pi or always-on servers.
+
+```bash
+# Build the frontend first
+npm run build
+
+# Build the binary
+cd src-tauri && cargo build --release
+
+# Run headless
+./target/release/givenergy-local --headless
+./target/release/givenergy-local --headless --port 8080
+./target/release/givenergy-local --headless --dist /path/to/dist
+```
+
+The `--dist` flag specifies the frontend static files directory. Search order: `--dist` arg > `./dist/` (cwd) > `<exe_dir>/dist/` > `/usr/share/givenergy-local/dist/`. If no dist is found, runs API-only (REST + WebSocket still work).
 
 ## Release process
 

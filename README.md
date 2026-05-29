@@ -66,6 +66,15 @@ cargo install tauri-cli
 cd src-tauri && cargo tauri dev
 ```
 
+## Build and Running Headless
+
+```bash
+npm install
+cargo install tauri-cli
+cd src-tauri && cargo nuild --release
+nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
+```
+
 See [DESIGN.md](./DESIGN.md) for full build instructions, testing, and architecture documentation.
 
 ## Credits

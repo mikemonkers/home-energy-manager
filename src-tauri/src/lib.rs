@@ -1,16 +1,19 @@
+pub mod history;
 pub mod inverter;
 pub mod modbus;
 pub mod server;
 pub mod settings;
 
+use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};
 use server::{start_server, start_server_with_frontend};
 use settings::Settings;
 use std::sync::Arc;
-use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::Manager;
+
     tauri::Builder::default()
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -38,6 +41,23 @@ pub fn run() {
                 ps.port = app_settings.port;
                 ps.serial = app_settings.serial.clone();
                 ps.interval_secs = app_settings.poll_interval;
+            }
+
+            // Open history database
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let db_path = std::path::PathBuf::from(home)
+                .join(".givenergy-local")
+                .join("history.db");
+            let history_db = match HistoryDb::open(&db_path) {
+                Ok(db) => Arc::new(db),
+                Err(e) => {
+                    tracing::error!("Failed to open history database: {e}");
+                    return Ok(());
+                }
+            };
+            {
+                let mut h = state.history.blocking_lock();
+                *h = Some(history_db.clone());
             }
 
             // Spawn the HTTP server on LAN interface, port 7337.
@@ -88,4 +108,143 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ---------------------------------------------------------------------------
+// Headless server mode (no Tauri window)
+// ---------------------------------------------------------------------------
+
+/// Parse a `--port <N>` argument from the CLI args.
+fn parse_port(args: &[String]) -> u16 {
+    for i in 0..args.len() {
+        if args[i] == "--port" && i + 1 < args.len() {
+            if let Ok(p) = args[i + 1].parse::<u16>() {
+                return p;
+            }
+        }
+    }
+    7337
+}
+
+/// Parse a `--dist <path>` argument from the CLI args.
+fn parse_dist(args: &[String]) -> Option<String> {
+    for i in 0..args.len() {
+        if args[i] == "--dist" && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+    }
+    None
+}
+
+/// Resolve the frontend dist directory for headless mode.
+///
+/// Search order:
+/// 1. `--dist <path>` CLI argument
+/// 2. `./dist/` relative to the current working directory
+/// 3. `<exe_dir>/dist/` relative to the binary location
+/// 4. `/usr/share/givenergy-local/dist/` system path
+fn resolve_dist_dir(args: &[String]) -> Option<String> {
+    if let Some(path) = parse_dist(args) {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+        tracing::warn!("--dist path does not exist: {path}");
+    }
+
+    let candidates: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("dist"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.join("dist")))
+            .unwrap_or_default(),
+        std::path::PathBuf::from("/usr/share/givenergy-local/dist"),
+    ];
+
+    for candidate in candidates {
+        if candidate.join("index.html").exists() {
+            let path = candidate.to_string_lossy().to_string();
+            tracing::info!("Found frontend dist at: {path}");
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Run the server in headless mode — no Tauri window, just the
+/// Axum HTTP/WS server and the Modbus polling loop.
+///
+/// Usage: `givenergy-local --headless [--port 7337] [--dist /path/to/dist]`
+pub fn run_headless(args: &[String]) {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let port = parse_port(args);
+    tracing::info!("GivEnergy Local starting in headless mode on port {port}");
+
+    // Load settings
+    let app_settings = Settings::load();
+    tracing::info!(
+        "Loaded settings: host={}, serial={}",
+        app_settings.host,
+        app_settings.serial
+    );
+
+    // Create tokio runtime
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+    rt.block_on(async {
+        // Create shared app state
+        let state = Arc::new(AppState::new());
+        {
+            let mut ps = state.settings.lock().await;
+            ps.host = app_settings.host.clone();
+            ps.port = app_settings.port;
+            ps.serial = app_settings.serial.clone();
+            ps.interval_secs = app_settings.poll_interval;
+        }
+
+        // Open history database
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let db_path = std::path::PathBuf::from(home)
+            .join(".givenergy-local")
+            .join("history.db");
+        let history_db = match HistoryDb::open(&db_path) {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                tracing::error!("Failed to open history database: {e}");
+                return;
+            }
+        };
+        {
+            let mut h = state.history.lock().await;
+            *h = Some(history_db);
+        }
+
+        // Spawn the poll loop
+        let poll_state = state.clone();
+        tokio::spawn(async move {
+            run_poll_loop(poll_state).await;
+        });
+
+        // Start the HTTP server
+        let server_state = state.clone();
+        match resolve_dist_dir(args) {
+            Some(dist_dir) => {
+                tracing::info!("Serving frontend from: {dist_dir}");
+                start_server_with_frontend(server_state, "0.0.0.0", port, dist_dir).await;
+            }
+            None => {
+                tracing::warn!(
+                    "No frontend dist directory found. Running API-only mode. \
+                     Specify --dist <path> or place dist/ next to the binary."
+                );
+                start_server(server_state, "0.0.0.0", port).await;
+            }
+        }
+    });
 }
