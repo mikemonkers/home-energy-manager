@@ -384,6 +384,25 @@ impl ModbusClient {
         Ok(all_values)
     }
 
+    /// Read registers at a specific slave address, without mutating `self.slave`.
+    ///
+    /// Used for battery BMS probing where we need to address different
+    /// slave addresses (0x33–0x37) without affecting the default slave (0x32)
+    /// used by the main poll cycle.
+    pub async fn read_registers_at_slave(
+        &mut self,
+        slave: u8,
+        register_type: RegisterType,
+        start: u16,
+        count: u16,
+    ) -> Result<Vec<u16>, ClientError> {
+        let original = self.slave;
+        self.slave = slave;
+        let result = self.read_registers(register_type, start, count).await;
+        self.slave = original;
+        result
+    }
+
     /// Maximum number of retries when a stale response is received.
     const MAX_STALE_RETRIES: u8 = 4;
 

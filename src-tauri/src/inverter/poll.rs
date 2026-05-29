@@ -314,8 +314,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     .iter()
                                     .enumerate()
                                 {
-                                    client.set_slave(addr);
-                                    match client.read_registers(
+                                    match client.read_registers_at_slave(
+                                        addr,
                                         crate::modbus::framer::RegisterType::Input,
                                         60,
                                         60,
@@ -338,9 +338,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         }
                                     }
                                 }
-
-                                // Reset slave address back to inverter default
-                                client.set_slave(0x32);
 
                                 // Store latest snapshot.
                                 {
