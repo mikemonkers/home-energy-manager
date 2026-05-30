@@ -66,6 +66,13 @@ export interface ScheduleSlot {
   target_soc: number;
 }
 
+export interface TariffConfig {
+  peak_rate: number;
+  off_peak_rate: number;
+  off_peak_start: string;
+  off_peak_end: string;
+}
+
 export interface PollSettings {
   host: string;
   port: number;
@@ -73,6 +80,8 @@ export interface PollSettings {
   interval_secs: number;
   import_tariff: number;
   export_tariff: number;
+  import_tariff_config: TariffConfig | null;
+  export_tariff_config: TariffConfig | null;
 }
 
 export interface DiscoveredInverter {

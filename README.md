@@ -32,6 +32,8 @@ GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapt
 - **Mode switching** — Eco, Timed Demand, Timed Export, and Pause modes
 - **SOC control** — adjust battery reserve level, charge/discharge power limits, and charge target
 - **Auto-discovery** — just enter your inverter's IP address; the serial number is detected automatically
+- **History & cost tracking** — 7 time-range charts for solar, battery, grid, and home energy, with configurable import/export tariffs (peak/off-peak)
+- **Developer console** — live log viewer for diagnostics (enable in Settings)
 
 ## Download
 

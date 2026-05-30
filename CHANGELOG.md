@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-05-30
+
+### Added
+
+- **Peak/off-peak tariff support**: Cost charts on the History page now support
+  separate peak and off-peak electricity rates with configurable time windows.
+  Settings page shows peak rate, off-peak rate, off-peak start time, and off-peak
+  end time for both import and export tariffs.
+- **Auto-winter persistence**: The original `enable_charge_target` and `target_soc`
+  register values are now persisted to disk before winter mode activates. If the
+  app restarts while winter mode is active, the original values are restored from
+  disk so they can be written back when the battery warms up.
+- **History time window alignment**: History queries now align to hour boundaries
+  (1h/6h ranges) or day boundaries (24h+ ranges) instead of using raw wall-clock
+  offsets, ensuring consistent data windows across page navigation.
+
+### Fixed
+
+- **Cost graph inflation**: Documented investigation (see AGENTS.md — Known issues).
+  Cost computation using cumulative `today_import_kwh` with AVG'd bucket values can
+  produce ~1000× inflated results due to corrupted register readings, data gaps,
+  and midnight rollover affecting bucket averages.
+
+### Changed
+
+- Window height reduced from 1160 to 1024 for better multi-monitor compatibility.
+- Tariff config now stored as structured objects (`TariffConfig` with peak/off-peak
+  rates and times) rather than a single flat rate, sent via `import_tariff_config`/
+  `export_tariff_config` in the settings API.
+
 ## [0.7.0] - 2026-05-30
 
 ### Added

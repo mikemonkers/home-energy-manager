@@ -6,6 +6,31 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+/// Tariff configuration with peak and off-peak rates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TariffConfig {
+    /// Peak rate in £/kWh.
+    pub peak_rate: f64,
+    /// Off-peak rate in £/kWh.
+    pub off_peak_rate: f64,
+    /// Off-peak start time in "HH:MM" format (24h).
+    pub off_peak_start: String,
+    /// Off-peak end time in "HH:MM" format (24h).
+    /// Can be before `off_peak_start` to indicate crossing midnight.
+    pub off_peak_end: String,
+}
+
+impl Default for TariffConfig {
+    fn default() -> Self {
+        Self {
+            peak_rate: 0.285,
+            off_peak_rate: 0.09,
+            off_peak_start: "00:30".to_string(),
+            off_peak_end: "05:30".to_string(),
+        }
+    }
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -41,6 +66,23 @@ pub struct Settings {
     /// Consecutive readings before state transitions.
     #[serde(default = "default_aw_debounce")]
     pub auto_winter_debounce_readings: u32,
+
+    /// Persisted `enable_charge_target` saved before winter mode activated.
+    /// `Some` means winter mode was active when the last state was saved.
+    #[serde(default)]
+    pub auto_winter_saved_enable_target: Option<bool>,
+    /// Persisted `target_soc` saved before winter mode activated.
+    #[serde(default)]
+    pub auto_winter_saved_target_soc: Option<u16>,
+
+    /// Full import tariff config with peak/off-peak rates and times.
+    /// Falls back to legacy `import_tariff` if `None`.
+    #[serde(default)]
+    pub import_tariff_config: Option<TariffConfig>,
+    /// Full export tariff config with peak/off-peak rates and times.
+    /// Falls back to legacy `export_tariff` if `None`.
+    #[serde(default)]
+    pub export_tariff_config: Option<TariffConfig>,
 }
 
 fn default_import_tariff() -> f64 {
@@ -79,6 +121,10 @@ impl Default for Settings {
             auto_winter_recovery_threshold: default_aw_recovery_threshold(),
             auto_winter_target_soc: default_aw_target_soc(),
             auto_winter_debounce_readings: default_aw_debounce(),
+            auto_winter_saved_enable_target: None,
+            auto_winter_saved_target_soc: None,
+            import_tariff_config: None,
+            export_tariff_config: None,
         }
     }
 }
@@ -151,6 +197,8 @@ mod tests {
         assert_eq!(s.auto_winter_recovery_threshold, 12.0);
         assert_eq!(s.auto_winter_target_soc, 80);
         assert_eq!(s.auto_winter_debounce_readings, 10);
+        assert_eq!(s.auto_winter_saved_enable_target, None);
+        assert_eq!(s.auto_winter_saved_target_soc, None);
     }
 
     #[test]
@@ -168,6 +216,10 @@ mod tests {
             auto_winter_recovery_threshold: 10.0,
             auto_winter_target_soc: 90,
             auto_winter_debounce_readings: 5,
+            auto_winter_saved_enable_target: Some(true),
+            auto_winter_saved_target_soc: Some(80),
+            import_tariff_config: None,
+            export_tariff_config: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -181,6 +233,8 @@ mod tests {
         assert_eq!(decoded.auto_winter_recovery_threshold, 10.0);
         assert_eq!(decoded.auto_winter_target_soc, 90);
         assert_eq!(decoded.auto_winter_debounce_readings, 5);
+        assert_eq!(decoded.auto_winter_saved_enable_target, Some(true));
+        assert_eq!(decoded.auto_winter_saved_target_soc, Some(80));
     }
 
     #[test]
@@ -202,6 +256,10 @@ mod tests {
             auto_winter_recovery_threshold: 12.0,
             auto_winter_target_soc: 80,
             auto_winter_debounce_readings: 10,
+            auto_winter_saved_enable_target: None,
+            auto_winter_saved_target_soc: None,
+            import_tariff_config: None,
+            export_tariff_config: None,
         };
 
         // We can't easily override the settings path for testing,

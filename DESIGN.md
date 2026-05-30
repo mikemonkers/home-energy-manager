@@ -133,8 +133,65 @@ pub struct AppState {
     pub settings: Arc<Mutex<PollSettings>>,
     pub pending_writes: Arc<Mutex<Vec<Vec<RegisterWrite>>>>,
     pub write_notify: Arc<Notify>,
+    pub history: Arc<Mutex<Option<Arc<HistoryDb>>>>,
+    pub log_ring: Arc<LogRing>,
+    pub connected_clients: Arc<parking_lot::Mutex<ConnectedClients>>,
+    pub auto_winter_config: Arc<Mutex<AutoWinterConfig>>,
+    pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
+    pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
 }
 ```
+
+## History Database
+
+SQLite-backed time-series storage at `~/.givenergy-local/history.db`. One row per poll cycle.
+
+### Schema (`readings` table)
+
+29 columns — timestamp (epoch seconds, PK) + all telemetry fields. Key energy columns:
+
+| Column | Type | Source Register | Description |
+|---|---|---|---|
+| `today_solar_kwh` | REAL | IR 17+19 (×0.1) | PV energy today (kWh) |
+| `today_import_kwh` | REAL | IR 26 (×0.1) | Grid import today (kWh) |
+| `today_export_kwh` | REAL | IR 25 (×0.1) | Grid export today (kWh) |
+| `today_charge_kwh` | REAL | IR 36 (×0.1) | Battery charge today (kWh) |
+| `today_discharge_kwh` | REAL | IR 37 (×0.1) | Battery discharge today (kWh) |
+| `today_consumption_kwh` | REAL | IR 35 (×0.1) | Home consumption today (kWh) |
+| `grid_power` | INTEGER | IR 30 | Instantaneous grid power (W, signed) |
+
+### History API
+
+`GET /api/history?range=24h&fields=soc,battery_power&offset=0`
+
+Returns time-bucketed AVG values per field:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "soc": [{ "t": 1717000000000, "v": 75 }, ...],
+    "battery_power": [{ "t": 1717000000000, "v": 800 }, ...]
+  }
+}
+```
+
+Buckets are aligned to hour/day boundaries. Query parameters:
+
+| Range | Bucket | `range` value |
+|---|---|---|
+| 1 hour | 30 seconds | `1h` |
+| 6 hours | 60 seconds | `6h` |
+| 24 hours | 5 minutes | `24h` |
+| 7 days | 30 minutes | `7d` |
+| 30 days | 2 hours | `30d` |
+| 6 months | 12 hours | `6m` |
+| 1 year | 24 hours | `1y` |
+
+### Cost charts (known issue)
+
+See [AGENTS.md](./AGENTS.md) — Known issues. The cost computation uses deltas of
+AVG'd `today_import_kwh` values per bucket, which is fragile with corrupted data.
 
 ## GivEnergy Modbus Protocol
 
@@ -278,7 +335,9 @@ Leave `serial` empty for auto-discovery from the dongle's first response frame.
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/api/snapshot` | Latest inverter snapshot (JSON) |
-| GET/POST | `/api/settings` | Read/update connection settings |
+| GET/POST | `/api/settings` | Read/update connection settings. Returns `import_tariff_config`/`export_tariff_config` with `{peak_rate, off_peak_rate, off_peak_start, off_peak_end}` |
+| GET | `/api/history` | Aggregated time-series data (`?range=,fields=,offset=`) |
+| GET | `/api/logs` | Developer log buffer (2000 most recent log lines) |
 | POST | `/api/control/mode` | Set battery mode (`{mode: "eco\|timed_demand\|timed_export\|pause"}`) |
 | POST | `/api/control/charge-slot` | Configure charge slot (`{slot, enabled, start_hour, start_minute, end_hour, end_minute, target_soc}`) |
 | POST | `/api/control/discharge-slot` | Configure discharge slot (same shape, no target_soc) |

@@ -79,6 +79,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> Json<Value> {
             "interval_secs": settings.poll_interval,
             "import_tariff": settings.import_tariff,
             "export_tariff": settings.export_tariff,
+            "import_tariff_config": settings.import_tariff_config,
+            "export_tariff_config": settings.export_tariff_config,
         }
     }))
 }
@@ -113,18 +115,25 @@ pub async fn update_settings(
     }
 
     // Update tariffs if provided
+    let current_settings = crate::settings::Settings::load();
     let import_tariff = body
         .get("import_tariff")
         .and_then(|v| v.as_f64())
-        .unwrap_or_else(|| {
-            crate::settings::Settings::load().import_tariff
-        });
+        .unwrap_or(current_settings.import_tariff);
     let export_tariff = body
         .get("export_tariff")
         .and_then(|v| v.as_f64())
-        .unwrap_or_else(|| {
-            crate::settings::Settings::load().export_tariff
-        });
+        .unwrap_or(current_settings.export_tariff);
+
+    // Update tariff config objects if provided
+    let import_tariff_config = body.get("import_tariff_config").and_then(|v| {
+        if v.is_null() { return None; }
+        serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
+    });
+    let export_tariff_config = body.get("export_tariff_config").and_then(|v| {
+        if v.is_null() { return None; }
+        serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
+    });
 
     // Bump version so the poll loop notices the change and reconnects.
     settings.version = settings.version.wrapping_add(1);
@@ -138,6 +147,12 @@ pub async fn update_settings(
     persist.auto_connect = true;
     persist.import_tariff = import_tariff;
     persist.export_tariff = export_tariff;
+    if let Some(ref cfg) = import_tariff_config {
+        persist.import_tariff_config = Some(cfg.clone());
+    }
+    if let Some(ref cfg) = export_tariff_config {
+        persist.export_tariff_config = Some(cfg.clone());
+    }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
     }

@@ -211,8 +211,14 @@ impl HistoryDb {
             .map_err(|e| format!("History DB lock poisoned: {e}"))?;
 
         let now = chrono::Utc::now().timestamp();
-        let end_ts = now - (offset * range_secs);
-        let start_ts = end_ts - range_secs;
+        let raw_end = now - (offset * range_secs);
+        let aligned_end = match range_secs {
+            3600 => ((raw_end / 3600) * 3600) + 3600,
+            21600 => ((raw_end / 21600) * 21600) + 21600,
+            _ => ((raw_end / 86400) * 86400) + 86400,
+        };
+        let start_ts = aligned_end - range_secs;
+        let end_ts = aligned_end;
 
         let mut result = serde_json::Map::new();
 

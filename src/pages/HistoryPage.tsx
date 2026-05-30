@@ -9,7 +9,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { fetchHistory, apiGet } from '../lib/api';
-import type { HistoryRange, PollSettings } from '../lib/types';
+import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,6 +28,9 @@ interface ChartDef {
   fields: { field: string; color: string; transform?: (v: number) => number }[];
   unit: string;
   yDomain?: [number, number];
+  preprocess?: (merged: Record<string, number>[]) => Record<string, number>[];
+  /** Raw field names needed by `preprocess` that aren't in `fields`. */
+  requires?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +96,33 @@ const TABS: { key: MetricTab; label: string }[] = [
   { key: 'cost', label: 'Cost' },
 ];
 
-function getCharts(tab: MetricTab, importTariff: number, exportTariff: number): ChartDef[] {
+function alignDown(ts: number, range: HistoryRange): number {
+  const d = new Date(ts);
+  if (range === '1h') {
+    d.setUTCMinutes(0, 0, 0);
+  } else if (range === '6h') {
+    d.setUTCMinutes(0, 0, 0);
+    d.setUTCHours(Math.floor(d.getUTCHours() / 6) * 6);
+  } else {
+    d.setUTCHours(0, 0, 0, 0);
+  }
+  return d.getTime();
+}
+
+function isOffPeak(ts: number, start: string, end: string): boolean {
+  const d = new Date(ts);
+  const minutes = d.getHours() * 60 + d.getMinutes();
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  const startMins = sh * 60 + sm;
+  const endMins = eh * 60 + em;
+  if (startMins <= endMins) {
+    return minutes >= startMins && minutes < endMins;
+  }
+  return minutes >= startMins || minutes < endMins;
+}
+
+function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCfg: TariffConfig): ChartDef[] {
   switch (tab) {
     case 'battery':
       return [
@@ -177,13 +206,47 @@ function getCharts(tab: MetricTab, importTariff: number, exportTariff: number): 
           key: 'import-cost',
           title: 'Import Cost (£)',
           unit: '£',
-          fields: [{ field: 'today_import_kwh', color: '#EF4444', transform: (v: number) => v * importTariff }],
+          fields: [{ field: '_import_cost', color: '#EF4444' }],
+          requires: ['today_import_kwh'],
+          preprocess: (merged) => {
+            let prev: number | null = null;
+            let acc = 0;
+            return merged.map((row) => {
+              const raw = row.today_import_kwh;
+              let delta = 0;
+              if (raw != null && prev != null) {
+                delta = raw >= prev ? raw - prev : raw;
+              }
+              if (raw != null) prev = raw;
+              const rate = isOffPeak(row.t, importTariffCfg.off_peak_start, importTariffCfg.off_peak_end)
+                ? importTariffCfg.off_peak_rate : importTariffCfg.peak_rate;
+              acc += delta * rate;
+              return { ...row, _import_cost: acc };
+            });
+          },
         },
         {
           key: 'export-income',
           title: 'Export Income (£)',
           unit: '£',
-          fields: [{ field: 'today_export_kwh', color: '#22C55E', transform: (v: number) => v * exportTariff }],
+          fields: [{ field: '_export_income', color: '#22C55E' }],
+          requires: ['today_export_kwh'],
+          preprocess: (merged) => {
+            let prev: number | null = null;
+            let acc = 0;
+            return merged.map((row) => {
+              const raw = row.today_export_kwh;
+              let delta = 0;
+              if (raw != null && prev != null) {
+                delta = raw >= prev ? raw - prev : raw;
+              }
+              if (raw != null) prev = raw;
+              const rate = isOffPeak(row.t, exportTariffCfg.off_peak_start, exportTariffCfg.off_peak_end)
+                ? exportTariffCfg.off_peak_rate : exportTariffCfg.peak_rate;
+              acc += delta * rate;
+              return { ...row, _export_income: acc };
+            });
+          },
         },
       ];
   }
@@ -235,7 +298,7 @@ function ChartCard({ chart, data, range, domain }: {
   range: HistoryRange;
   domain: [number, number];
 }) {
-  const allFields = chart.fields.map((f) => f.field);
+  const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
   const uniqueFields = [...new Set(allFields)];
 
   const rawPoints: Record<string, TimePoint[]> = {};
@@ -249,7 +312,7 @@ function ChartCard({ chart, data, range, domain }: {
   }
   const sortedTs = [...timestamps].sort((a, b) => a - b);
 
-  const merged = sortedTs.map((t) => {
+  let merged = sortedTs.map((t) => {
     const row: Record<string, number> = { t };
     for (const f of uniqueFields) {
       const pts = rawPoints[f];
@@ -258,6 +321,10 @@ function ChartCard({ chart, data, range, domain }: {
     }
     return row;
   });
+
+  if (chart.preprocess) {
+    merged = chart.preprocess(merged);
+  }
 
   const seriesNames = chart.fields.map((f, i) => {
     const suffix = chart.fields.filter((ff, j) => j < i && ff.field === f.field).length;
@@ -322,9 +389,10 @@ function ChartCard({ chart, data, range, domain }: {
               const n = typeof v === 'number' ? v : Number(v);
               return new Date(n).toLocaleString();
             }}
+            separator=""
             formatter={(value) => {
               const n = typeof value === 'number' ? value : 0;
-              if (chart.unit === '£') return [`£${n.toFixed(2)}`, chart.unit];
+              if (chart.unit === '£') return [`£${n.toFixed(2)}`, ''];
               return [`${Math.round(n)} ${chart.unit}`, ''];
             }}
           />
@@ -378,16 +446,29 @@ export default function HistoryPage() {
   };
   const windowMs = rangeMs[range] ?? 86400000;
   const domainEnd = now - offset * windowMs;
-  const xDomain: [number, number] = [domainEnd - windowMs, domainEnd];
-  const [importTariff, setImportTariff] = useState(0.285);
-  const [exportTariff, setExportTariff] = useState(0.15);
+  const alignedEnd = alignDown(domainEnd, range) + windowMs;
+  const xDomain: [number, number] = [alignedEnd - windowMs, alignedEnd];
+  const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
+    peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
+  });
+  const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>({
+    peak_rate: 0.15, off_peak_rate: 0.05, off_peak_start: '00:30', off_peak_end: '05:30',
+  });
 
   useEffect(() => {
     (async () => {
       try {
         const res = await apiGet<{ ok: boolean; data: PollSettings }>('/api/settings');
-        if (res.data.import_tariff) setImportTariff(res.data.import_tariff);
-        if (res.data.export_tariff) setExportTariff(res.data.export_tariff);
+        if (res.data.import_tariff_config) {
+          setImportTariffCfg(res.data.import_tariff_config);
+        } else if (res.data.import_tariff) {
+          setImportTariffCfg((p) => ({ ...p, peak_rate: res.data.import_tariff! }));
+        }
+        if (res.data.export_tariff_config) {
+          setExportTariffCfg(res.data.export_tariff_config);
+        } else if (res.data.export_tariff) {
+          setExportTariffCfg((p) => ({ ...p, peak_rate: res.data.export_tariff! }));
+        }
       } catch { /* use defaults */ }
     })();
   }, []);
@@ -396,8 +477,13 @@ export default function HistoryPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const charts = getCharts(tab, importTariff, exportTariff);
-    const allFields = [...new Set(charts.flatMap((c) => c.fields.map((f) => f.field)))];
+    const charts = getCharts(tab, importTariffCfg, exportTariffCfg);
+    const allFields = [
+      ...new Set([
+        ...charts.flatMap((c) => c.fields.map((f) => f.field)),
+        ...charts.flatMap((c) => c.requires ?? []),
+      ]),
+    ];
     fetchHistory(range, allFields, offset)
       .then((result) => {
         if (!cancelled) {
@@ -416,7 +502,7 @@ export default function HistoryPage() {
         }
       });
     return () => { cancelled = true; };
-  }, [tab, range, offset, importTariff, exportTariff]);
+  }, [tab, range, offset, importTariffCfg, exportTariffCfg]);
 
   const handleTabChange = (t: MetricTab) => {
     setTab(t);
@@ -428,7 +514,7 @@ export default function HistoryPage() {
     setOffset(0);
   };
 
-  const charts = getCharts(tab, importTariff, exportTariff);
+  const charts = getCharts(tab, importTariffCfg, exportTariffCfg);
   const hasData = Object.values(data).some((pts) => pts.length > 0);
 
   return (

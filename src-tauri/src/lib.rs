@@ -70,6 +70,25 @@ pub fn run() {
                 aw.debounce_readings = app_settings.auto_winter_debounce_readings;
             }
 
+            // Load persisted auto-winter saved values (original register
+            // values captured before winter mode activated).
+            {
+                let mut saved = state.auto_winter_saved.blocking_lock();
+                if let (Some(enable_target), Some(target_soc)) = (
+                    app_settings.auto_winter_saved_enable_target,
+                    app_settings.auto_winter_saved_target_soc,
+                ) {
+                    *saved = Some(crate::inverter::poll::AutoWinterSaved {
+                        enable_charge_target: enable_target,
+                        target_soc: target_soc as u8,
+                    });
+                    tracing::info!(
+                        "Restored auto-winter saved state: enable={}, target_soc={}",
+                        enable_target, target_soc,
+                    );
+                }
+            }
+
             // Open history database
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             let db_path = std::path::PathBuf::from(home)
@@ -277,6 +296,24 @@ pub fn run_headless(args: &[String]) {
             aw.recovery_threshold = app_settings.auto_winter_recovery_threshold;
             aw.target_soc = app_settings.auto_winter_target_soc;
             aw.debounce_readings = app_settings.auto_winter_debounce_readings;
+        }
+
+        // Load persisted auto-winter saved values
+        {
+            let mut saved = state.auto_winter_saved.lock().await;
+            if let (Some(enable_target), Some(target_soc)) = (
+                app_settings.auto_winter_saved_enable_target,
+                app_settings.auto_winter_saved_target_soc,
+            ) {
+                *saved = Some(crate::inverter::poll::AutoWinterSaved {
+                    enable_charge_target: enable_target,
+                    target_soc: target_soc as u8,
+                });
+                tracing::info!(
+                    "Restored auto-winter saved state: enable={}, target_soc={}",
+                    enable_target, target_soc,
+                );
+            }
         }
 
         // Open history database

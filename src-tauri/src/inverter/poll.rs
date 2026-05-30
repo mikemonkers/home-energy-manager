@@ -449,10 +449,15 @@ fn check_auto_winter(
                         "Auto winter: activating (HR 20=1, HR 116={})",
                         config.target_soc,
                     );
-                    *saved = Some(AutoWinterSaved {
-                        enable_charge_target: snap.enable_charge_target,
-                        target_soc: snap.target_soc,
-                    });
+                    // Don't overwrite saved values that were restored from
+                    // disk after a restart — those reflect the original state
+                    // before winter mode first activated.
+                    if saved.is_none() {
+                        *saved = Some(AutoWinterSaved {
+                            enable_charge_target: snap.enable_charge_target,
+                            target_soc: snap.target_soc,
+                        });
+                    }
                     *state = AutoWinterState::WinterActive;
                     return Some(vec![
                         RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 1 },
@@ -732,10 +737,31 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // this system vs. manually.
                                     snapshot.auto_winter_active =
                                         matches!(*aw_state, AutoWinterState::WinterActive);
+
+                                    // Persist saved values to disk so they survive a
+                                    // restart. When winter mode deactivates, saved
+                                    // becomes None — this clears the persisted values.
+                                    let persist_saved = saved.clone();
+                                    drop(config);
+                                    drop(aw_state);
+                                    drop(saved);
+
+                                    let mut app_settings = crate::settings::Settings::load();
+                                    let changed = app_settings.auto_winter_saved_enable_target
+                                        != persist_saved.as_ref().map(|s| s.enable_charge_target)
+                                        || app_settings.auto_winter_saved_target_soc
+                                        != persist_saved.as_ref().map(|s| s.target_soc as u16);
+                                    if changed {
+                                        app_settings.auto_winter_saved_enable_target =
+                                            persist_saved.as_ref().map(|s| s.enable_charge_target);
+                                        app_settings.auto_winter_saved_target_soc =
+                                            persist_saved.as_ref().map(|s| s.target_soc as u16);
+                                        if let Err(e) = app_settings.save() {
+                                            tracing::warn!("Failed to persist auto winter saved values: {e}");
+                                        }
+                                    }
+
                                     if let Some(writes) = writes {
-                                        drop(config);
-                                        drop(aw_state);
-                                        drop(saved);
                                         for w in &writes {
                                             match client.write_register(w.address, w.value).await {
                                                 Ok(()) => tracing::info!(

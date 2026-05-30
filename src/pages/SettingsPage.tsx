@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiGet, apiPost, getApiBase } from '../lib/api';
-import type { PollSettings, DiscoveredInverter } from '../lib/types';
+import type { PollSettings, DiscoveredInverter, TariffConfig } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 import { isTauri } from '../lib/api';
 
@@ -54,8 +54,12 @@ export default function SettingsPage() {
   const [intervalSecs, setIntervalSecs] = useState(60);
 
   // Tariffs
-  const [importTariff, setImportTariff] = useState(0.285);
-  const [exportTariff, setExportTariff] = useState(0.15);
+  const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
+    peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
+  });
+  const [exportTariffCfg, setExportTariffCfg] = useState<TariffConfig>({
+    peak_rate: 0.15, off_peak_rate: 0.05, off_peak_start: '00:30', off_peak_end: '05:30',
+  });
 
   // General
   const [saving, setSaving] = useState(false);
@@ -79,8 +83,16 @@ export default function SettingsPage() {
         setPort(s.port ?? 8899);
         setSerial(s.serial ?? '');
         setIntervalSecs(s.interval_secs ?? 60);
-        setImportTariff(s.import_tariff ?? 0.285);
-        setExportTariff(s.export_tariff ?? 0.15);
+        if (s.import_tariff_config) {
+          setImportTariffCfg(s.import_tariff_config);
+        } else {
+          setImportTariffCfg((p) => ({ ...p, peak_rate: s.import_tariff ?? 0.285 }));
+        }
+        if (s.export_tariff_config) {
+          setExportTariffCfg(s.export_tariff_config);
+        } else {
+          setExportTariffCfg((p) => ({ ...p, peak_rate: s.export_tariff ?? 0.15 }));
+        }
         setSettingsLoaded(true);
       } catch {
         setSettingsLoaded(true);
@@ -127,7 +139,10 @@ export default function SettingsPage() {
   const handleTariffSave = async () => {
     setSaving(true);
     try {
-      await apiPost('/api/settings', { import_tariff: importTariff, export_tariff: exportTariff });
+      await apiPost('/api/settings', {
+        import_tariff_config: importTariffCfg,
+        export_tariff_config: exportTariffCfg,
+      });
       flash('Tariff rates saved', true);
     } catch {
       flash('Failed to save tariffs', false);
@@ -366,35 +381,105 @@ export default function SettingsPage() {
       </section>
 
       {/* ─── Section 4: Energy Tariffs ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Energy Tariffs</h2>
         <p className="text-text-secondary text-xs font-sans">
-          Used for cost calculations on the History page
+          Used for cost calculations on the History page — supports peak and off-peak rates
         </p>
-        <div className="grid grid-cols-2 gap-4">
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">Import (£/kWh)</span>
-            <input
-              type="number"
-              step="0.001"
-              min="0"
-              value={importTariff}
-              onChange={(e) => setImportTariff(Number(e.target.value))}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-text-secondary text-xs font-sans">Export (£/kWh)</span>
-            <input
-              type="number"
-              step="0.001"
-              min="0"
-              value={exportTariff}
-              onChange={(e) => setExportTariff(Number(e.target.value))}
-              className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
-            />
-          </label>
+
+        {/* Import Tariff */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Import</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Peak rate (£/kWh)</span>
+              <input
+                type="number" step="0.001" min="0"
+                value={importTariffCfg.peak_rate}
+                onChange={(e) => setImportTariffCfg((p) => ({ ...p, peak_rate: Number(e.target.value) }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Off-peak rate (£/kWh)</span>
+              <input
+                type="number" step="0.001" min="0"
+                value={importTariffCfg.off_peak_rate}
+                onChange={(e) => setImportTariffCfg((p) => ({ ...p, off_peak_rate: Number(e.target.value) }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Off-peak start</span>
+              <input
+                type="text" placeholder="HH:MM"
+                value={importTariffCfg.off_peak_start}
+                onChange={(e) => setImportTariffCfg((p) => ({ ...p, off_peak_start: e.target.value }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Off-peak end</span>
+              <input
+                type="text" placeholder="HH:MM"
+                value={importTariffCfg.off_peak_end}
+                onChange={(e) => setImportTariffCfg((p) => ({ ...p, off_peak_end: e.target.value }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+          </div>
+          <p className="text-text-secondary/60 text-xs font-sans">
+            Times in 24h format. End before start = crosses midnight (e.g. 23:00 — 05:30).
+          </p>
         </div>
+
+        {/* Export Tariff */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">Export</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Peak rate (£/kWh)</span>
+              <input
+                type="number" step="0.001" min="0"
+                value={exportTariffCfg.peak_rate}
+                onChange={(e) => setExportTariffCfg((p) => ({ ...p, peak_rate: Number(e.target.value) }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Off-peak rate (£/kWh)</span>
+              <input
+                type="number" step="0.001" min="0"
+                value={exportTariffCfg.off_peak_rate}
+                onChange={(e) => setExportTariffCfg((p) => ({ ...p, off_peak_rate: Number(e.target.value) }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Off-peak start</span>
+              <input
+                type="text" placeholder="HH:MM"
+                value={exportTariffCfg.off_peak_start}
+                onChange={(e) => setExportTariffCfg((p) => ({ ...p, off_peak_start: e.target.value }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-text-secondary text-xs font-sans">Off-peak end</span>
+              <input
+                type="text" placeholder="HH:MM"
+                value={exportTariffCfg.off_peak_end}
+                onChange={(e) => setExportTariffCfg((p) => ({ ...p, off_peak_end: e.target.value }))}
+                className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono border border-bg-elevated focus:border-flow-active outline-none transition-colors"
+              />
+            </label>
+          </div>
+        </div>
+
         <button
           onClick={handleTariffSave}
           disabled={saving}
