@@ -94,15 +94,35 @@ pub fn run() {
                 // Production: serve the frontend from Axum too so that
                 // the Tauri window is same-origin with the API/WebSocket.
                 // The dist files are bundled as Tauri resources and land at
-                // {resource_dir}/dist/.
-                let resource_dir = app
+                // {resource_dir}/dist/. Fall back gracefully if the bundle
+                // path can't be resolved (e.g. running outside LaunchServices).
+                let dist_dir = app
                     .path()
                     .resource_dir()
-                    .expect("failed to resolve Tauri resource directory");
-                let dist_dir = resource_dir
-                    .join("dist")
-                    .to_string_lossy()
-                    .to_string();
+                    .map(|d| d.join("dist").to_string_lossy().to_string())
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Could not resolve resource dir ({e}); trying relative to executable fallback");
+                        std::env::current_exe()
+                            .ok()
+                            .and_then(|exe| {
+                                let d = exe.parent()?.join("..").join("Resources").join("dist");
+                                if d.join("index.html").exists() { Some(d) } else { None }
+                            })
+                            .or_else(|| {
+                                let d = std::path::PathBuf::from("dist");
+                                if d.join("index.html").exists() { Some(d) } else { None }
+                            })
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| {
+                                // Last resort: try current_exe's Resources/dist
+                                let exe = std::env::current_exe().ok().unwrap_or_default();
+                                exe.parent()
+                                    .map(|p| p.join("..").join("Resources").join("dist"))
+                                    .unwrap_or_else(|| std::path::PathBuf::from("dist"))
+                                    .to_string_lossy()
+                                    .to_string()
+                            })
+                    });
                 tracing::info!("Production frontend path: {}", dist_dir);
 
                 tauri::async_runtime::spawn(async move {
