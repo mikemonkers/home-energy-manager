@@ -4,6 +4,10 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+> 🙏 **Huge thanks to the open-source reverse-engineering efforts that made this possible:**  
+> [**GivTCP**](https://github.com/GivEnergy/giv_tcp) — the original GivEnergy Modbus integration for Home Assistant  
+> [**givenergy-modbus**](https://github.com/dewet22/givenergy-modbus) — detailed register map, protocol reference, and Python library
+
 ## Screenshots
 
 <table>
@@ -98,7 +102,13 @@ See [DESIGN.md](./DESIGN.md) for full build instructions, testing, and architect
 
 ## Credits
 
-Register map and protocol details sourced from the [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) and [GivTCP](https://github.com/GivTCP/givtcp) open-source projects.
+This project would not exist without the pioneering reverse-engineering work of the GivEnergy open-source community.
+
+- **[GivTCP](https://github.com/GivEnergy/giv_tcp)** — The original GivEnergy Modbus integration for Home Assistant. This project established the core Modbus protocol mapping, register addresses, and write methodology that this app builds on. Without GivTCP, none of this would be possible.
+
+- **[givenergy-modbus](https://github.com/dewet22/givenergy-modbus)** — The definitive Python reference library for the GivEnergy Modbus protocol. Its detailed register map, frame format documentation, and working reference implementation were invaluable in getting the protocol right — especially the write protocol (function code 6, device address 0x11) and the HHMM timeslot encoding.
+
+Both projects are open-source and available on GitHub. If you find this app useful, consider giving them a star too ⭐
 
 ## License
 
