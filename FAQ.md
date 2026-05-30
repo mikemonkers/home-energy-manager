@@ -49,31 +49,37 @@ If the right-click → Open method doesn't work:
 
 ### On macOS 26.5+, the app launches but the web UI never loads
 
-macOS 26.5 tightened Gatekeeper for ad-hoc signed apps. When you use `open` (or double-click the app in Finder), the app may appear to run but never start the web server. This is because Gatekeeper blocks the app's network entitlements at the LaunchServices level.
+This can happen for two reasons:
 
-**Workaround**: Run the binary directly instead of using `open`:
+**1. Gatekeeper blocking ad-hoc signed apps** — When you use `open` (or double-click
+the app in Finder), macOS may silently block the web server from starting while
+letting the app process appear alive. **Workaround**: Run the binary directly:
 
 ```bash
 /Applications/GivEnergy-Local.app/Contents/MacOS/givenergy-local
 ```
 
 Or use the `launch.command` convenience script from the project root:
+`./launch.command`.
 
-```bash
-./launch.command
-```
-
-The app will still need approval the first time (System Settings → Open Anyway), but subsequent launches via the direct binary path bypass the LaunchServices Gatekeeper check entirely.
+The app will still need approval the first time (System Settings → Open Anyway),
+but subsequent direct launches bypass Gatekeeper entirely.
 
 > Note: The old `spctl --add` command-line workaround is no longer supported on macOS 26.5.
+
+**2. Running the wrong architecture on Apple Silicon** — The **x64 (Intel) .dmg**
+crashes silently under Rosetta on macOS 26.5+ with no error output. If the
+binary hangs at the terminal prompt with no log output, you're running the
+Intel build. Reinstall using the **aarch64 .dmg** instead.
 
 ---
 
 ### Which macOS download should I use?
 
-Use the **x64 .dmg** download, even on Apple Silicon (M1/M2/M3/M4) Macs. The app is compiled as an x86_64 binary and runs via Apple's Rosetta 2 translation layer, which is automatic and seamless.
+On **Apple Silicon (M1/M2/M3/M4/M5)** Macs, use the **aarch64 .dmg** download.
+The x64 (Intel) .dmg may crash silently on macOS 26.5+ under Rosetta.
 
-The **.deb** file is for Linux only.
+On **Intel** Macs, use the **x64 .dmg** download.
 
 ---
 
