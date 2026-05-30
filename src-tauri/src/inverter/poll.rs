@@ -659,6 +659,25 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // request-response pairing for the first poll.
                 client.drain().await;
 
+                // Warmup read: discard the first register read after connect.
+                // The dongle's internal state can be stale after a TCP reconnect,
+                // causing the first read to return garbage values (e.g.
+                // today_import_kwh = 0.6 when the real value is 39.0). If these
+                // corrupt values become the sanitizer's "previous" reference,
+                // all subsequent legitimate readings are rejected as "jumped too
+                // fast" and the counters get stuck at the corrupted values.
+                tracing::debug!("Warmup read — discarding first register response");
+                let _ = client.read_all_standard().await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                // Clear any previous snapshot so the next reading is accepted
+                // without sanitization. After a reconnect, the previous snapshot
+                // may contain stale or corrupted values from the old session.
+                {
+                    let mut latest = state.latest_snapshot.lock().await;
+                    *latest = None;
+                }
+
                 // Reset back-off on successful connection.
                 backoff = Duration::from_secs(5);
 
@@ -979,6 +998,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                 // ---- Disconnected (fell out of inner loop) ----
                 client.disconnect().await;
+
+                // Clear the latest snapshot so the next connection starts fresh.
+                // Without this, stale/corrupted values from the old session
+                // persist as the sanitizer's "previous" reference.
+                {
+                    let mut latest = state.latest_snapshot.lock().await;
+                    *latest = None;
+                }
 
                 tracing::warn!("Disconnected from inverter – will reconnect");
 

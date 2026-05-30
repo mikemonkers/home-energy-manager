@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-05-30
+
+### Fixed
+
+- **Cumulative counters stuck at 0 or corrupted values**: The dongle returns
+  garbage register values on the first read after TCP connect (e.g.
+  `today_import_kwh = 0.6` when the real value is 39.0). The sanitizer
+  compared every subsequent reading against this corrupted "previous" value
+  and rejected the real ones as "jumped too fast", permanently locking the
+  counters at the corrupted value. Fixed with three changes:
+  1. **Warmup read**: discard the first register read after connect — the
+     dongle needs one full read cycle to return fresh data
+  2. **Reset snapshot on disconnect/reconnect**: clear `latest_snapshot`
+     so the next connection starts with no stale "previous" reference
+  3. **Time-based increase threshold** (from v0.8.6): scales the allowed
+     jump with elapsed time since last reading
+
 ## [0.8.6] - 2026-05-30
 
 ### Fixed
