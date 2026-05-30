@@ -140,6 +140,70 @@ impl HistoryDb {
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| format!("Failed to create schema: {e}"))?;
 
+        // Migration: repair corrupted cumulative counter data.
+        // For each today_*_kwh column, fix rows where the value decreased
+        // from the previous row (counters are monotonically increasing)
+        // or jumped up by more than 2 kWh (implausible between polls).
+        // Skip if previous value is <= 5 (near midnight reset).
+        let energy_cols = [
+            "today_solar_kwh",
+            "today_import_kwh",
+            "today_export_kwh",
+            "today_charge_kwh",
+            "today_discharge_kwh",
+            "today_consumption_kwh",
+        ];
+        for col in &energy_cols {
+            // Build a repaired set using a window: for each row, if the value
+            // decreased from the previous good value (and prev > 5, i.e. not
+            // midnight reset), or jumped up by > 2, replace with previous.
+            let repair_sql = format!(
+                "CREATE TABLE IF NOT EXISTS _repair_{col} AS \
+                 SELECT timestamp, {col} AS orig, \
+                        CASE \
+                          WHEN LAG({col}) OVER (ORDER BY timestamp) IS NULL THEN {col} \
+                          WHEN LAG({col}) OVER (ORDER BY timestamp) > 5.0 \
+                               AND {col} < LAG({col}) OVER (ORDER BY timestamp) \
+                            THEN LAG({col}) OVER (ORDER BY timestamp) \
+                          WHEN {col} > LAG({col}) OVER (ORDER BY timestamp) + 2.0 \
+                            THEN LAG({col}) OVER (ORDER BY timestamp) \
+                          ELSE {col} \
+                        END AS repaired \
+                 FROM readings \
+                 WHERE {col} IS NOT NULL \
+                 ORDER BY timestamp"
+            );
+            let _ = conn.execute_batch(&repair_sql);
+
+            // Count how many rows were changed
+            let count: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM _repair_{col} WHERE orig != repaired"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            if count > 0 {
+                tracing::info!("Repairing {count} corrupted {col} values in history DB");
+                // Apply repairs back to the readings table
+                let apply_sql = format!(
+                    "UPDATE readings SET {col} = (\
+                      SELECT repaired FROM _repair_{col} \
+                      WHERE _repair_{col}.timestamp = readings.timestamp\
+                    ) WHERE timestamp IN (\
+                      SELECT timestamp FROM _repair_{col} WHERE orig != repaired\
+                    )"
+                );
+                if let Err(e) = conn.execute_batch(&apply_sql) {
+                    tracing::warn!("Failed to repair {col}: {e}");
+                }
+            }
+
+            // Clean up temp table
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS _repair_{col}"));
+        }
+
         tracing::info!("History database opened at {}", path.display());
         Ok(Self {
             conn: Mutex::new(conn),

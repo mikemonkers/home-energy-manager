@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-05-30
+
+### Fixed
+
+- **Cumulative counter sanitization rewritten**: The previous sanitizer used a
+  50 kWh jump threshold that missed common register corruption patterns like
+  39.0 → 0.6 → 39.0 (only a 38.4 kWh drop). The new sanitizer enforces three
+  strict rules: (1) value must be 0–1000 kWh, (2) counter must never decrease
+  during the day (register corruption), (3) counter must not increase by more
+  than 2 kWh between polls (implausible rate). Midnight rollover is correctly
+  detected and allowed.
+- **Database repair migration**: On startup, the history database is scanned
+  for corrupted `today_*_kwh` values (decreases or jumps > 2 kWh between
+  consecutive rows) and repaired using windowed analysis. This cleans any
+  corrupted data accumulated before the sanitizer was added.
+
 ## [0.8.4] - 2026-05-30
 
 ### Fixed

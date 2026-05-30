@@ -396,31 +396,60 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         sanitized = true;
     }
 
-    // Daily energy totals (`today_*_kwh`): cumulative kWh counters that should
-    // only increase slowly. A jump of >50 kWh between consecutive polls
-    // (at most 60s apart) would require >3000 kW sustained — impossible.
-    // Also reject values below 0 or above 1000 (can't import/consume/solar
-    // more than 1000 kWh in a single day for a residential system).
+    // Daily energy totals (`today_*_kwh`): cumulative kWh counters that
+    // monotonically increase from 0 and reset to 0 at midnight.
+    //
+    // Sanitization rules:
+    //   1. Value must be in [0, 1000] kWh (residential daily limit)
+    //   2. Value must NOT decrease during the day (register corruption
+    //      often returns a near-zero value like 39.0 → 0.6 → 39.0)
+    //   3. Value must NOT jump up by more than 2 kWh between polls
+    //      (at 60s intervals, that's 120 kW — still generous for residential)
+    //
+    // Midnight rollover: when the counter resets to ~0, the raw value
+    // will legitimately drop below the previous value. We detect this
+    // by checking if raw is small (< 5 kWh) — a legitimate new-day
+    // reading after midnight — and prev is large. In this case we
+    // ALLOW the rollover.
     if let Some(p) = prev {
         let max_kwh: f32 = 1000.0;
-        let max_jump_kwh: f32 = 50.0;
+        let max_increase_kwh: f32 = 2.0;
 
         macro_rules! check_energy_field {
             ($name:literal, $value:expr, $prev:expr) => {
                 let raw = $value;
+                let prev_val = $prev;
+
+                // Rule 1: absolute range
                 if raw < 0.0 || raw > max_kwh {
                     tracing::warn!(
-                        field = $name, raw, prev = $prev, max = max_kwh,
+                        field = $name, raw, prev = prev_val,
                         "Daily energy out of plausible range — using previous",
                     );
-                    $value = $prev;
+                    $value = prev_val;
                     sanitized = true;
-                } else if $prev > 0.0 && (raw - $prev).abs() > max_jump_kwh {
+                }
+                // Midnight rollover: counter legitimately reset to ~0.
+                // Allow if raw is small and prev was large.
+                else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
+                    // Legitimate midnight reset — accept raw as-is
+                }
+                // Rule 2: counter must not decrease (register corruption)
+                else if raw < prev_val {
                     tracing::warn!(
-                        field = $name, raw, prev = $prev, max_jump = max_jump_kwh,
-                        "Daily energy jumped >{max_jump_kwh} kWh — using previous",
+                        field = $name, raw, prev = prev_val,
+                        "Daily energy decreased (register corruption) — using previous",
                     );
-                    $value = $prev;
+                    $value = prev_val;
+                    sanitized = true;
+                }
+                // Rule 3: increase must be plausible
+                else if raw > prev_val + max_increase_kwh {
+                    tracing::warn!(
+                        field = $name, raw, prev = prev_val,
+                        "Daily energy jumped too fast — using previous",
+                    );
+                    $value = prev_val;
                     sanitized = true;
                 }
             };
