@@ -396,6 +396,44 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
         sanitized = true;
     }
 
+    // Daily energy totals (`today_*_kwh`): cumulative kWh counters that should
+    // only increase slowly. A jump of >50 kWh between consecutive polls
+    // (at most 60s apart) would require >3000 kW sustained — impossible.
+    // Also reject values below 0 or above 1000 (can't import/consume/solar
+    // more than 1000 kWh in a single day for a residential system).
+    if let Some(p) = prev {
+        let max_kwh: f32 = 1000.0;
+        let max_jump_kwh: f32 = 50.0;
+
+        macro_rules! check_energy_field {
+            ($name:literal, $value:expr, $prev:expr) => {
+                let raw = $value;
+                if raw < 0.0 || raw > max_kwh {
+                    tracing::warn!(
+                        field = $name, raw, prev = $prev, max = max_kwh,
+                        "Daily energy out of plausible range — using previous",
+                    );
+                    $value = $prev;
+                    sanitized = true;
+                } else if $prev > 0.0 && (raw - $prev).abs() > max_jump_kwh {
+                    tracing::warn!(
+                        field = $name, raw, prev = $prev, max_jump = max_jump_kwh,
+                        "Daily energy jumped >{max_jump_kwh} kWh — using previous",
+                    );
+                    $value = $prev;
+                    sanitized = true;
+                }
+            };
+        }
+
+        check_energy_field!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh);
+        check_energy_field!("today_import_kwh", snap.today_import_kwh, p.today_import_kwh);
+        check_energy_field!("today_export_kwh", snap.today_export_kwh, p.today_export_kwh);
+        check_energy_field!("today_charge_kwh", snap.today_charge_kwh, p.today_charge_kwh);
+        check_energy_field!("today_discharge_kwh", snap.today_discharge_kwh, p.today_discharge_kwh);
+        check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh, p.today_consumption_kwh);
+    }
+
     sanitized
 }
 

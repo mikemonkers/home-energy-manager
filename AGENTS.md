@@ -152,7 +152,12 @@ The `--dist` flag specifies the frontend static files directory. Search order: `
 
 5. **Likely explanation**: The AVG of a cumulative counter over buckets, combined with the delta computation, amplifies small data irregularities. If a single zero-readout (register corruption) falls in a bucket, it significantly drags down the AVG, and the delta to the next clean bucket adds a massive "import" spike. This compounds across many buckets to produce the ~1000× error.
 
-6. **Recommended fix**: Switch the cost computation from `today_import_kwh` deltas to `grid_power` instantaneous readings. Power values (in W) compose correctly under AVG: `AVG(grid_power) * bucket_duration_hours / 1000 = net import/export energy in kWh`. The history API already tracks `grid_power` as INTEGER (W, signed: +exporting, -importing).
+6. **Mitigation applied**: Backend `sanitize_snapshot()` now checks all six `today_*_kwh`
+   fields for jumps >50 kWh or values outside 0–1000 kWh, falling back to the previous
+   reading. Frontend spike-removal thresholds added for these fields (50 kWh). A
+   transparent overlay banner on cost charts warns users the data may be inaccurate.
+
+7. **Recommended fix**: Switch the cost computation from `today_import_kwh` deltas to `grid_power` instantaneous readings. Power values (in W) compose correctly under AVG: `AVG(grid_power) * bucket_duration_hours / 1000 = net import/export energy in kWh`. The history API already tracks `grid_power` as INTEGER (W, signed: +exporting, -importing).
 
    Proposed approach for both import cost and export income:
    ```typescript

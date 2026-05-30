@@ -23,10 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Corrupted daily energy counters sanitized**: The six `today_*_kwh` fields (solar,
+  import, export, charge, discharge, consumption) are now sanitized before reaching
+  the frontend or history database. Values outside 0–1000 kWh or jumping by >50 kWh
+  between consecutive polls are replaced with the previous known-good value. This
+  prevents garbage register reads (e.g. IR(35)=32230 → 3223 kWh) from appearing as
+  absurd spikes on the Home Energy chart.
+- **Frontend spike detection for energy fields**: Added spike thresholds (50 kWh) for
+  all six `today_*_kwh` fields in the chart spike-removal logic, so any garbage data
+  that bypasses backend sanitization is still caught before rendering.
 - **Cost graph inflation**: Documented investigation (see AGENTS.md — Known issues).
   Cost computation using cumulative `today_import_kwh` with AVG'd bucket values can
   produce ~1000× inflated results due to corrupted register readings, data gaps,
   and midnight rollover affecting bucket averages.
+- **Transparent overlay on cost charts**: Cost charts now show a "data may be
+  inaccurate" banner as a known-issue warning until the calculation is fixed.
 
 ### Changed
 
