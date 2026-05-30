@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-05-30
+
+### Fixed
+
+- **Cost graphs now accurate**: Switched history aggregation from `AVG` to `MAX` for
+  cumulative daily energy counters (`today_*_kwh`). Averaging monotonically-increasing
+  counters understated the true value, causing deltas between buckets to inflate costs
+  by ~1000×. `MAX` preserves the actual counter reading at each bucket boundary.
+- **Removed inaccurate overlay**: Cost charts no longer show the "data may be inaccurate"
+  warning banner.
+- **Disconnected state broadcast**: Backend now broadcasts `Disconnected` state via
+  WebSocket when a reconnect attempt fails (previously set locally but not sent to
+  frontend, leaving it stuck on 'reconnecting').
+- **Screen flash on disconnect**: Wrapped `EnergyFlowDiagram`, `BatteryPanel`, and
+  `SummaryTiles` with `React.memo` so they don't re-render when only connection state
+  changes (previously SVG animations restarted on every connection state update).
+
 ## [0.8.3] - 2026-05-30
 
 ### Fixed

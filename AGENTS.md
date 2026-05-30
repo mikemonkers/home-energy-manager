@@ -132,41 +132,7 @@ The `--dist` flag specifies the frontend static files directory. Search order: `
 
 ## Known issues
 
-### Cost graphs inflated by ~1000× (HistoryPage Cost tab)
-
-**Symptom**: Import cost and export income charts on the History page show values ~1000× too high. E.g. 39.0 kWh import at 0.305 £/kRate displays £198 instead of ~£11.90.
-
-**Investigation findings**:
-
-1. **Current approach**: The cost preprocess function in `getCharts()` (`src/pages/HistoryPage.tsx`) computes cost by taking deltas of `today_import_kwh` (or `today_export_kwh`) between consecutive AVG'd bucket values from the history API.
-
-2. **Root cause**: `today_import_kwh` is a cumulative daily counter (monotonically increasing, resets at midnight). The history API (`GET /api/history`) returns `AVG(today_import_kwh)` per time bucket (30s for 1h, 60s for 6h, 300s for 24h, etc.). Taking deltas of AVG'd cumulative counters is fragile:
-   - Corrupted/zero register readings inside a bucket bias the AVG downward, creating an artificially large delta to the next bucket
-   - Data gaps (disconnections, inverter restarts) cause the delta to span the gap period, importing the accumulated energy as a single large cost spike
-   - Midnight rollover resets the counter from ~max to ~0 — the fallback `raw >= prev ? raw - prev : raw` logic then uses the raw value as the delta, which is the ~0 after reset, masking the issue but losing data
-   - The very first bucket's AVG represents the midpoint of the first interval, not the starting value, so the first delta is from midpoint of bucket 1 to midpoint of bucket 2 — approximately correct but amplified by any data irregularities
-
-3. **Decoder verification**: The decoder (`src-tauri/src/inverter/decoder.rs`) correctly applies `* 0.1` to register values: `snap.today_import_kwh = get_reg(data, 26) as f32 * 0.1`. This converts from 0.1 kWh units (register IR(26): e_grid_in_day) to kWh. Unit tests confirm this: register 26 = 52 → `today_import_kwh = 5.2`.
-
-4. **Storage verification**: `InverterSnapshot` serialises via Serde (f32 → JSON number). History DB stores as `REAL`. History query returns `AVG("today_import_kwh")`. Data pipeline is clean — no unit conversion errors found in code.
-
-5. **Likely explanation**: The AVG of a cumulative counter over buckets, combined with the delta computation, amplifies small data irregularities. If a single zero-readout (register corruption) falls in a bucket, it significantly drags down the AVG, and the delta to the next clean bucket adds a massive "import" spike. This compounds across many buckets to produce the ~1000× error.
-
-6. **Mitigation applied**: Backend `sanitize_snapshot()` now checks all six `today_*_kwh`
-   fields for jumps >50 kWh or values outside 0–1000 kWh, falling back to the previous
-   reading. Frontend spike-removal thresholds added for these fields (50 kWh). A
-   transparent overlay banner on cost charts warns users the data may be inaccurate.
-
-7. **Recommended fix**: Switch the cost computation from `today_import_kwh` deltas to `grid_power` instantaneous readings. Power values (in W) compose correctly under AVG: `AVG(grid_power) * bucket_duration_hours / 1000 = net import/export energy in kWh`. The history API already tracks `grid_power` as INTEGER (W, signed: +exporting, -importing).
-
-   Proposed approach for both import cost and export income:
-   ```typescript
-   // For each bucket row:
-   //   import_power_kw = max(-avg_grid_power, 0) / 1000
-   //   duration_h = (current_t_ms - prev_t_ms) / 3600000
-   //   import_energy_kwh = import_power_kw * duration_h
-   //   cost += import_energy_kwh * rate(t)
-   ```
+_None._
 
 ## Release process
 

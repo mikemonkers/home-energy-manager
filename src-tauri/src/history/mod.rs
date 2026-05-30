@@ -62,6 +62,22 @@ fn is_allowed_field(field: &str) -> bool {
     ALLOWED_FIELDS.contains(&field)
 }
 
+/// Cumulative counter fields that monotonically increase within a day and
+/// reset at midnight. For these fields MAX is the correct aggregation
+/// (AVG would understate the true value).
+const CUMULATIVE_FIELDS: &[&str] = &[
+    "today_solar_kwh",
+    "today_import_kwh",
+    "today_export_kwh",
+    "today_charge_kwh",
+    "today_discharge_kwh",
+    "today_consumption_kwh",
+];
+
+fn is_cumulative_field(field: &str) -> bool {
+    CUMULATIVE_FIELDS.contains(&field)
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
@@ -227,15 +243,22 @@ impl HistoryDb {
                 continue;
             }
 
+            let agg = if is_cumulative_field(field) {
+                "MAX"
+            } else {
+                "AVG"
+            };
+
             let sql = format!(
                 "SELECT \
                     ((timestamp / {bucket}) * {bucket}) * 1000 AS t_bucket, \
-                    AVG(\"{field}\") AS v \
+                    {agg}(\"{field}\") AS v \
                  FROM readings \
                  WHERE timestamp >= ?1 AND timestamp < ?2 AND \"{field}\" IS NOT NULL \
                  GROUP BY t_bucket \
                  ORDER BY t_bucket",
                 bucket = bucket_secs,
+                agg = agg,
                 field = field,
             );
 

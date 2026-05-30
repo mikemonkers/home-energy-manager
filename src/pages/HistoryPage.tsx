@@ -31,8 +31,7 @@ interface ChartDef {
   preprocess?: (merged: Record<string, number>[]) => Record<string, number>[];
   /** Raw field names needed by `preprocess` that aren't in `fields`. */
   requires?: string[];
-  /** Show an overlay banner noting the data may be inaccurate. */
-  inaccurate?: boolean;
+
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +215,6 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           key: 'import-cost',
           title: 'Import Cost (£)',
           unit: '£',
-          inaccurate: true,
           fields: [{ field: '_import_cost', color: '#EF4444' }],
           requires: ['today_import_kwh'],
           preprocess: (merged) => {
@@ -240,7 +238,6 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           key: 'export-income',
           title: 'Export Income (£)',
           unit: '£',
-          inaccurate: true,
           fields: [{ field: '_export_income', color: '#22C55E' }],
           requires: ['today_export_kwh'],
           preprocess: (merged) => {
@@ -357,15 +354,6 @@ function ChartCard({ chart, data, range, domain }: {
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
       <h3 className="text-text-secondary text-xs font-sans font-medium mb-3">{chart.title}</h3>
-      {chart.inaccurate && (
-        <div className="absolute top-12 left-4 right-4 z-10 pointer-events-none">
-          <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2 backdrop-blur-sm">
-            <p className="text-yellow-400/80 text-xs font-sans text-center">
-              ⚠ Cost data may be inaccurate — see known issues
-            </p>
-          </div>
-        </div>
-      )}
       <ResponsiveContainer width="100%" height={200}>
         <AreaChart data={seriesData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
           <defs>
