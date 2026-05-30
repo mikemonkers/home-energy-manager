@@ -66,13 +66,17 @@ jobs:
         run: |
           DMG_PATH=$(ls "$GITHUB_WORKSPACE/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg)
           echo "Customizing DMG: $DMG_PATH"
+          # Mount original DMG (read-only) and copy contents to a writable staging dir
           MNT=$(mktemp -d)
+          STAGE=$(mktemp -d)
           hdiutil attach "$DMG_PATH" -mountpoint "$MNT" -nobrowse -quiet
+          cp -R "$MNT/"* "$STAGE/"
+          hdiutil detach "$MNT" -quiet
           # Remove misleading /Applications symlink — macOS 26.5 blocks unsigned
           # apps in /Applications, so the symlink invites users to break the app.
-          rm -f "$MNT/Applications"
+          rm -f "$STAGE/Applications"
           # Add install instructions
-          cat > "$MNT/README.txt" << 'EOF'
+          cat > "$STAGE/README.txt" << 'EOF'
           GivEnergy Local — macOS Install Notes
           ======================================
 
@@ -90,9 +94,8 @@ jobs:
           For Apple Silicon (M1/M2/M3/M4) Macs, use the aarch64 release.
           For Intel Macs, use the x86_64 release.
           EOF
-          hdiutil detach "$MNT" -quiet
-          # Rebuild DMG with customizations
-          hdiutil create -ov -srcfolder "$MNT" -format UDZO \
+          # Rebuild DMG from staging directory
+          hdiutil create -ov -srcfolder "$STAGE" -format UDZO \
             -volname "GivEnergy Local" -fs HFS+ "${DMG_PATH}.tmp"
           mv "${DMG_PATH}.tmp" "$DMG_PATH"
           echo "DMG customized successfully"
