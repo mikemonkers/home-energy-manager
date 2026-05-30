@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-05-30
+
+### Fixed
+
+- **macOS DMG build: hdiutil auto-appends .dmg extension**: `hdiutil create`
+  automatically adds `.dmg` to the output filename, so the `mv` to rename the
+  temp file failed because the actual file was `.tmp.dmg` not `.tmp`.
+
 ## [0.9.2] - 2026-05-30
 
 ### Fixed

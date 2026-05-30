@@ -96,8 +96,8 @@ jobs:
           EOF
           # Rebuild DMG from staging directory
           hdiutil create -ov -srcfolder "$STAGE" -format UDZO \
-            -volname "GivEnergy Local" -fs HFS+ "${DMG_PATH}.tmp"
-          mv "${DMG_PATH}.tmp" "$DMG_PATH"
+            -volname "GivEnergy Local" -fs HFS+ "${DMG_PATH}.new"
+          mv "${DMG_PATH}.new.dmg" "$DMG_PATH"
           echo "DMG customized successfully"
 
       - name: Upload release assets
