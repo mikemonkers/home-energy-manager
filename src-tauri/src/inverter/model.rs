@@ -174,7 +174,7 @@ pub struct BatteryModule {
 }
 
 /// A single charge or discharge schedule slot.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct ScheduleSlot {
     /// Whether the slot is active (start_time >= 60).
     pub enabled: bool,
@@ -189,19 +189,6 @@ pub struct ScheduleSlot {
     /// Target SOC (from separate register, 0 if not applicable).
     #[serde(default)]
     pub target_soc: u8,
-}
-
-impl Default for ScheduleSlot {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            start_hour: 0,
-            start_minute: 0,
-            end_hour: 0,
-            end_minute: 0,
-            target_soc: 0,
-        }
-    }
 }
 
 /// Complete snapshot of inverter state.

@@ -169,8 +169,7 @@ struct RawConfig {
 
 /// Decode raw register blocks into an InverterSnapshot.
 pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
-    let mut snap = InverterSnapshot::default();
-    snap.timestamp = chrono::Utc::now().timestamp();
+    let mut snap = InverterSnapshot { timestamp: chrono::Utc::now().timestamp(), ..Default::default() };
     let mut raw = RawConfig {
         battery_power_mode: 0,
         enable_discharge: false,

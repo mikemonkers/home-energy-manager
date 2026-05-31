@@ -288,6 +288,7 @@ cd src-tauri && cargo test
 ```
 
 Key test modules:
+
 - `decoder::tests` — full snapshot decode, battery state derivation, timeslot handling
 - `encoder::tests` — command encoding, whitelist validation, range checks
 - `framer::tests` — frame encode/decode roundtrip, CRC, header validation
@@ -314,6 +315,7 @@ cargo tauri build      # Build native desktop app
 ### CI/CD
 
 GitHub Actions workflow (`.github/workflows/build.yml`):
+
 - Triggers on tag push (`v*`) or manual dispatch
 - Builds for: macOS (aarch64 + x86_64), Linux (x86_64), Windows (x86_64)
 - macOS DMG is customized: removes `/Applications` symlink (breaks on macOS 26.5+),

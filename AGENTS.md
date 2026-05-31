@@ -24,10 +24,50 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run lint` | `eslint .` |
 | `npm run preview` | `vite preview` |
 | `cargo test` (in `src-tauri/`) | Run all Rust unit tests (101 tests) |
+| `cargo clippy` (in `src-tauri/`) | Run Rust linter |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
 
-Order for full verification: `npm run lint` → `npm run build` (typechecks) → `cargo test` in `src-tauri/`.
+Order for full verification: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` (typechecks) → `cargo test` in `src-tauri/`.
+
+## Linting rules
+
+### Rust (clippy)
+
+All clippy warnings must be fixed before committing. Known patterns that commonly trigger warnings:
+
+- `empty_line_after_doc_comments` — no blank line after `///` doc comments
+- `field_reassign_with_default` — use `Struct { field: value, ..Default::default() }` instead of mutating after default
+- `manual_flatten` — use `.flatten()` / `.into_iter().flatten()` instead of `if let Some` in a loop
+- `match_like_matches_macro` — use `matches!()` for boolean match expressions
+- `derivable_impls` — use `#[derive(Default)]` instead of manual `impl Default`
+- `new_without_default` — add `impl Default` that calls `new()`
+- `same_item_push` — use `vec![val; N]` or `resize(N, val)` instead of loop + push
+- `manual_clamp` — use `.clamp(min, max)` instead of `.min(max).max(min)`
+
+Run: `cd src-tauri && cargo clippy`
+
+### TypeScript / ESLint
+
+All ESLint errors must be fixed before committing. Notable rules:
+
+- `verbatimModuleSyntax: true` — use `import type` for type-only imports
+- `erasableSyntaxOnly: true` — no `enum`, no `namespace`, no constructor parameter properties
+- `noUnusedLocals` / `noUnusedParameters` — both on; declarations must be used
+- `react-hooks/set-state-in-effect` — do not call `setState` directly inside `useEffect`; use derived values or key-based remounting instead
+
+Run: `npm run lint`
+
+### Markdown
+
+Run `markdownlint` on .md files after significant edits. Notable rules:
+
+- MD001 — heading levels should only increment by one level at a time
+- MD012 — no multiple consecutive blank lines
+- MD022 — headings should be surrounded by blank lines
+- MD032 — lists should be surrounded by blank lines
+
+Run: `npx markdownlint '**/*.md' --ignore node_modules`
 
 ## Architecture
 
@@ -154,9 +194,11 @@ Known limitation: register 32 (charge slot 2 end time) consistently returns exce
 ## Rust testing
 
 All tests are `#[cfg(test)]` unit tests inside each module. Run with:
+
 ```
 cd src-tauri && cargo test
 ```
+
 No integration tests or test fixtures exist. The Modbus client tests use a mock TCP server.
 
 ## Build artifacts
@@ -207,6 +249,7 @@ even running the binary directly via terminal fails, not just `open`.
 
 **CI fix implemented**:
 The `.github/workflows/build.yml` now includes a `Customize macOS DMG` step that:
+
 1. Removes the misleading `/Applications` symlink from the DMG
 2. Adds a `README.txt` with install instructions (drag to Desktop, not /Applications)
 3. Rebuilds the DMG with these changes
@@ -215,11 +258,13 @@ The workflow uses manual `cargo tauri build` + `softprops/action-gh-release` ins
 of `tauri-action` so the DMG can be customized before upload.
 
 **Workaround for end users**:
+
 - Download `GivEnergy-Local_aarch64.app.tar.gz` from releases (not the DMG)
 - Or install the .app on Desktop, not in /Applications
 - Run via `./launch.command` in the project root (searches Desktop first)
 
 **Known good archs**:
+
 - The aarch64 (ARM64) app works correctly from Desktop
 - The x86_64 (Intel) app crashes silently under Rosetta on macOS 26.5+
 - The aarch64.app.tar.gz release artifact contains the correct binary

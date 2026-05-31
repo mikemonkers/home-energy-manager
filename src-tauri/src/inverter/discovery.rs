@@ -58,10 +58,8 @@ pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
 
     let results = futures_util::future::join_all(tasks).await;
     let mut found = Vec::new();
-    for result in results {
-        if let Some(inverter) = result {
-            found.push(inverter);
-        }
+    for inverter in results.into_iter().flatten() {
+        found.push(inverter);
     }
 
     log::info!(
@@ -188,11 +186,7 @@ fn collect_physical_subnets(interfaces: &[(String, IpAddr)]) -> Vec<String> {
 
         // Only accept 10.x.x.x and 192.168.x.x — these are home/office LANs.
         // 172.16-31.x.x is exclusively Docker/WSL/libvirt and should never be scanned.
-        let is_physical = match octets {
-            [192, 168, ..] => true,
-            [10, ..] => true,
-            _ => false,
-        };
+        let is_physical = matches!(octets, [192, 168, ..] | [10, ..]);
 
         if !is_physical {
             continue;

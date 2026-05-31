@@ -25,6 +25,12 @@ pub struct ConnectedClients {
     clients: HashMap<u64, SocketAddr>,
 }
 
+impl Default for ConnectedClients {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectedClients {
     pub fn new() -> Self {
         Self {

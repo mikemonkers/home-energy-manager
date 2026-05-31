@@ -371,9 +371,7 @@ impl ModbusClient {
                     returned,
                     chunk_size
                 );
-                for _ in 0..(chunk_size - returned) {
-                    all_values.push(0);
-                }
+                all_values.resize(all_values.len() + (chunk_size - returned) as usize, 0);
             }
 
             offset += chunk_size;

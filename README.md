@@ -43,7 +43,6 @@ Click **Scan Network** on the Settings page. The app will scan your local networ
 
 > **Tip**: If the connection keeps dropping or data looks wrong, try a wired Ethernet connection between your data adapter and router. The WiFi dongles can be unreliable.
 
-
 ## Screenshots
 
 <table>

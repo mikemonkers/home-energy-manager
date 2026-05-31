@@ -611,7 +611,7 @@ pub async fn set_auto_winter(
         config.recovery_threshold = v as f32;
     }
     if let Some(v) = body.get("target_soc").and_then(|v| v.as_u64()) {
-        config.target_soc = v.min(100).max(4) as u8;
+        config.target_soc = v.clamp(4, 100) as u8;
     }
     if let Some(v) = body.get("debounce_readings").and_then(|v| v.as_u64()) {
         config.debounce_readings = v.max(1) as u32;

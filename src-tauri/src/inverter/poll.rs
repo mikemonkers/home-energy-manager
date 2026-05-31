@@ -104,9 +104,10 @@ impl Default for PollSettings {
 // ---------------------------------------------------------------------------
 
 /// State machine for temperature-triggered auto winter mode.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub enum AutoWinterState {
     /// Awaiting cold temperatures.
+    #[default]
     Idle,
     /// Temperature below Cold Threshold, counting towards debounce.
     ColdPending {
@@ -120,12 +121,6 @@ pub enum AutoWinterState {
         /// Consecutive polls where temp was above Recovery Threshold.
         consecutive: u32,
     },
-}
-
-impl Default for AutoWinterState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Configuration for auto winter mode.
@@ -215,7 +210,15 @@ impl AppState {
             auto_winter_saved: Arc::new(Mutex::new(None)),
         }
     }
+}
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppState {
     /// Create `AppState` with an externally-created log ring
     /// (used when the tracing capture layer needs the ring before
     /// the state is constructed).
@@ -258,7 +261,7 @@ impl AppState {
 /// If `settings.serial` is empty the dongle serial is auto-discovered from
 /// the first response frame header and persisted to settings — only the host
 /// IP is required to connect.
-
+///
 /// Sanitize a snapshot against physically impossible register values.
 /// Compares against the previous snapshot to detect and correct garbled
 /// readings before they reach the frontend or history database.

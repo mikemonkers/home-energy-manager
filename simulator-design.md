@@ -132,6 +132,7 @@ When a read request arrives:
 5. Encode and send
 
 Special handling for slave addresses:
+
 - `0x11` or `0x32` → inverter holding registers (FC 0x03) or input registers (FC 0x04)
 - `0x33..=0x36` → battery module input registers
 - Unknown slave → exception response (slave not found)
@@ -147,6 +148,7 @@ When a write request arrives (FC 0x06):
 5. Send write response echoing the register + value
 
 Write-triggered side effects (optional, for realism):
+
 - Writing HR(59)=1 (enable_discharge) could start gradually changing battery current
 - Writing HR(96)=1 (enable_charge) could start increasing SOC
 - Writing HR(163)=100 (reboot) could simulate a brief disconnect
@@ -230,6 +232,7 @@ Each profile populates its `default_holding` and `default_input` maps with reali
 ### 5.4 3-Phase differences
 
 The 3-phase profile shifts data to different register ranges:
+
 - PV data: IR 1000-1060 (per-string, separate registers)
 - Grid data: IR 1060-1120 (3-phase voltages, currents, power per phase)
 - Battery: IR 1120-1140
@@ -262,6 +265,7 @@ Each battery module has its own register bank (IR 60-119):
 ### 6.2 HV Battery (All-in-One, HV Gen3)
 
 HV models use BCU/BMU hierarchy at different slave addresses:
+
 - BAMS: slave 0xA0 (reports BCU count)
 - BCU: slave 0x70+ (reports module count, SOC, SOH)
 - BMU: slave 0x50+ (24 cell voltages + 24 cell temps per module)
