@@ -355,3 +355,32 @@ Leave `serial` empty for auto-discovery from the dongle's first response frame.
 | POST | `/api/control/pause` | Pause battery (sets SOC reserve to 100) |
 | GET | `/api/discover` | Scan network for inverters |
 | WS | `/ws` | Real-time snapshot + connection state stream |
+
+## Docker Deployment
+
+The app can run headless in Docker for always-on server deployments.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-stage build: node (frontend) → rust (binary) → debian-slim (runtime) |
+| `docker-compose.yml` | Production config: host networking, persistent volume |
+| `.dockerignore` | Excludes `node_modules/`, `target/`, `dist/`, `.git/`, `.env` |
+
+### Build and run
+
+```bash
+docker compose up -d          # start
+docker compose build          # rebuild after code changes
+docker compose down           # stop and remove (data persists in volume)
+docker logs givenergy-local   # view logs
+```
+
+### Architecture notes
+
+- **Host networking** is required — the Modbus TCP client needs LAN access to the inverter at port 8899
+- **Volume mount** `${HOME}/.givenergy-local:/root/.givenergy-local` persists `settings.json` and `history.db` across restarts
+- The container runs `givenergy-local --headless` by default on port 7337
+- Image size is ~1.5 GB due to GTK/WebKit runtime dependencies (Tauri links against them even in headless mode)
+- `GIVENERGY_LOCAL_CONFIG_DIR` env var is set to `/root/.givenergy-local` inside the container

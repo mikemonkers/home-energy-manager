@@ -118,7 +118,7 @@ npm run build
 cd src-tauri && cargo tauri dev
 ```
 
-## Build and Running Headless
+## Running Headless (Native)
 
 ```bash
 # 1. Install dependencies
@@ -141,6 +141,19 @@ nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
 > ```bash
 > ./target/release/givenergy-local --headless --dist /path/to/dist
 > ```
+
+## Running Headless (Docker)
+
+```bash
+# Build and start with docker compose
+docker compose up -d
+
+# Rebuild after code changes
+docker compose build && docker compose up -d
+```
+
+**Persistent data** (settings + history DB) lives in `${HOME}/.givenergy-local` and
+is mounted into the container at `/root/.givenergy-local`. This survives restarts.
 
 ## Running Multiple Instances
 

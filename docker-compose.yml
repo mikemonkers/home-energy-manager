@@ -1,0 +1,12 @@
+services:
+  givenergy-local:
+    build: .
+    container_name: givenergy-local
+    restart: unless-stopped
+    network_mode: "host"
+    volumes:
+      - "${HOME}/.givenergy-local:/root/.givenergy-local"
+    environment:
+      - GIVENERGY_LOCAL_CONFIG_DIR=/root/.givenergy-local
+    # Default port is 7337. Override with --port if needed.
+    # command: ["--headless", "--port", "7337"]
