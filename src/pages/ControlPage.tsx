@@ -666,10 +666,12 @@ export default function ControlPage() {
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
   const [cosyEnabled, setCosyEnabled] = useState(false);
 
-  // Show draft while dragging; once snapshot confirms the saved value, use snapshot
+  // Show draft while dragging; once snapshot confirms the saved value, use snapshot.
+  // Default to null (no data) until the first snapshot arrives to avoid showing
+  // misleading 100% values that then jump to real values.
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve) ? draftReserve : (snapshot?.battery_reserve ?? 4);
-  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : (snapshot?.charge_rate ?? 100);
-  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : (snapshot?.discharge_rate ?? 100);
+  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : snapshot?.charge_rate;
+  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : snapshot?.discharge_rate;
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -740,6 +742,7 @@ export default function ControlPage() {
   };
 
   const handleChargeRateSave = async () => {
+    if (chargeRate == null) return;
     setChargeRateSaving(true);
     try {
       await apiPost('/api/control/charge-rate', { limit: chargeRate });
@@ -748,6 +751,7 @@ export default function ControlPage() {
   };
 
   const handleDischargeRateSave = async () => {
+    if (dischargeRate == null) return;
     setDischargeRateSaving(true);
     try {
       await apiPost('/api/control/discharge-rate', { limit: dischargeRate });
@@ -933,7 +937,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">Charge Rate</span>
-              <span className="font-mono text-text-primary text-sm">{chargeRate}%</span>
+              <span className="font-mono text-text-primary text-sm">{chargeRate ?? '—'}%</span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -941,7 +945,7 @@ export default function ControlPage() {
                 min={0}
                 max={100}
                 step={5}
-                value={chargeRate}
+                value={chargeRate ?? 50}
                 onChange={(e) => setDraftCharge(Number(e.target.value))}
                 className="flex-1"
               />
@@ -959,7 +963,7 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">Discharge Rate</span>
-              <span className="font-mono text-text-primary text-sm">{dischargeRate}%</span>
+              <span className="font-mono text-text-primary text-sm">{dischargeRate ?? '—'}%</span>
             </div>
             <div className="flex items-center gap-3">
               <input
@@ -967,7 +971,7 @@ export default function ControlPage() {
                 min={0}
                 max={100}
                 step={5}
-                value={dischargeRate}
+                value={dischargeRate ?? 50}
                 onChange={(e) => setDraftDischarge(Number(e.target.value))}
                 className="flex-1"
               />
