@@ -90,10 +90,8 @@ pub fn run() {
             }
 
             // Open history database
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            let db_path = std::path::PathBuf::from(home)
-                .join(".givenergy-local")
-                .join("history.db");
+            let config_dir = crate::settings::Settings::settings_dir();
+            let db_path = config_dir.join("history.db");
             let history_db = match HistoryDb::open(&db_path) {
                 Ok(db) => Arc::new(db),
                 Err(e) => {
@@ -317,10 +315,8 @@ pub fn run_headless(args: &[String]) {
         }
 
         // Open history database
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let db_path = std::path::PathBuf::from(home)
-            .join(".givenergy-local")
-            .join("history.db");
+        let config_dir = crate::settings::Settings::settings_dir();
+        let db_path = config_dir.join("history.db");
         let history_db = match HistoryDb::open(&db_path) {
             Ok(db) => Arc::new(db),
             Err(e) => {

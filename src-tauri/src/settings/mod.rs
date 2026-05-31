@@ -169,11 +169,21 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Get the settings directory path.
+    /// Uses `GIVENERGY_LOCAL_CONFIG_DIR` env var if set, otherwise `~/.givenergy-local/`.
+    pub fn settings_dir() -> PathBuf {
+        match std::env::var("GIVENERGY_LOCAL_CONFIG_DIR") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".givenergy-local")
+            }
+        }
+    }
+
     /// Get the path to the settings file.
     fn settings_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = PathBuf::from(home).join(".givenergy-local");
-        dir.join("settings.json")
+        Self::settings_dir().join("settings.json")
     }
 
     /// Load settings from disk, creating defaults if the file doesn't exist.
