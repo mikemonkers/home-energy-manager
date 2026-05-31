@@ -855,17 +855,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         tracing::debug!("Battery #1 BMS read OK");
 
                                         // Override SOC with BMS module SOC (IR 100) only when
-                                        // the inverter-level IR(59) returns 0 (common corruption).
-                                        // Otherwise trust IR(59) — it matches what the official
-                                        // app and GivTCP report.
-                                        if let Some(bms) = snapshot.battery_modules.first() {
-                                            let inverter_soc = snapshot.soc;
-                                            if inverter_soc == 0 && bms.soc > 0 && bms.soc <= 99 {
-                                                tracing::debug!(
-                                                    "Inverter SOC was 0 (corrupted) — using BMS module SOC: {}%",
-                                                    bms.soc
-                                                );
-                                                snapshot.soc = bms.soc;
+                                        // When inverter IR(59) returns 0 (corrupted), calculate
+                                        // aggregate SOC from capacity-weighted average of all
+                                        // battery modules.
+                                        // Note: full aggregate is computed below after all
+                                        // additional batteries are read.
+                                        if snapshot.soc == 0 && !snapshot.battery_modules.is_empty() {
+                                            if let Some(bms) = snapshot.battery_modules.first() {
+                                                if bms.soc > 0 && bms.soc <= 99 {
+                                                    snapshot.soc = bms.soc;
+                                                }
                                             }
                                         }
                                     }
@@ -901,6 +900,25 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             tracing::debug!("Battery addr 0x{:02X}: no response", addr);
                                             break;
                                         }
+                                    }
+                                }
+
+                                // If inverter IR(59) was 0, recalculate SOC from
+                                // capacity-weighted average of ALL battery modules
+                                // (now that additional batteries have been read).
+                                if snapshot.soc == 0 && snapshot.battery_modules.len() > 1 {
+                                    let total_cap: f32 = snapshot
+                                        .battery_modules.iter().map(|m| m.capacity_ah).sum();
+                                    let total_rem: f32 = snapshot
+                                        .battery_modules.iter().map(|m| m.remaining_capacity_ah).sum();
+                                    if total_cap > 0.0 {
+                                        let agg = (total_rem / total_cap * 100.0).round() as u8;
+                                        snapshot.soc = agg.min(100);
+                                        tracing::debug!(
+                                            "Inverter SOC was 0 — aggregate from {} modules: {}%",
+                                            snapshot.battery_modules.len(),
+                                            snapshot.soc
+                                        );
                                     }
                                 }
 
