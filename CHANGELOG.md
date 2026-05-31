@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-05-31
+
+### Added
+
+- **Cosy charging mode** (developer feature): Local software-based charge scheduler.
+  Inverter stays in Eco mode while the app manages charge timing via ForceCharge
+  commands. Up to 3 charge slots with configurable times and target SOC, stored
+  locally in settings.json (not written to inverter registers). Supports
+  midnight-crossing slots. Toggle auto-saves. Only shown in developer mode when
+  Eco is selected.
+- **WiFi-UART Server mode advice**: FAQ entry and StatusPage waiting message
+  now mention the dongle's WiFi-UART setting must be "Server" not "Client"
+  after a factory reset.
+
+### Changed
+
+- **Schedule slot styling**: Charge and discharge schedule editors now use
+  the same compact card design as Cosy slots (bg-bg-surface, p-3, smaller
+  toggle switch).
+- **Charge Schedule hidden during Cosy**: When Cosy charging is active, the
+  standard inverter charge schedule section is hidden.
+- **Expanded README Quick Start**: Detailed connection instructions with
+  screenshots, network scan tip, and macOS caveats.
+- **GivEnergy mode buttons simplified**: Timed Demand / Timed Export / Export
+  Paused collapsed to just "Timed Discharge" and "Paused".
+
+### Fixed
+
+- **Stale write responses**: Retry now resends the write request after draining
+  each stale frame instead of passively consuming retry attempts.
+- **Charge slot 2 disable**: Decoder treats start=00:00 as disabled regardless
+  of end value, working around unwritable register 32 on some inverters.
+- **Timed mode switching**: Removed decoder override that prevented switching
+  to timed mode before configuring discharge slots.
+- **Aggregate battery SOC**: Multi-battery systems now compute capacity-weighted
+  average across all modules instead of using only the first module.
+- **PV2 daily energy**: Only included if PV2 voltage > 0 (prevents garbage data
+  from phantom second string).
+- **ESLint error**: `set-state-in-effect` — derive effectiveMode instead of
+  calling setState in useEffect.
+- **10 clippy warnings**: derivable_impls, manual_flatten, match_like_matches_macro,
+  field_reassign_with_default, empty_line_after_doc_comments, new_without_default,
+  same_item_push, manual_clamp.
+- **CI native bindings**: Added all platform variants of @rolldown/binding,
+  lightningcss, and @tailwindcss/oxide as optional dependencies so builds work
+  on macOS/Linux when lockfile was generated on Windows.
+
 ## [0.9.7] - 2026-05-30
 
 ### Added
