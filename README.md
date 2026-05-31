@@ -87,6 +87,19 @@ GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapt
 
 The app talks to your inverter's data adapter over your local network using the Modbus TCP protocol. It never connects to the internet or sends data anywhere else.
 
+### Battery SOC
+
+The battery state of charge (SOC) shown on the Status and Battery pages comes
+from the inverter's own register (IR 59), which is the same value the official
+GivEnergy app and GivTCP report. If this register returns 0 (indicating a
+corrupted read), the app falls back to a capacity-weighted average calculated
+from all connected battery modules using their `remaining_capacity / capacity`
+registers.
+
+For multi-battery systems, each module's individual SOC is shown in the
+Battery page module cards. The main SOC display reflects the inverter's
+aggregate value.
+
 ## Tech Stack
 
 Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript. See [DESIGN.md](./DESIGN.md) for architecture details and the register map.

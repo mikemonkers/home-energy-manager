@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.11] - 2026-05-31
+
+### Added
+
+- **Battery mode label**: Shows current mode (Eco, Timed Discharge, Paused, etc.)
+  below the battery in the energy flow diagram on the Status page
+
+### Changed
+
+- **SOC calculation**: Now trusts the inverter's IR(59) register by default,
+  matching the official GivEnergy app and GivTCP. Only falls back to
+  capacity-weighted BMS aggregate when IR(59) returns 0 (corrupted).
+- **Reserve SOC slider**: Step reduced from 5 to 1 so 4% can be restored
+  after changing (previously stuck at 0, 5, 10...)
+- **Charge/discharge rate**: Validation expanded from 0-50 to 0-100.
+  Some inverters report 100% = 3000W.
+
+### Fixed
+
+- **Slider flicker on save**: Draft value now persists until the snapshot
+  confirms the saved value, preventing a flash of the old reading
+- **Charge/discharge rate not working**: Backend was rejecting values > 50
+  even though many inverters support 0-100% range
+- **Missing @types/node**: Added as dev dependency for tsc builds
+
 ## [0.9.10] - 2026-05-31
 
 ### Added
