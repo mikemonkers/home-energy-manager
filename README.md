@@ -94,8 +94,14 @@ Built with [Tauri 2](https://v2.tauri.app/) (Rust + React), Axum, and TypeScript
 ## Development
 
 ```bash
+# 1. Install dependencies
 npm install
 cargo install tauri-cli
+
+# 2. Build the frontend first (creates dist/)
+npm run build
+
+# 3. Build and Run the Rust backend
 cd src-tauri && cargo tauri dev
 ```
 
