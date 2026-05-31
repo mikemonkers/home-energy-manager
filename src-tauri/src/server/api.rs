@@ -719,3 +719,18 @@ pub async fn set_calibration(
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
 }
+
+/// POST /api/control/reboot — reboot the inverter.
+pub async fn reboot_inverter(
+    State(state): State<Arc<AppState>>,
+) -> Json<Value> {
+    let cmd = ControlCommand::RebootInverter;
+    match cmd.encode() {
+        Ok(writes) => {
+            tracing::info!("RebootInverter encoded: {:?}", writes);
+            queue_writes(&state, writes).await;
+            ok_response("Reboot command sent")
+        }
+        Err(e) => error_response(&format!("Error: {}", e)),
+    }
+}

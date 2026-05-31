@@ -168,6 +168,9 @@ pub const HR_BATTERY_PAUSE_SLOT_1_END: u16 = 320;
 /// Battery calibration stage (0=off, 5=balance).
 pub const HR_BATTERY_CALIBRATION_STAGE: u16 = 29;
 
+/// Inverter reboot (write 100 to reboot).
+pub const HR_INVERTER_REBOOT: u16 = 163;
+
 // ===========================================================================
 // System time registers (read/write for clock sync)
 // ===========================================================================
@@ -249,7 +252,7 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Sourced from GivTCP safe_regs.
 pub const SAFE_WRITE_REGS: &[u16] = &[
     20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
-    116, 318, 319, 320,
+    116, 163, 318, 319, 320,
 ];
 
 // ---------------------------------------------------------------------------
@@ -345,6 +348,7 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_1_START)); // 94
         assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SOC_RESERVE)); // 110
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC)); // 116
+        assert!(SAFE_WRITE_REGS.contains(&HR_INVERTER_REBOOT)); // 163
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_YEAR)); // 35
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MONTH)); // 36
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_DAY)); // 37

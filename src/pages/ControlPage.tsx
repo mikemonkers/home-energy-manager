@@ -627,6 +627,33 @@ function BatteryCalibrationSection() {
           </p>
         )}
       </div>
+
+      {/* Reboot Inverter */}
+      <div className="bg-red-900/20 border border-red-700/30 rounded-xl p-3 space-y-2">
+        <p className="text-red-300 text-xs font-medium">⚠️  DANGER</p>
+        <p className="text-red-200/70 text-xs">
+          This immediately reboots the inverter. The connection will drop and
+          the inverter will be offline for 1-2 minutes while it restarts.
+        </p>
+        <button
+          onClick={async () => {
+            if (!confirm('⚠️  REBOOT INVERTER\n\nThis will restart the inverter immediately. The connection will drop for 1-2 minutes.\n\nContinue?')) return;
+            setSaving(true);
+            try {
+              await apiPost('/api/control/reboot');
+              setFeedback('saved');
+            } catch {
+              setFeedback('error');
+            }
+            setSaving(false);
+            setTimeout(() => setFeedback(null), 3000);
+          }}
+          disabled={saving}
+          className="w-full py-2 bg-red-500/20 text-red-400 rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
+        >
+          Reboot Inverter
+        </button>
+      </div>
     </section>
   );
 }

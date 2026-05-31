@@ -11,7 +11,7 @@ use crate::modbus::registers::{
     HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
     HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
     HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
-    HR_SYSTEM_TIME_YEAR, HR_SYSTEM_TIME_MONTH, HR_SYSTEM_TIME_DAY,
+    HR_INVERTER_REBOOT, HR_SYSTEM_TIME_YEAR, HR_SYSTEM_TIME_MONTH, HR_SYSTEM_TIME_DAY,
     HR_SYSTEM_TIME_HOUR, HR_SYSTEM_TIME_MINUTE, HR_SYSTEM_TIME_SECOND,
     SAFE_WRITE_REGS,
 };
@@ -72,6 +72,8 @@ pub enum ControlCommand {
     SyncClock,
     /// Set battery calibration stage (0=off, 5=balance).
     SetCalibrationStage { stage: u16 },
+    /// Reboot the inverter (write 100 to HR 163).
+    RebootInverter,
 }
 
 impl ControlCommand {
@@ -190,6 +192,9 @@ impl ControlCommand {
             ControlCommand::SetCalibrationStage { stage } => {
                 validate_range(*stage, 0, 7, "calibration stage")?;
                 vec![rw(HR_BATTERY_CALIBRATION_STAGE, *stage)]
+            }
+            ControlCommand::RebootInverter => {
+                vec![rw(HR_INVERTER_REBOOT, 100)]
             }
         };
 
