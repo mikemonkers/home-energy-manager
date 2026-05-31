@@ -102,11 +102,26 @@ cd src-tauri && cargo tauri dev
 ## Build and Running Headless
 
 ```bash
+# 1. Install dependencies
 npm install
 cargo install tauri-cli
+
+# 2. Build the frontend first (creates dist/)
+npm run build
+
+# 3. Build the Rust backend
 cd src-tauri && cargo build --release
+
+# 4. Run headless (no GUI window)
 nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
 ```
+
+> The frontend (`dist/`) must be built before the Rust binary, otherwise
+> the server won't have any UI files to serve. Alternatively, use `--dist`
+> to point to an existing build:
+> ```bash
+> ./target/release/givenergy-local --headless --dist /path/to/dist
+> ```
 
 ## Running Multiple Instances
 
