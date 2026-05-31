@@ -105,7 +105,21 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "GivEnergy Local ${{ github.ref_name }}"
-          body: "See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details."
+          body: |
+            ## Which file should I download?
+
+            | File | Platform |
+            |---|---|
+            | `*_aarch64.dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
+            | `*_x64.dmg` | **macOS** — Intel |
+            | `*_amd64.deb` | **Linux** — Debian/Ubuntu (`.deb` package) |
+            | `*_x64-setup.exe` | **Windows** — installer |
+
+            > **macOS users**: Do NOT drag the app to `/Applications`. macOS 26.5+ blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. See the README.txt inside the DMG for details.
+
+            ---
+
+            See [CHANGELOG.md](https://github.com/psylsph/givenergy-local/blob/master/CHANGELOG.md) for details.
           draft: false
           prerelease: false
           files: |
