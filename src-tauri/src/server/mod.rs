@@ -9,10 +9,12 @@ pub mod ws;
 
 use std::sync::Arc;
 
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::inverter::poll::AppState;
 
@@ -23,7 +25,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .allow_headers(Any);
 
     Router::new()
-        // Data endpoints
         .route("/api/snapshot", get(api::get_snapshot))
         .route("/api/status", get(api::get_status))
         .route(
@@ -31,7 +32,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(api::get_settings).post(api::update_settings),
         )
         .route("/api/history", get(api::get_history))
-        // Control endpoints
         .route("/api/control/mode", post(api::set_mode))
         .route("/api/control/charge-slot", post(api::set_charge_slot))
         .route("/api/control/discharge-slot", post(api::set_discharge_slot))
@@ -42,21 +42,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/force-charge", post(api::force_charge))
         .route("/api/control/force-discharge", post(api::force_discharge))
         .route("/api/control/sync-clock", post(api::sync_clock))
-        // Auto winter mode
         .route(
             "/api/auto-winter",
             get(api::get_auto_winter).post(api::set_auto_winter),
         )
-        // Cosy charging
         .route(
             "/api/cosy",
             get(api::get_cosy).post(api::set_cosy),
         )
-        // Discovery
         .route("/api/discover", get(api::discover))
-        // Developer logs
         .route("/api/logs", get(logs::get_logs))
-        // WebSocket real-time stream
         .route("/ws", get(ws::ws_handler))
         .layer(cors)
         .with_state(state)
@@ -69,45 +64,86 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 /// blocking). The bundled `dist/` resources serve the Vite output.
 pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Router {
     let router = create_router(state);
-    let index_path = format!("{}/index.html", dist_dir);
-    router.fallback_service(
-        ServeDir::new(dist_dir).fallback(ServeFile::new(index_path)),
-    )
+    let dist = dist_dir.to_string();
+    let index = format!("{}/index.html", dist_dir);
+
+    router.fallback(move |req: Request| {
+        let dist = dist.clone();
+        let index = index.clone();
+        async move {
+            let path = req.uri().path().trim_start_matches('/');
+            let file_path = std::path::PathBuf::from(&dist).join(path);
+
+            if file_path.exists() && file_path.is_file() {
+                // Serve the static file directly
+                let contents = match tokio::fs::read(&file_path).await {
+                    Ok(c) => c,
+                    Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+                };
+                // Determine content type from extension
+                let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let content_type = match ext {
+                    "js" => "application/javascript",
+                    "css" => "text/css",
+                    "html" => "text/html",
+                    "png" => "image/png",
+                    "svg" => "image/svg+xml",
+                    "ico" => "image/x-icon",
+                    "woff2" => "font/woff2",
+                    "json" => "application/json",
+                    _ => "application/octet-stream",
+                };
+                return (
+                    StatusCode::OK,
+                    [("content-type", content_type)],
+                    contents,
+                )
+                    .into_response();
+            }
+
+            // SPA fallback: serve index.html
+            match tokio::fs::read_to_string(&index).await {
+                Ok(html) => (
+                    StatusCode::OK,
+                    [("content-type", "text/html")],
+                    html,
+                )
+                    .into_response(),
+                Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+            }
+        }
+    })
 }
 
 /// Start the HTTP server (API + WebSocket only, no frontend serving).
 pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
-    let app = create_router(state)
-        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = create_router(state);
     let addr = format!("{}:{}", bind_addr, port);
-    tracing::info!("HTTP server starting on {}", addr);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind HTTP server on {}: {e}", addr);
-            return;
-        }
-    };
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("HTTP server error: {e}");
-    }
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        tracing::error!("Failed to bind to {addr}: {e}");
+        std::process::exit(1);
+    });
+    tracing::info!("HTTP server starting on {} (API only)", addr);
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        tracing::error!("Server error: {e}");
+    });
 }
 
 /// Start the HTTP server with frontend static file serving.
-pub async fn start_server_with_frontend(state: Arc<AppState>, bind_addr: &str, port: u16, dist_dir: String) {
-    let app = create_router_with_frontend(state, &dist_dir)
-        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+pub async fn start_server_with_frontend(
+    state: Arc<AppState>,
+    bind_addr: &str,
+    port: u16,
+    dist_dir: String,
+) {
+    let app = create_router_with_frontend(state, &dist_dir);
     let addr = format!("{}:{}", bind_addr, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        tracing::error!("Failed to bind to {addr}: {e}");
+        std::process::exit(1);
+    });
     tracing::info!("HTTP server starting on {} (serving frontend from {})", addr, dist_dir);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind HTTP server on {}: {e}", addr);
-            return;
-        }
-    };
-    if let Err(e) = axum::serve(listener, app).await {
-        tracing::error!("HTTP server error: {e}");
-    }
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        tracing::error!("Server error: {e}");
+    });
 }
-
