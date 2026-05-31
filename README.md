@@ -108,6 +108,43 @@ cd src-tauri && cargo build --release
 nohup ./target/release/givenergy-local --headless > givenergy-local.log 2>&1 &
 ```
 
+## Running Multiple Instances
+
+You can run multiple copies of the app with separate settings and history
+by setting the `GIVENERGY_LOCAL_CONFIG_DIR` environment variable to a
+different directory for each instance.
+
+**Linux / macOS:**
+
+```bash
+# Default (uses ~/.givenergy-local/)
+./givenergy-local
+
+# Second instance with its own config and history
+GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-instance2 ./givenergy-local
+
+# Headless server on a different port
+GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --port 8080
+```
+
+**Windows (PowerShell):**
+
+```powershell
+# Default (uses %USERPROFILE%\.givenergy-local\)
+.\givenergy-local.exe
+
+# Second instance
+$env:GIVENERGY_LOCAL_CONFIG_DIR = "C:\Users\You\givenergy-config-2"
+.\givenergy-local.exe
+```
+
+**Windows (Command Prompt):**
+
+```cmd
+set GIVENERGY_LOCAL_CONFIG_DIR=C:\Users\You\givenergy-config-2
+givenergy-local.exe
+```
+
 See [DESIGN.md](./DESIGN.md) for full build instructions, testing, and architecture documentation.
 
 ## Credits

@@ -1,6 +1,8 @@
 //! Application settings with file-based persistence.
 //!
-//! Settings are saved as JSON to `~/.givenergy-local/settings.json`.
+//! Settings are saved as JSON to `~/.givenergy-local/settings.json`
+//! (`%USERPROFILE%\.givenergy-local\settings.json` on Windows).
+//! Override with the `GIVENERGY_LOCAL_CONFIG_DIR` environment variable.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -170,15 +172,16 @@ impl Default for Settings {
 
 impl Settings {
     /// Get the settings directory path.
-    /// Uses `GIVENERGY_LOCAL_CONFIG_DIR` env var if set, otherwise `~/.givenergy-local/`.
+    /// Uses `GIVENERGY_LOCAL_CONFIG_DIR` env var if set, otherwise `~/.givenergy-local/`
+    /// (or `%USERPROFILE%\.givenergy-local\` on Windows).
     pub fn settings_dir() -> PathBuf {
-        match std::env::var("GIVENERGY_LOCAL_CONFIG_DIR") {
-            Ok(dir) => PathBuf::from(dir),
-            Err(_) => {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(home).join(".givenergy-local")
-            }
+        if let Ok(dir) = std::env::var("GIVENERGY_LOCAL_CONFIG_DIR") {
+            return PathBuf::from(dir);
         }
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(home).join(".givenergy-local")
     }
 
     /// Get the path to the settings file.
