@@ -652,3 +652,45 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
         "inverters": inverters,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// Cosy charging endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/cosy — get cosy charging config.
+pub async fn get_cosy(State(_state): State<Arc<AppState>>) -> Json<Value> {
+    let settings = crate::settings::Settings::load();
+    Json(json!({
+        "ok": true,
+        "enabled": settings.cosy_enabled,
+        "slots": settings.cosy_slots,
+    }))
+}
+
+/// POST /api/cosy — update cosy charging config.
+pub async fn set_cosy(
+    State(_state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<Value> {
+    let enabled = body["enabled"].as_bool().unwrap_or(false);
+    let mut app_settings = crate::settings::Settings::load();
+    app_settings.cosy_enabled = enabled;
+
+    if let Some(slots) = body["slots"].as_array() {
+        app_settings.cosy_slots = slots.iter().map(|s| crate::settings::CosySlot {
+            enabled: s["enabled"].as_bool().unwrap_or(false),
+            start_hour: s["start_hour"].as_u64().unwrap_or(0) as u8,
+            start_minute: s["start_minute"].as_u64().unwrap_or(0) as u8,
+            end_hour: s["end_hour"].as_u64().unwrap_or(0) as u8,
+            end_minute: s["end_minute"].as_u64().unwrap_or(0) as u8,
+            target_soc: s["target_soc"].as_u64().unwrap_or(100) as u8,
+        }).collect();
+    }
+
+    if let Err(e) = app_settings.save() {
+        tracing::warn!("Failed to persist cosy config: {e}");
+        return error_response(&format!("Failed to save: {e}"));
+    }
+
+    ok_response("Cosy config updated")
+}

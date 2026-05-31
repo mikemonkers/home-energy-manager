@@ -20,13 +20,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Timelike;
+
 use tokio::sync::{broadcast, Mutex, Notify};
 use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
 
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
-use crate::inverter::encoder::RegisterWrite;
+use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::InverterSnapshot;
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE_TARGET};
@@ -186,6 +188,8 @@ pub struct AppState {
     pub auto_winter_state: Arc<Mutex<AutoWinterState>>,
     /// Saved register values to restore when winter mode deactivates.
     pub auto_winter_saved: Arc<Mutex<Option<AutoWinterSaved>>>,
+    /// Whether cosy charging is currently active (force-charging in a slot).
+    pub cosy_active: Arc<Mutex<bool>>,
 }
 
 impl AppState {
@@ -208,6 +212,7 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
+            cosy_active: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -237,6 +242,7 @@ impl AppState {
             auto_winter_config: Arc::new(Mutex::new(AutoWinterConfig::default())),
             auto_winter_state: Arc::new(Mutex::new(AutoWinterState::default())),
             auto_winter_saved: Arc::new(Mutex::new(None)),
+            cosy_active: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -980,6 +986,73 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 ),
                                             }
                                             tokio::time::sleep(Duration::from_millis(1500)).await;
+                                        }
+                                    }
+                                }
+
+                                // ---- Cosy charging mode ----
+                                {
+                                    let settings = crate::settings::Settings::load();
+                                    if settings.cosy_enabled {
+                                        let now = chrono::Local::now();
+                                        let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
+
+                                        // Check if we're inside any enabled cosy slot
+                                        let mut in_slot = false;
+                                        let mut slot_target_soc: u8 = 100;
+                                        for slot in &settings.cosy_slots {
+                                            if !slot.enabled {
+                                                continue;
+                                            }
+                                            let start = slot.start_hour as u16 * 60 + slot.start_minute as u16;
+                                            let end = slot.end_hour as u16 * 60 + slot.end_minute as u16;
+                                            let crosses_midnight = end <= start;
+                                            if crosses_midnight {
+                                                if now_minutes >= start || now_minutes < end {
+                                                    in_slot = true;
+                                                    slot_target_soc = slot.target_soc;
+                                                    break;
+                                                }
+                                            } else if now_minutes >= start && now_minutes < end {
+                                                in_slot = true;
+                                                slot_target_soc = slot.target_soc;
+                                                break;
+                                            }
+                                        }
+
+                                        let mut cosy_active = state.cosy_active.lock().await;
+                                        if in_slot && !*cosy_active {
+                                            // Entering a cosy slot — start force charge
+                                            tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
+                                            *cosy_active = true;
+                                            drop(cosy_active);
+                                            let cmd = ControlCommand::ForceCharge;
+                                            if let Ok(writes) = cmd.encode() {
+                                                for w in &writes {
+                                                    match client.write_register(w.address, w.value).await {
+                                                        Ok(()) => tracing::info!("Cosy: wrote reg {} = {}", w.address, w.value),
+                                                        Err(e) => tracing::error!("Cosy: write reg {} failed: {e}", w.address),
+                                                    }
+                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                }
+                                            }
+                                        } else if !in_slot && *cosy_active {
+                                            // Exiting a cosy slot — stop force charge
+                                            tracing::info!("Cosy: exiting slot, stopping charge");
+                                            *cosy_active = false;
+                                            drop(cosy_active);
+                                            let cmd = ControlCommand::SetEnableCharge { enabled: false };
+                                            if let Ok(writes) = cmd.encode() {
+                                                for w in &writes {
+                                                    match client.write_register(w.address, w.value).await {
+                                                        Ok(()) => tracing::info!("Cosy: wrote reg {} = {}", w.address, w.value),
+                                                        Err(e) => tracing::error!("Cosy: write reg {} failed: {e}", w.address),
+                                                    }
+                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                }
+                                            }
+                                        } else {
+                                            drop(cosy_active);
                                         }
                                     }
                                 }

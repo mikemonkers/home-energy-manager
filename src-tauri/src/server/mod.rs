@@ -47,6 +47,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/auto-winter",
             get(api::get_auto_winter).post(api::set_auto_winter),
         )
+        // Cosy charging
+        .route(
+            "/api/cosy",
+            get(api::get_cosy).post(api::set_cosy),
+        )
         // Discovery
         .route("/api/discover", get(api::discover))
         // Developer logs

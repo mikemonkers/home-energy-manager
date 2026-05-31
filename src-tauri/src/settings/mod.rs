@@ -31,6 +31,36 @@ impl Default for TariffConfig {
     }
 }
 
+/// A cosy charging slot stored locally (not written to inverter registers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CosySlot {
+    /// Whether the slot is enabled.
+    pub enabled: bool,
+    /// Start hour (0-23).
+    pub start_hour: u8,
+    /// Start minute (0-59).
+    pub start_minute: u8,
+    /// End hour (0-23).
+    pub end_hour: u8,
+    /// End minute (0-59).
+    pub end_minute: u8,
+    /// Target SOC for charging (4-100%).
+    pub target_soc: u8,
+}
+
+impl Default for CosySlot {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start_hour: 0,
+            start_minute: 0,
+            end_hour: 0,
+            end_minute: 0,
+            target_soc: 100,
+        }
+    }
+}
+
 /// Application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
@@ -66,6 +96,13 @@ pub struct Settings {
     /// Consecutive readings before state transitions.
     #[serde(default = "default_aw_debounce")]
     pub auto_winter_debounce_readings: u32,
+
+    /// Cosy charging mode enabled.
+    #[serde(default)]
+    pub cosy_enabled: bool,
+    /// Cosy charging slots (up to 3, stored locally).
+    #[serde(default)]
+    pub cosy_slots: Vec<CosySlot>,
 
     /// Persisted `enable_charge_target` saved before winter mode activated.
     /// `Some` means winter mode was active when the last state was saved.
@@ -125,6 +162,8 @@ impl Default for Settings {
             auto_winter_saved_target_soc: None,
             import_tariff_config: None,
             export_tariff_config: None,
+            cosy_enabled: false,
+            cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
         }
     }
 }
@@ -220,6 +259,8 @@ mod tests {
             auto_winter_saved_target_soc: Some(80),
             import_tariff_config: None,
             export_tariff_config: None,
+            cosy_enabled: false,
+            cosy_slots: vec![],
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -260,6 +301,8 @@ mod tests {
             auto_winter_saved_target_soc: None,
             import_tariff_config: None,
             export_tariff_config: None,
+            cosy_enabled: false,
+            cosy_slots: vec![],
         };
 
         // We can't easily override the settings path for testing,

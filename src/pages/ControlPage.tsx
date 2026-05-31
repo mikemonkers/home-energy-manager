@@ -407,8 +407,139 @@ function AutoWinterSection() {
   );
 }
 
+/** Cosy charging section — only shown in developer mode + Eco mode. */
+function CosyChargingSection() {
+  const [enabled, setEnabled] = useState(false);
+  const [slots, setSlots] = useState<
+    { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
+  >([]);
+  const [saving, setSaving] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiGet<{ ok: boolean; enabled: boolean; slots: typeof slots }>('/api/cosy');
+        if (res.ok) {
+          setEnabled(res.enabled);
+          setSlots(res.slots.length === 3 ? res.slots : Array.from({ length: 3 }, () => ({
+            enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
+          })));
+        }
+      } catch { /* use defaults */ }
+    })();
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setSaveFeedback(null);
+    try {
+      await apiPost('/api/cosy', { enabled, slots });
+      setSaveFeedback('saved');
+    } catch {
+      setSaveFeedback('error');
+    }
+    setSaving(false);
+    setTimeout(() => setSaveFeedback(null), 2000);
+  };
+
+  return (
+    <section className="space-y-3 border-t border-bg-elevated pt-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-text-primary font-semibold text-lg">Cosy Charging</h2>
+        <button
+          onClick={() => setEnabled(!enabled)}
+          className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-surface'}`}
+        >
+          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`} />
+        </button>
+      </div>
+      <p className="text-text-secondary/60 text-xs">
+        Inverter stays in Eco mode. Charge slots are stored locally — the app
+        sends ForceCharge commands during these windows.
+      </p>
+
+      {enabled && (
+        <div className="space-y-4">
+          {slots.map((slot, i) => (
+            <div key={i} className="bg-bg-surface rounded-xl p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-text-primary text-sm font-medium">Slot {i + 1}</span>
+                <button
+                  onClick={() => {
+                    const next = [...slots];
+                    next[i] = { ...next[i], enabled: !next[i].enabled };
+                    setSlots(next);
+                  }}
+                  className={`relative w-9 h-4 rounded-full transition ${slot.enabled ? 'bg-battery' : 'bg-bg-elevated'}`}
+                >
+                  <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition ${slot.enabled ? 'left-5' : 'left-0.5'}`} />
+                </button>
+              </div>
+              {slot.enabled && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-6">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-text-secondary text-sm">Start</span>
+                      <TimePicker
+                        hour={slot.start_hour}
+                        minute={slot.start_minute}
+                        onChange={(h, m) => {
+                          const next = [...slots];
+                          next[i] = { ...next[i], start_hour: h, start_minute: m };
+                          setSlots(next);
+                        }}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-text-secondary text-sm">End</span>
+                      <TimePicker
+                        hour={slot.end_hour}
+                        minute={slot.end_minute}
+                        onChange={(h, m) => {
+                          const next = [...slots];
+                          next[i] = { ...next[i], end_hour: h, end_minute: m };
+                          setSlots(next);
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-text-secondary text-xs w-20 shrink-0">Target SOC</span>
+                    <input
+                      type="range"
+                      min={4}
+                      max={100}
+                      step={5}
+                      value={slot.target_soc}
+                      onChange={(e) => {
+                        const next = [...slots];
+                        next[i] = { ...next[i], target_soc: Number(e.target.value) };
+                        setSlots(next);
+                      }}
+                      className="flex-1"
+                    />
+                    <span className="font-mono text-text-primary text-xs w-8 text-right">{slot.target_soc}%</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function ControlPage() {
-  const { snapshot } = useInverterStore();
+  const { snapshot, developerMode } = useInverterStore();
   const modeAction = useAction();
 
   // Battery limits local state (synced from snapshot)
@@ -640,6 +771,9 @@ export default function ControlPage() {
         </div>
       </section>
       )}
+
+      {/* Section 5: Cosy Charging (dev mode only, Eco only) */}
+      {developerMode && modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection />}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />
