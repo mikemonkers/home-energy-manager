@@ -20,9 +20,9 @@ const NODES = {
 
 const MODE_LABELS: Record<string, string> = {
   eco: 'Eco',
-  eco_paused: 'Eco Paused',
-  timed_demand: 'Timed Discharge',
-  timed_export: 'Timed Export',
+  eco_paused: 'Paused',
+  timed_demand: 'Timed',
+  timed_export: 'Timed',
   export_paused: 'Paused',
 };
 

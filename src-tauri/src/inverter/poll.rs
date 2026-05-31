@@ -854,28 +854,17 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         );
                                         tracing::debug!("Battery #1 BMS read OK");
 
-                                        // Override SOC with BMS module SOC (IR 100) which is
-                                        // more reliable than the inverter-level IR(59) that
-                                        // intermittently returns 0.
-                                        //
-                                        // Validation: only override when the BMS value is
-                                        // plausible — not 0 (garbage) and not a wild jump
-                                        // from the inverter reading. If the inverter SOC is
-                                        // already reasonable (> 0), the BMS must be within
-                                        // ±30 points to be trusted. If inverter SOC is 0,
-                                        // accept any BMS value 1–99 (skip 100 as it's also
-                                        // a common garbage value).
+                                        // Override SOC with BMS module SOC (IR 100) only when
+                                        // the inverter-level IR(59) returns 0 (common corruption).
+                                        // Otherwise trust IR(59) — it matches what the official
+                                        // app and GivTCP report.
                                         if let Some(bms) = snapshot.battery_modules.first() {
-                                            let inverter_soc = snapshot.soc as i16;
-                                            let bms_soc = bms.soc as i16;
-                                            let plausible = if bms_soc <= 0 || bms_soc > 99 {
-                                                false
-                                            } else if inverter_soc > 0 {
-                                                (bms_soc - inverter_soc).unsigned_abs() <= 30
-                                            } else {
-                                                true // inverter is 0, trust BMS (1-99)
-                                            };
-                                            if plausible {
+                                            let inverter_soc = snapshot.soc;
+                                            if inverter_soc == 0 && bms.soc > 0 && bms.soc <= 99 {
+                                                tracing::debug!(
+                                                    "Inverter SOC was 0 (corrupted) — using BMS module SOC: {}%",
+                                                    bms.soc
+                                                );
                                                 snapshot.soc = bms.soc;
                                             }
                                         }
