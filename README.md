@@ -193,13 +193,27 @@ givenergy-local.exe
 
 ### Step 2: Separate HTTP port
 
-Each instance must use a different HTTP port. Set this in **Settings → HTTP Port**
-in the app (requires restart), or use `--port` for headless mode:
+Each instance must use a different HTTP port (default 7337).
+
+**Desktop app:** Change the port in **Settings → HTTP Port**, then restart the app.
+Alternatively, edit `http_port` directly in the `settings.json` file in the config
+directory before launching the second instance:
+
+```json
+{
+  "http_port": 8080,
+  ...
+}
+```
+
+**Headless server:** Use the `--port` flag:
 
 ```bash
-# Headless server on a different port
 GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --port 8080
 ```
+
+**Docker:** Edit `http_port` in the mounted `settings.json`, or use `--port` in the
+container command.
 
 If two instances share the same port, the second one will fail to start its web
 server and the app window will show a blank page.
