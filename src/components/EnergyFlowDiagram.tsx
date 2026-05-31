@@ -18,6 +18,18 @@ const NODES = {
   battery:  { cx: W / 2, cy: 365, color: '#6366F1', label: 'Battery' },
 };
 
+const MODE_LABELS: Record<string, string> = {
+  eco: 'Eco',
+  eco_paused: 'Eco Paused',
+  timed_demand: 'Timed Discharge',
+  timed_export: 'Timed Export',
+  export_paused: 'Paused',
+};
+
+function modeLabel(mode: string): string {
+  return MODE_LABELS[mode] || mode;
+}
+
 // ---------------------------------------------------------------------------
 // Flow line
 // ---------------------------------------------------------------------------
@@ -267,6 +279,16 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           value={formatPower(Math.abs(s.battery_power))}
           unit={formatPercent(s.soc)}
         />
+        {/* Battery mode label */}
+        <text
+          x={W / 2}
+          y={395}
+          textAnchor="middle"
+          fill="#8B949E"
+          style={{ fontSize: 10, fontFamily: 'sans-serif' }}
+        >
+          {modeLabel(s.battery_mode)}
+        </text>
         <FlowNode
           {...NODES.inverter}
           hub
