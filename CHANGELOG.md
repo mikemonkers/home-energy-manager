@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.14] - 2026-05-31
+
+### Added
+
+- **Inverter Max Output control**: New slider in Control → Battery Limits for
+  register 50 (active power rate, 0-100%). Controls the inverter's maximum
+  AC output as a percentage of rated capacity.
+- **Charge/discharge rate wattage display**: Shows calculated kW alongside the
+  percentage (e.g. "37% (3.0 kW)"). Uses the GivTCP formula: percentage of
+  battery nominal capacity in watts, capped by the inverter's max rate.
+- **Configurable HTTP port**: New `http_port` setting (default 7337) in
+  Settings → HTTP Port. Required for running multiple instances on the same
+  machine. Frontend dynamically detects the port from `window.location.port`.
+- **Developer Console screenshot** added to README.
+
+### Changed
+
+- **Charge/discharge rate defaults**: No longer show misleading 100% before
+  the first real snapshot arrives. Displays "—" until inverter data is received.
+- **Max battery power per inverter model**: Uses the exact DTC + ARM firmware
+  lookup from givenergy-modbus instead of a coarse per-type mapping. Gen1
+  AC-coupled inverters (DTC 3001) now correctly show 3000W instead of 5000W.
+- **Multi-instance docs**: README now has clear 2-step instructions (separate
+  config dir + separate HTTP port) with examples for desktop, headless, and
+  Docker.
+
+### Fixed
+
+- **Battery mode flicker**: A single corrupt register read could flip the
+  displayed battery mode for one poll cycle. Now requires 2 consecutive
+  identical readings before accepting a mode change.
+- **Charge/discharge rate range**: Register 111/112 accept 0-100% (not 0-50%).
+  The "50% max" in the reference library is a practical recommendation, not
+  a register limit. Slider max reverted to 100%.
+
 ## [0.9.13] - 2026-05-31
 
 ### Fixed
