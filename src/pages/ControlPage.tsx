@@ -573,18 +573,6 @@ function BatteryCalibrationSection() {
     setTimeout(() => setFeedback(null), 3000);
   };
 
-  const handleCancel = async () => {
-    setSaving(true);
-    try {
-      await apiPost('/api/control/calibration', { stage: 0 });
-      setFeedback('saved');
-    } catch {
-      setFeedback('error');
-    }
-    setSaving(false);
-    setTimeout(() => setFeedback(null), 2000);
-  };
-
   const stageLabels: Record<number, string> = {
     0: 'Off',
     1: 'Discharging…',
@@ -608,9 +596,10 @@ function BatteryCalibrationSection() {
       <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-2">
         <p className="text-amber-300 text-xs font-medium">⚠️  WARNING</p>
         <p className="text-amber-200/70 text-xs">
-          Calibration cycles the battery through a full discharge and charge.
-          This can take several hours and may leave you without battery backup
-          during the process. Only use if you understand what you are doing.
+          Calibration cycles the battery through: discharge → calibrate lower
+          limit → charge → balance → calibrate upper limit. Once started, the
+          process cannot be cancelled — it must run to completion.
+          This can take several hours. Only use if you understand the risks.
         </p>
       </div>
 
@@ -626,16 +615,9 @@ function BatteryCalibrationSection() {
           <button
             onClick={handleStartCalibration}
             disabled={saving || isActive}
-            className="flex-1 py-2 bg-amber-500/20 text-amber-400 rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
+            className="w-full py-2 bg-amber-500/20 text-amber-400 rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
           >
             Start Calibration
-          </button>
-          <button
-            onClick={handleCancel}
-            disabled={saving || !isActive}
-            className="flex-1 py-2 bg-red-500/20 text-red-400 rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
-          >
-            Cancel
           </button>
         </div>
 
