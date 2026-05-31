@@ -562,6 +562,15 @@ export default function ControlPage() {
   const [dischargeRate, setDischargeRate] = useState<number>(snapshot?.discharge_rate ?? 100);
   const [cosyEnabled, setCosyEnabled] = useState(false);
 
+  // Sync local state with the latest snapshot so sliders always reflect
+  // the actual inverter state (handles slow snapshot loading and tab switches).
+  useEffect(() => {
+    if (!snapshot) return;
+    setReserveSoc((prev) => snapshot.battery_reserve ?? prev);
+    setChargeRate((prev) => snapshot.charge_rate ?? prev);
+    setDischargeRate((prev) => snapshot.discharge_rate ?? prev);
+  }, [snapshot?.battery_reserve, snapshot?.charge_rate, snapshot?.discharge_rate]);
+
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);

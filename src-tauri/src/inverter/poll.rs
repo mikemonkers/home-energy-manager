@@ -543,6 +543,11 @@ fn sanitize_snapshot(snap: &mut InverterSnapshot, prev: Option<&InverterSnapshot
     }
     } // skip_delta
 
+    // Clamp battery limits to valid ranges (registers can return corrupted values)
+    snap.charge_rate = snap.charge_rate.min(50);
+    snap.discharge_rate = snap.discharge_rate.min(50);
+    snap.battery_reserve = snap.battery_reserve.min(100);
+
     sanitized
 }
 
