@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.15] - 2026-05-31
+
+### Fixed
+
+- **Slot timers overflow on mobile**: Charge/discharge and Cosy charging
+  time pickers used `flex items-center gap-6` which stays horizontal on
+  narrow screens. Changed to `flex flex-col sm:flex-row gap-4 sm:gap-6`
+  so Start/End fields stack vertically on phones.
+- **Cosy toggle wipes charge slots**: The toggle button sent the cosy
+  slots state before it loaded from the server (race condition). Added a
+  `loaded` gate so toggling is disabled until the fetch completes and
+  slots are populated.
+
 ## [0.9.14] - 2026-05-31
 
 ### Added

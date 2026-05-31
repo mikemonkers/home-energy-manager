@@ -412,6 +412,7 @@ function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle
   >([]);
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -419,15 +420,21 @@ function CosyChargingSection({ enabled, onToggle }: { enabled: boolean; onToggle
         const res = await apiGet<{ ok: boolean; enabled: boolean; slots: typeof slots }>('/api/cosy');
         if (res.ok) {
           onToggle(res.enabled);
-          setSlots(res.slots.length === 3 ? res.slots : Array.from({ length: 3 }, () => ({
-            enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
-          })));
+          const initial = res.slots.length === 3
+            ? res.slots
+            : Array.from({ length: 3 }, () => ({
+                enabled: false, start_hour: 0, start_minute: 0, end_hour: 0, end_minute: 0, target_soc: 100,
+              }));
+          setSlots(initial);
         }
       } catch { /* use defaults */ }
+      setLoaded(true);
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleCosy = async () => {
+    // Don't toggle until slots have loaded from the server
+    if (!loaded || slots.length === 0) return;
     const newEnabled = !enabled;
     onToggle(newEnabled);
     setSaving(true);
