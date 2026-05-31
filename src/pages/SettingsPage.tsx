@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { apiGet, apiPost, getApiBase } from '../lib/api';
+import { apiGet, apiPost, getApiBase, getServerPort } from '../lib/api';
 import type { PollSettings, DiscoveredInverter, TariffConfig } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 import { isTauri } from '../lib/api';
@@ -53,6 +53,9 @@ export default function SettingsPage() {
   // Refresh interval
   const [intervalSecs, setIntervalSecs] = useState(60);
 
+  // HTTP server port
+  const [httpPort, setHttpPort] = useState(7337);
+
   // Tariffs
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
     peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
@@ -83,6 +86,7 @@ export default function SettingsPage() {
         setPort(s.port ?? 8899);
         setSerial(s.serial ?? '');
         setIntervalSecs(s.interval_secs ?? 60);
+        setHttpPort(s.http_port ?? 7337);
         if (s.import_tariff_config) {
           setImportTariffCfg(s.import_tariff_config);
         } else {
@@ -110,7 +114,7 @@ export default function SettingsPage() {
   }, []);
 
   // Network URL — use LAN IP if available, otherwise fall back to getApiBase()
-  const lanUrl = lanIp ? `http://${lanIp}:7337` : getApiBase();
+  const lanUrl = lanIp ? `http://${lanIp}:${getServerPort()}` : getApiBase();
 
   // Save connection
   const handleConnect = async () => {
@@ -132,6 +136,16 @@ export default function SettingsPage() {
       flash(`Refresh interval set to ${val}s`, true);
     } catch {
       flash('Failed to update interval', false);
+    }
+  };
+
+  // Save HTTP port
+  const handleHttpPortSave = async () => {
+    try {
+      await apiPost('/api/settings', { http_port: httpPort });
+      flash(`HTTP port set to ${httpPort}. Restart required to take effect.`, true);
+    } catch {
+      flash('Failed to update HTTP port', false);
     }
   };
 
@@ -377,6 +391,31 @@ export default function SettingsPage() {
         <div className="flex justify-between text-text-secondary text-xs font-sans">
           <span>5s</span>
           <span>60s</span>
+        </div>
+      </section>
+
+      {/* ─── Section 3b: HTTP Port ─── */}
+      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
+        <h2 className="text-text-primary text-lg font-semibold font-sans">HTTP Port</h2>
+        <p className="text-text-secondary text-sm font-sans">
+          Change to run multiple instances on the same machine. Requires restart.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            value={httpPort}
+            onChange={(e) => setHttpPort(Number(e.target.value))}
+            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-border-primary focus:outline-none focus:border-accent"
+          />
+          <button
+            onClick={handleHttpPortSave}
+            className="bg-accent text-white rounded-lg px-4 py-2 text-sm font-sans hover:opacity-90"
+          >
+            Save
+          </button>
         </div>
       </section>
 

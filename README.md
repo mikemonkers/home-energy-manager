@@ -158,9 +158,13 @@ is mounted into the container at `/root/.givenergy-local`. This survives restart
 
 ## Running Multiple Instances
 
-You can run multiple copies of the app with separate settings and history
-by setting the `GIVENERGY_LOCAL_CONFIG_DIR` environment variable to a
-different directory for each instance.
+You can run multiple copies of the app to control different inverters. Each instance
+needs its own **config directory** and **HTTP port**.
+
+### Step 1: Separate config directory
+
+Set `GIVENERGY_LOCAL_CONFIG_DIR` to a different directory for each instance so they
+don't share `settings.json` and `history.db`:
 
 **Linux / macOS:**
 
@@ -170,17 +174,11 @@ different directory for each instance.
 
 # Second instance with its own config and history
 GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-instance2 ./givenergy-local
-
-# Headless server on a different port
-GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --port 8080
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-# Default (uses %USERPROFILE%\.givenergy-local\)
-.\givenergy-local.exe
-
 # Second instance
 $env:GIVENERGY_LOCAL_CONFIG_DIR = "C:\Users\You\givenergy-config-2"
 .\givenergy-local.exe
@@ -192,6 +190,19 @@ $env:GIVENERGY_LOCAL_CONFIG_DIR = "C:\Users\You\givenergy-config-2"
 set GIVENERGY_LOCAL_CONFIG_DIR=C:\Users\You\givenergy-config-2
 givenergy-local.exe
 ```
+
+### Step 2: Separate HTTP port
+
+Each instance must use a different HTTP port. Set this in **Settings → HTTP Port**
+in the app (requires restart), or use `--port` for headless mode:
+
+```bash
+# Headless server on a different port
+GIVENERGY_LOCAL_CONFIG_DIR=~/givenergy-server ./givenergy-local --headless --port 8080
+```
+
+If two instances share the same port, the second one will fail to start its web
+server and the app window will show a blank page.
 
 See [DESIGN.md](./DESIGN.md) for full build instructions, testing, and architecture documentation.
 

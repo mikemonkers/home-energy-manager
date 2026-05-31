@@ -104,7 +104,8 @@ pub fn run() {
                 *h = Some(history_db.clone());
             }
 
-            // Spawn the HTTP server on LAN interface, port 7337.
+            // Spawn the HTTP server on LAN interface.
+            let http_port = app_settings.http_port;
             let server_state = state.clone();
             if cfg!(debug_assertions) {
                 // Dev mode: Vite serves the frontend on :5173 for the Tauri
@@ -115,7 +116,7 @@ pub fn run() {
                     .unwrap_or_else(|_| std::path::PathBuf::from("dist"));
                 tracing::info!("Dev frontend path: {}", dist_dir.display());
                 tauri::async_runtime::spawn(async move {
-                    start_server_with_frontend(server_state, "0.0.0.0", 7337, dist_dir.to_string_lossy().to_string()).await;
+                    start_server_with_frontend(server_state, "0.0.0.0", http_port, dist_dir.to_string_lossy().to_string()).await;
                 });
             } else {
                 // Production: serve the frontend from Axum too so that
@@ -153,7 +154,7 @@ pub fn run() {
                 tracing::info!("Production frontend path: {}", dist_dir);
 
                 tauri::async_runtime::spawn(async move {
-                    start_server_with_frontend(server_state, "0.0.0.0", 7337, dist_dir).await;
+                    start_server_with_frontend(server_state, "0.0.0.0", http_port, dist_dir).await;
                 });
 
                 // Give the server a moment to bind, then navigate the
@@ -162,7 +163,7 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.eval(
-                        "window.location.replace('http://127.0.0.1:7337')",
+                        format!("window.location.replace('http://127.0.0.1:{}')", http_port).as_str(),
                     );
                 }
             }
@@ -261,11 +262,16 @@ pub fn run_headless(args: &[String]) {
             .init();
     }
 
-    let port = parse_port(args);
-    tracing::info!("GivEnergy Local starting in headless mode on port {port}");
-
+    let cli_port = parse_port(args);
     // Load settings
     let app_settings = Settings::load();
+    // CLI --port overrides settings; settings overrides default 7337
+    let port = if cli_port != 7337 || args.iter().any(|a| a == "--port") {
+        cli_port // explicit CLI override
+    } else {
+        app_settings.http_port
+    };
+    tracing::info!("GivEnergy Local starting in headless mode on port {port}");
     tracing::info!(
         "Loaded settings: host={}, serial={}",
         app_settings.host,

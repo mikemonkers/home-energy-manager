@@ -1,13 +1,27 @@
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
+function getServerPort(): string {
+  // When served by the Axum server (production Tauri or LAN browser),
+  // window.location.port gives the correct port.
+  // When served by Vite dev server (port 5173), fall back to 7337
+  // since that's the Axum port in dev mode.
+  if (typeof window !== 'undefined' && window.location.port) {
+    const p = window.location.port;
+    if (p !== '5173') return p;
+  }
+  return '7337';
+}
+
 export function getApiBase(): string {
-  if (isTauri) return 'http://127.0.0.1:7337';
-  return `http://${window.location.hostname}:7337`;
+  const port = getServerPort();
+  if (isTauri) return `http://127.0.0.1:${port}`;
+  return `http://${window.location.hostname}:${port}`;
 }
 
 export function getWsUrl(): string {
-  if (isTauri) return 'ws://127.0.0.1:7337/ws';
-  return `ws://${window.location.hostname}:7337/ws`;
+  const port = getServerPort();
+  if (isTauri) return `ws://127.0.0.1:${port}/ws`;
+  return `ws://${window.location.hostname}:${port}/ws`;
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -42,4 +56,4 @@ export async function fetchHistory(
   return res.data;
 }
 
-export { isTauri };
+export { isTauri, getServerPort };

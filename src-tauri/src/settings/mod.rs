@@ -74,6 +74,9 @@ pub struct Settings {
     pub serial: String,
     /// Poll interval in seconds.
     pub poll_interval: u64,
+    /// HTTP server port (default 7337). Change to run multiple instances.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
     /// Whether to auto-connect on startup.
     pub auto_connect: bool,
     /// Import electricity tariff in £/kWh.
@@ -124,6 +127,10 @@ pub struct Settings {
     pub export_tariff_config: Option<TariffConfig>,
 }
 
+fn default_http_port() -> u16 {
+    7337
+}
+
 fn default_import_tariff() -> f64 {
     0.285
 }
@@ -152,6 +159,7 @@ impl Default for Settings {
             port: 8899,
             serial: String::new(),
             poll_interval: 60,
+            http_port: default_http_port(),
             auto_connect: true,
             import_tariff: default_import_tariff(),
             export_tariff: default_export_tariff(),
@@ -243,6 +251,7 @@ mod tests {
         assert_eq!(s.port, 8899);
         assert!(s.serial.is_empty());
         assert_eq!(s.poll_interval, 60);
+        assert_eq!(s.http_port, 7337);
         assert!(s.auto_connect);
         assert!(!s.auto_winter_enabled);
         assert_eq!(s.auto_winter_cold_threshold, 8.0);
@@ -260,6 +269,7 @@ mod tests {
             port: 502,
             serial: "TEST123".to_string(),
             poll_interval: 10,
+            http_port: 8080,
             auto_connect: false,
             import_tariff: 0.30,
             export_tariff: 0.15,
@@ -281,6 +291,7 @@ mod tests {
         assert_eq!(decoded.port, 502);
         assert_eq!(decoded.serial, "TEST123");
         assert_eq!(decoded.poll_interval, 10);
+        assert_eq!(decoded.http_port, 8080);
         assert!(!decoded.auto_connect);
         assert!(decoded.auto_winter_enabled);
         assert_eq!(decoded.auto_winter_cold_threshold, 5.0);
@@ -302,6 +313,7 @@ mod tests {
             port: 8899,
             serial: "TEST99".to_string(),
             poll_interval: 15,
+            http_port: 7337,
             auto_connect: true,
             import_tariff: 0.285,
             export_tariff: 0.15,

@@ -77,6 +77,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> Json<Value> {
             "port": settings.port,
             "serial": settings.serial,
             "interval_secs": settings.poll_interval,
+            "http_port": settings.http_port,
             "import_tariff": settings.import_tariff,
             "export_tariff": settings.export_tariff,
             "import_tariff_config": settings.import_tariff_config,
@@ -144,6 +145,10 @@ pub async fn update_settings(
     persist.port = settings.port;
     persist.serial = settings.serial.clone();
     persist.poll_interval = settings.interval_secs;
+    // http_port change requires restart to take effect
+    if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
+        persist.http_port = hp as u16;
+    }
     persist.auto_connect = true;
     persist.import_tariff = import_tariff;
     persist.export_tariff = export_tariff;

@@ -79,6 +79,7 @@ export interface PollSettings {
   port: number;
   serial: string;
   interval_secs: number;
+  http_port: number;
   import_tariff: number;
   export_tariff: number;
   import_tariff_config: TariffConfig | null;

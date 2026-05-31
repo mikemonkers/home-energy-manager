@@ -86,7 +86,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 
 ### Backend (`src-tauri/src/`)
 
-- **`lib.rs`** — Tauri app setup + headless CLI entry; spawns Axum server (port 7337) + Modbus polling loop
+- **`lib.rs`** — Tauri app setup + headless CLI entry; spawns Axum server (configurable port, default 7337) + Modbus polling loop
 - **`history/`** — SQLite-backed history storage (`~/.givenergy-local/history.db`)
   - `mod.rs` — `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG (or MAX for cumulative fields)
 - **`inverter/`** — data model, register decode/encode, discovery, poll loop
