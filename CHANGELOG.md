@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-05-30
+
+### Added
+
+- **Aggregate battery SOC**: For multi-battery systems, SOC is now calculated
+  as `sum(remaining_capacity_ah) / sum(capacity_ah) × 100` across all modules
+  instead of using only the first module
+- **Linting tooling**: Added `markdownlint-cli`, `.markdownlint.json` config,
+  and `npm run lint:md` script; updated AGENTS.md with full linting rules for
+  Rust (clippy), TypeScript (ESLint), and Markdown
+- **README**: Expanded Quick Start with detailed connection instructions and
+  prominent Getting Started section
+
+### Fixed
+
+- **Stale write responses**: When stale read responses (function codes 0x03/0x04)
+  arrive during a write, the request is now resent after draining each stale frame
+  instead of passively consuming retry attempts
+- **Charge slot 2 disable**: Register 32 (charge slot 2 end time) is unwritable on
+  some inverters. The decoder now treats start=00:00 as disabled regardless of end
+  value, so writing just the start register is sufficient
+- **10 clippy warnings**: empty_line_after_doc_comments, field_reassign_with_default,
+  manual_flatten, match_like_matches_macro, derivable_impls, new_without_default,
+  same_item_push, manual_clamp
+- **ESLint error**: `set-state-in-effect` — derive `effectiveMode` from
+  `requestedMode` and `currentMode` instead of calling `setState` in `useEffect`
+- **Markdown formatting**: blanks around lists and fenced code blocks, multiple
+  consecutive blank lines across all .md files
+
 ## [0.9.6] - 2026-05-30
 
 ### Added
