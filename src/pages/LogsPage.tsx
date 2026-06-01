@@ -194,9 +194,9 @@ export default function LogsPage() {
         ) : (
           <div className="px-2 py-1 font-mono text-xs leading-5 whitespace-pre-wrap">
             {filteredLogs.map((log, i) => (
-              <div key={i} className="flex gap-3 hover:bg-white/[0.02] rounded">
-                <span className="text-text-secondary/60 shrink-0 w-[4.5rem]">{log.timestamp}</span>
-                <span className={`shrink-0 w-10 ${levelColor(log.level)}`}>{log.level || '    '}</span>
+              <div key={i} className="flex gap-1 hover:bg-white/[0.02] rounded">
+                <span className="text-text-secondary/60 shrink-0 w-[5.5rem]">{log.timestamp}</span>
+                <span className={`shrink-0 w-12 ${levelColor(log.level)}`}>{log.level || '    '}</span>
                 <span className="text-text-primary break-all">{log.message}</span>
               </div>
             ))}

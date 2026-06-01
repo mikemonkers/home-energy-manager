@@ -13,7 +13,7 @@
     "windows": [
       {
         "title": "GivEnergy Local",
-        "width": 960,
+        "width": 980,
         "height": 1044,
         "resizable": true,
         "fullscreen": false

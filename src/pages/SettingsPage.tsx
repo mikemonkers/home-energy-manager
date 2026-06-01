@@ -408,7 +408,7 @@ export default function SettingsPage() {
             max={65535}
             value={httpPort}
             onChange={(e) => setHttpPort(Number(e.target.value))}
-            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-border-primary focus:outline-none focus:border-accent"
+            className="bg-bg-elevated text-text-primary rounded-lg px-3 py-2 text-sm font-mono w-28 border border-transparent focus:outline-none focus:border-accent"
           />
           <button
             onClick={handleHttpPortSave}

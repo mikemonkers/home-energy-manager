@@ -101,7 +101,7 @@ impl ModbusClient {
             serial_discovered: false,
             slave: 0x32, // default GivEnergy slave address
             stream: None,
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(15),
         }
     }
 
