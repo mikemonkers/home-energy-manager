@@ -25,7 +25,7 @@ type MetricTab = 'battery' | 'solar' | 'grid' | 'home' | 'cost';
 interface ChartDef {
   key: string;
   title: string;
-  fields: { field: string; color: string; transform?: (v: number) => number }[];
+  fields: { field: string; color: string; label?: string; transform?: (v: number) => number }[];
   unit: string;
   yDomain?: [number, number];
   preprocess?: (merged: Record<string, number>[]) => Record<string, number>[];
@@ -147,8 +147,8 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           title: 'Charge / Discharge Power',
           unit: 'W',
           fields: [
-            { field: 'battery_power', color: '#22C55E', transform: (v: number) => v > 0 ? v : 0 },
-            { field: 'battery_power', color: '#EF4444', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
+            { field: 'battery_power', color: '#22C55E', label: 'Charge', transform: (v: number) => v > 0 ? v : 0 },
+            { field: 'battery_power', color: '#EF4444', label: 'Discharge', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
           ],
         },
         {
@@ -156,8 +156,8 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           title: 'Energy (kWh)',
           unit: 'kWh',
           fields: [
-            { field: 'today_charge_kwh', color: '#22C55E' },
-            { field: 'today_discharge_kwh', color: '#EF4444' },
+            { field: 'today_charge_kwh', color: '#22C55E', label: 'Charge' },
+            { field: 'today_discharge_kwh', color: '#EF4444', label: 'Discharge' },
           ],
         },
       ];
@@ -183,8 +183,8 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
           title: 'Grid Power (W)',
           unit: 'W',
           fields: [
-            { field: 'grid_power', color: '#22C55E', transform: (v: number) => v > 0 ? v : 0 },
-            { field: 'grid_power', color: '#EF4444', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
+            { field: 'grid_power', color: '#22C55E', label: 'Export', transform: (v: number) => v > 0 ? v : 0 },
+            { field: 'grid_power', color: '#EF4444', label: 'Import', transform: (v: number) => v < 0 ? Math.abs(v) : 0 },
           ],
         },
         {
@@ -353,7 +353,22 @@ function ChartCard({ chart, data, range, domain }: {
 
   return (
     <div className="bg-bg-elevated rounded-xl p-4 relative">
-      <h3 className="text-text-secondary text-xs font-sans font-medium mb-3">{chart.title}</h3>
+      <div className="flex items-center justify-between mb-3 gap-2">
+        <h3 className="text-text-primary text-sm font-sans font-bold">{chart.title}</h3>
+        {chart.fields.length > 1 && (
+          <div className="flex items-center gap-3">
+            {chart.fields.map((f, i) => (
+              <span key={i} className="flex items-center gap-1.5 text-xs font-sans font-semibold">
+                <span
+                  className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: f.color }}
+                />
+                <span className="text-text-secondary">{f.label ?? f.field}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
       <ResponsiveContainer width="100%" height={200}>
         <AreaChart data={seriesData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
           <defs>

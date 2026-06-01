@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.17] - 2026-06-01
+
+### Added
+
+- **Chart legends**: Multi-series history charts (Charge/Discharge Power, Grid
+  Power, Energy) now show a colour-coded legend so you can tell which line is
+  which.
+
+### Changed
+
+- **Chart titles**: Bold and brighter for better readability.
+
 ## [0.9.16] - 2026-06-01
 
 ### Added
