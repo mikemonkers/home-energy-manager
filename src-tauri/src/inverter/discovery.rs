@@ -63,9 +63,10 @@ pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
     }
 
     log::info!(
-        "Subnet scan on {}.x found {} inverter(s)",
+        "Subnet scan on {}.x found {} inverter(s): {}",
         subnet_base,
-        found.len()
+        found.len(),
+        found.iter().map(|i| format!("{}:{}", i.ip, i.port)).collect::<Vec<_>>().join(", "),
     );
     found
 }
