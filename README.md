@@ -156,6 +156,123 @@ docker compose build && docker compose up -d
 **Persistent data** (settings + history DB) lives in `${HOME}/.givenergy-local` and
 is mounted into the container at `/root/.givenergy-local`. This survives restarts.
 
+## Running on unRAID
+
+Community contributor instructions for running GivEnergy Local as a Docker container on unRAID.
+
+### 1. Create a folder
+
+Open the unRAID terminal (Main UI → top-right >_ Terminal):
+
+```bash
+mkdir -p /mnt/user/appdata/givenergy-local
+cd /mnt/user/appdata/givenergy-local
+```
+
+### 2. Download the project
+
+```bash
+git clone https://github.com/psylsph/givenergy-local.git .
+```
+
+### 3. Create a Dockerfile
+
+```bash
+nano Dockerfile
+```
+
+Paste this:
+
+```dockerfile
+FROM node:22-bookworm AS frontend
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM rust:latest AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libdbus-1-dev \
+    libgtk-3-dev \
+    libsoup2.4-dev \
+    libjavascriptcoregtk-4.1-dev \
+    libwebkit2gtk-4.1-dev \
+    libayatana-appindicator3-dev \
+    librsvg2-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+COPY --from=frontend /app/dist ./dist
+WORKDIR /app/src-tauri
+RUN cargo build --release
+
+FROM debian:trixie-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libgtk-3-0 \
+    libwebkit2gtk-4.1-0 \
+    libayatana-appindicator3-1 \
+    librsvg2-2 \
+    libdbus-1-3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/src-tauri/target/release/givenergy-local /app/givenergy-local
+COPY --from=frontend /app/dist /app/dist
+EXPOSE 7337
+CMD ["/app/givenergy-local", "--headless"]
+```
+
+Save with `Ctrl+O` → `Enter` → `Ctrl+X`.
+
+### 4. Build the image
+
+This will take a few minutes on first run.
+
+```bash
+docker build --no-cache -t givenergy-local .
+```
+
+### 5. Run the container
+
+```bash
+docker run -d \
+  --name givenergy-local \
+  --network host \
+  -v /mnt/user/appdata/givenergy-local/data:/root/.givenergy-local \
+  --restart unless-stopped \
+  givenergy-local
+```
+
+Check the logs:
+
+```bash
+docker logs -f givenergy-local
+```
+
+Visit `http://[YOUR UNRAID IP]:7337` in a browser to verify it's running.
+
+### 6. Add to the unRAID Docker UI
+
+To make the container manageable from the unRAID Docker page, first remove the manually created one:
+
+```bash
+docker rm -f givenergy-local
+```
+
+Then in the unRAID **Docker** page:
+
+1. Click **Add Container** → select **Advanced Mode**
+2. Set **Repository** to `givenergy-local`
+3. Set **Icon URL** to `https://avatars.githubusercontent.com/u/84566103?s=200&v=4`
+4. Set **Web UI** to `http://[IP]:7337`
+5. Set **Network Type** to `Host`
+6. Add a **Container Path** of `/root/.givenergy-local`
+7. Set the corresponding **Host Path** to `/mnt/user/appdata/givenergy-local/data`
+
+The container will persist data (settings + history) across stop/start cycles. To update, rebuild the image with the latest code and recreate the container.
+
 ## Running Multiple Instances
 
 You can run multiple copies of the app to control different inverters. Each instance
