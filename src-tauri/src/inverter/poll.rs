@@ -1099,7 +1099,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     (s, mods)
                                 };
                                 carry_forward_battery_modules_with(&mut snapshot, prev_modules.as_deref());
-                                readings_since_connect += 1;
+                                readings_since_connect = readings_since_connect.saturating_add(1);
 
                                 if readings_since_connect == 1 {
                                     tracing::info!(
