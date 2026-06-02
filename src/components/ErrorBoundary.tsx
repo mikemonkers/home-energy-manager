@@ -7,18 +7,55 @@ interface Props {
 
 interface State {
   error: Error | null;
+  countdown: number;
 }
 
 export default class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null, countdown: 30 };
+  private timer: ReturnType<typeof setInterval> | null = null;
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error, countdown: 30 };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('ErrorBoundary caught:', error, info.componentStack);
   }
+
+  componentDidUpdate(_prevProps: Props, prevState: State) {
+    if (prevState.error !== this.state.error && this.state.error) {
+      this.startCountdown();
+    }
+  }
+
+  componentWillUnmount() {
+    this.clearTimer();
+  }
+
+  private startCountdown() {
+    this.clearTimer();
+    this.timer = setInterval(() => {
+      this.setState((prev) => {
+        if (prev.countdown <= 1) {
+          this.clearTimer();
+          return { error: null, countdown: 30 };
+        }
+        return { error: prev.error, countdown: prev.countdown - 1 };
+      });
+    }, 1000);
+  }
+
+  private clearTimer() {
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private handleRetry = () => {
+    this.clearTimer();
+    this.setState({ error: null, countdown: 30 });
+  };
 
   render() {
     if (this.state.error) {
@@ -33,11 +70,14 @@ export default class ErrorBoundary extends Component<Props, State> {
           <p className="text-text-secondary text-xs font-sans text-center max-w-sm">
             {this.state.error.message}
           </p>
+          <p className="text-text-secondary/60 text-xs font-sans">
+            Will retry in {this.state.countdown}s
+          </p>
           <button
-            onClick={() => this.setState({ error: null })}
-            className="mt-2 px-4 py-2 rounded-lg bg-flow-active text-bg-base text-sm font-sans font-medium hover:opacity-90 transition-opacity"
+            onClick={this.handleRetry}
+            className="mt-1 px-4 py-2 rounded-lg bg-flow-active text-bg-base text-sm font-sans font-medium hover:opacity-90 transition-opacity"
           >
-            Try again
+            Retry now
           </button>
         </div>
       );

@@ -131,23 +131,29 @@ interface NodeProps {
 
 function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
   const r = hub ? 48 : 44;
+  // Guard against non-string props that would crash React (<text> children
+  // must be strings or numbers — objects cause React error #31).
+  const safeLabel = typeof label === 'string' ? label : String(label ?? '');
+  const safeValue = typeof value === 'string' || typeof value === 'number' ? value : String(value ?? '');
+  const safeUnit = typeof unit === 'string' || typeof unit === 'number' ? unit : String(unit ?? '');
+  const safeColor = typeof color === 'string' ? color : '#888';
   return (
     <g>
       {/* Subtle outer glow */}
-      <circle cx={cx} cy={cy} r={r + 5} fill="none" stroke={color} strokeWidth={1} opacity={0.15} />
+      <circle cx={cx} cy={cy} r={r + 5} fill="none" stroke={safeColor} strokeWidth={1} opacity={0.15} />
       {/* Main circle */}
-      <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={color} strokeWidth={hub ? 2.5 : 2} />
+      <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
         x={cx} y={cy - (hub ? 12 : 11)}
         textAnchor="middle"
-        fill={color}
+        fill={safeColor}
         fontSize={hub ? 10 : 10.5}
         fontWeight="700"
         fontFamily="var(--font-sans, sans-serif)"
         letterSpacing="0.6"
       >
-        {label.toUpperCase()}
+        {safeLabel.toUpperCase()}
       </text>
       {/* Value */}
       <text
@@ -158,7 +164,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
         fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
       >
-        {value}
+        {safeValue}
       </text>
       {/* Unit / secondary info */}
       <text
@@ -168,7 +174,7 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
         fontSize="10"
         fontFamily="var(--font-mono, monospace)"
       >
-        {unit}
+        {safeUnit}
       </text>
     </g>
   );
