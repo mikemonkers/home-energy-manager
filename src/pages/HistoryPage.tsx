@@ -31,7 +31,6 @@ interface ChartDef {
   preprocess?: (merged: Record<string, number>[]) => Record<string, number>[];
   /** Raw field names needed by `preprocess` that aren't in `fields`. */
   requires?: string[];
-
 }
 
 // ---------------------------------------------------------------------------

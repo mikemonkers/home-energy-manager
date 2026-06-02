@@ -122,7 +122,7 @@ function TimePicker({
         onChange={(e) => onChange(hour, Number(e.target.value))}
         className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-2 py-1.5 border border-transparent focus:border-battery outline-none"
       >
-        {Array.from({ length: 60 }, (_, i) => i).filter((m) => m % 5 === 0).map((m) => (
+        {Array.from({ length: 60 }, (_, i) => i).map((m) => (
           <option key={m} value={m}>
             {String(m).padStart(2, '0')}
           </option>
