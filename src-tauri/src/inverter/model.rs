@@ -273,6 +273,9 @@ pub struct InverterSnapshot {
     /// True when the Cosy tariff timer is actively force-charging the battery.
     #[serde(default)]
     pub cosy_active: bool,
+    /// True when Cosy tariff mode is enabled in settings (may be between slots).
+    #[serde(default)]
+    pub cosy_enabled: bool,
     /// Battery calibration stage (0=off, 5=balance).
     #[serde(default)]
     pub battery_calibration_stage: u8,

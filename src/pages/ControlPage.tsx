@@ -474,7 +474,7 @@ function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boole
         </button>
       </div>
       <p className="text-text-secondary/60 text-xs">
-        Force-charges the battery from the grid during these windows. The inverter is locked to Eco mode while Cosy is active.
+        Force-charges the battery from the grid during these windows. The inverter is locked to Cosy mode while enabled.
       </p>
 
       {enabled && (
@@ -921,7 +921,7 @@ export default function ControlPage() {
           </div>
           <div className="bg-bg-surface rounded-xl p-4 border border-battery/20">
             <p className="text-text-secondary text-sm">
-              Cosy charging is active — the inverter is locked to Eco mode.
+              Cosy charging is active — the inverter is locked to Cosy mode.
               Battery controls are managed by the Cosy timer below.
             </p>
           </div>

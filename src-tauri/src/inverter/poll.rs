@@ -1159,6 +1159,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     snapshot.auto_winter_active =
                                         matches!(*aw_state, AutoWinterState::WinterActive);
                                     snapshot.cosy_active = *state.cosy_active.lock().await;
+                                    // Load cosy_enabled from settings so the frontend
+                                    // knows cosy is configured even between slots.
+                                    snapshot.cosy_enabled = crate::settings::Settings::load().cosy_enabled;
 
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved
