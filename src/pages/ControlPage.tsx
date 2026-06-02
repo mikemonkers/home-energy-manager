@@ -691,7 +691,15 @@ export default function ControlPage() {
   const [draftCharge, setDraftCharge] = useState<number | null>(null);
   const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
   const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
-  const [cosyEnabled, setCosyEnabled] = useState(false);
+  const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
+  const [localCosyOverride, setLocalCosyOverride] = useState<boolean | null>(null);
+  // Use snapshot value unless user just toggled (local override takes precedence
+  // until the next poll cycle updates the snapshot from backend settings).
+  const cosyEnabled = localCosyOverride ?? snapshotCosyEnabled;
+  const setCosyEnabled = (v: boolean) => { setLocalCosyOverride(v); };
+
+  const currentMode = snapshot?.battery_mode ?? 'eco';
+  const cosyActive = snapshot?.cosy_active ?? false;
 
   // Show draft while dragging; once snapshot confirms the saved value, use snapshot.
   // Default to null (no data) until the first snapshot arrives to avoid showing
@@ -731,8 +739,6 @@ export default function ControlPage() {
         { enabled: false, start_hour: 16, start_minute: 0, end_hour: 19, end_minute: 0, target_soc: 0 },
       ];
 
-  const currentMode = snapshot?.battery_mode ?? 'eco';
-  const cosyActive = snapshot?.cosy_active ?? false;
   const [requestedMode, setRequestedMode] = useState<BatteryMode | null>(null);
 
   // Clear requested mode after 30s timeout (safety net for unconfirmed writes).
