@@ -107,12 +107,12 @@ const TABS: { key: MetricTab; label: string }[] = [
 function alignDown(ts: number, range: HistoryRange): number {
   const d = new Date(ts);
   if (range === '1h') {
-    d.setUTCMinutes(0, 0, 0);
+    d.setMinutes(0, 0, 0);
   } else if (range === '6h') {
-    d.setUTCMinutes(0, 0, 0);
-    d.setUTCHours(Math.floor(d.getUTCHours() / 6) * 6);
+    d.setMinutes(0, 0, 0);
+    d.setHours(Math.floor(d.getHours() / 6) * 6);
   } else {
-    d.setUTCHours(0, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
   }
   return d.getTime();
 }
