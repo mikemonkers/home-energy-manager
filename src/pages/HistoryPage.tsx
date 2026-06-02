@@ -8,7 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { fetchHistory, apiGet } from '../lib/api';
+import { fetchHistory, apiGet, isTauri } from '../lib/api';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 
 // ---------------------------------------------------------------------------
@@ -442,6 +442,42 @@ function ChartCard({ chart, data, range, domain }: {
 // CSV Export
 // ---------------------------------------------------------------------------
 
+/// Download CSV with a Save As dialog (remote browser). Falls back to a
+/// simple Blob download if the File System Access API is unavailable.
+async function downloadWithPrompt(csvContent: string, fileName: string, onExported: () => void) {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handle = await (window as any).showSaveFilePicker({
+      suggestedName: fileName,
+      types: [{
+        description: 'CSV file',
+        accept: { 'text/csv': ['.csv'] },
+      }],
+    });
+    const writable = await handle.createWritable();
+    await writable.write(csvContent);
+    await writable.close();
+    onExported();
+  } catch (err: unknown) {
+    // User cancelled the dialog — do nothing
+    if (err instanceof DOMException && err.name === 'AbortError') return;
+    // API unavailable — fall back to simple Blob download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+    onExported();
+  }
+}
+
 function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range: HistoryRange, offset: number, onExported: () => void) {
   // Collect all unique field names across all charts
   const allFields = [...new Set(charts.flatMap((c) => [
@@ -493,20 +529,25 @@ function exportCSV(charts: ChartDef[], data: Record<string, TimePoint[]>, range:
   const windowLabel = formatWindowLabel(range, offset).replace(/[^\w-]+/g, '_');
   const fileName = `givenergy_${label}_${windowLabel}.csv`;
 
-  // Synchronous download — creates a Blob, appends an <a> tag, clicks it.
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, 1000);
-  onExported();
+  if (isTauri) {
+    // Tauri app: simple download to default downloads folder
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+    onExported();
+  } else {
+    // Remote browser: show Save As dialog, fall back to download
+    downloadWithPrompt(csvContent, fileName, onExported);
+  }
 }
 
 // ---------------------------------------------------------------------------
