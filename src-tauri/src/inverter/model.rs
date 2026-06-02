@@ -138,6 +138,19 @@ impl DeviceType {
         }
     }
 
+    /// Human-readable display name for the device type.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Gen1Hybrid => "Gen 1 Hybrid",
+            Self::Gen2Hybrid => "Gen 2 Hybrid",
+            Self::Gen3Hybrid => "Gen 3 Hybrid",
+            Self::ACCoupled => "AC Coupled",
+            Self::AllInOne => "All-in-One",
+            Self::ThreePhase => "Three Phase",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+
     /// Maximum battery charge/discharge power in watts.
     ///
     /// Per GivTCP source code, the inverter hardware limits the DC battery
@@ -270,6 +283,9 @@ pub struct InverterSnapshot {
     pub device_type: DeviceType,
     /// Raw 4-char hex device type code from HR(0) (e.g. "2001", "3001").
     pub device_type_code: String,
+    /// Human-readable device type name for the frontend.
+    #[serde(default)]
+    pub device_type_display: String,
     pub battery_reserve: u8,
     pub charge_rate: u8,
     pub discharge_rate: u8,

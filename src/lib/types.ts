@@ -42,6 +42,7 @@ export interface InverterSnapshot {
   inverter_serial: string;
   firmware_version: string;
   device_type: string;
+  device_type_display: string;
   battery_calibration_stage: number;
 }
 

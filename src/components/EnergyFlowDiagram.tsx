@@ -306,7 +306,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
           {...NODES.inverter}
           hub
           value={formatTemp(s.inverter_temperature)}
-          unit={s.device_type || '—'}
+          unit={s.device_type_display || '—'}
         />
       </svg>
     </div>
