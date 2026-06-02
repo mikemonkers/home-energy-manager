@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.26] - 2026-06-02
+
+### Added
+
+- **State of Health on Battery page**: Each battery module panel now shows a
+  State of Health percentage computed from the calibrated capacity vs design
+  capacity registers (cap_calibrated / cap_design × 100). Only displayed when
+  both values are available and non-zero.
+
+- **Buy Me a Coffee button**: Centered sponsor link in the README.
+
+### Changed
+
+- **Cosy mode completely overhauls the UI**: Cosy Charging is now shown to all
+  users in Eco mode (no longer gated behind Developer Mode). Quick Actions are
+  always visible. When cosy is actively charging, a "Cosy Charging" badge with
+  pulsing green dot appears next to the Battery Mode heading instead of hiding
+  the controls.
+
+- **Mode display shows "Cosy" everywhere**: The Status page (energy flow diagram)
+  and Battery page now display "Cosy" whenever cosy mode is enabled in settings,
+  not just during active charging periods. When cosy is actively force-charging,
+  the label overrides ALL decoded modes (not just eco/eco_paused) since
+  force-charging can change the inverter's register mode to export_paused.
+
+- **Cosy enabled state persisted across restarts**: `cosyEnabled` is now derived
+  from `snapshot.cosy_enabled` (set by the backend from settings.json) instead of
+  local React state that reset on every app load.
+
+- **Discharge Schedule hidden when cosy enabled**: The Discharge Schedule section
+  is now hidden whenever cosy mode is enabled (in addition to the existing Charge
+  Schedule hide). The condition `!cosyEnabled` is added alongside the existing
+  `modeToCategory === 'timed'` check.
+
+### Fixed
+
+- **Cosy mode survives client restart**: On startup, if the current time falls
+  inside an enabled cosy slot, the app now re-sends the `ForceCharge` command
+  with the matching slot's target SOC (queued as pending writes on the first
+  inner-loop iteration). Previously only `cosy_active` was restored but the
+  inverter never received the force-charge registers.
+
+- **Cosy slot exit now properly restores Eco mode**: Previously exiting a cosy
+  slot only wrote `enable_charge = 0`, leaving charge target enabled and
+  discharge disabled. The new `CosyExit` command writes:
+  - `enable_charge = 0` (stop force charge)
+  - `enable_charge_target = 0` (clear charge target)
+  - `battery_power_mode = 1` (eco mode)
+  - `enable_discharge = 1` (allow discharge again)
+  This ensures the inverter returns to normal Eco self-consumption between slots.
+
+- **Inverter charge slot registers cleared on force-charge**: The `ForceCharge`
+  command now also writes 0 to all four charge slot time registers
+  (HR 94/95 for slot 1, HR 31/32 for slot 2). Previously, stale charge slot
+  configs persisted in the inverter's registers and appeared as active
+  alongside the cosy force-charge.
+
 ## [0.9.25] - 2026-06-02
 
 ### Fixed
