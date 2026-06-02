@@ -381,6 +381,15 @@ mod tests {
         s
     }
 
+    fn make_snapshot_with_kwh(ts: i64, import_kwh: f32, export_kwh: f32) -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: ts,
+            today_import_kwh: import_kwh,
+            today_export_kwh: export_kwh,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn open_creates_db() {
         let _db = test_db();
@@ -424,5 +433,99 @@ mod tests {
         for field in ALLOWED_FIELDS {
             assert!(is_allowed_field(field));
         }
+    }
+
+    #[test]
+    fn cumulative_counter_uses_max_aggregation() {
+        let db = test_db();
+        let base = 1700000000i64;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 10.0, 5.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 15, 15.0, 8.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 30, 12.0, 9.0));
+
+        let result = db
+            .query_history(
+                100_000_000,
+                60,
+                0,
+                &["today_import_kwh".to_string(), "today_export_kwh".to_string()],
+            )
+            .unwrap();
+
+        let import_points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+        let bucket = import_points.iter().find(|p| (p.t / 1000) as i64 / 60 * 60 == base / 60 * 60);
+        assert!(bucket.is_some());
+        let b = bucket.unwrap();
+        assert!((b.v - 15.0).abs() < 0.01, "Expected MAX=15.0, got {}", b.v);
+
+        let export_points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_export_kwh").cloned().unwrap()).unwrap();
+        let eb = export_points.iter().find(|p| (p.t / 1000) as i64 / 60 * 60 == base / 60 * 60);
+        assert!(eb.is_some());
+        let e = eb.unwrap();
+        assert!((e.v - 9.0).abs() < 0.01, "Expected MAX=9.0, got {}", e.v);
+    }
+
+    #[test]
+    fn cumulative_counter_over_two_buckets() {
+        let db = test_db();
+        let base = 1700000000i64;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 10.0, 5.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 15, 15.0, 7.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 18.0, 9.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 75, 22.0, 11.0));
+
+        let result = db
+            .query_history(100_000_000, 60, 0, &["today_import_kwh".to_string()])
+            .unwrap();
+
+        let import_points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+
+        let bucket_a = import_points.iter().find(|p| (p.t / 1000) as i64 / 60 * 60 == base / 60 * 60);
+        let bucket_b = import_points
+            .iter()
+            .find(|p| (p.t / 1000) as i64 / 60 * 60 == (base + 60) / 60 * 60);
+
+        assert!(bucket_a.is_some());
+        assert!(bucket_b.is_some());
+
+        let a = bucket_a.unwrap();
+        let b = bucket_b.unwrap();
+        assert!((a.v - 15.0).abs() < 0.01, "Bucket A should be 15.0, got {}", a.v);
+        assert!((b.v - 22.0).abs() < 0.01, "Bucket B should be 22.0, got {}", b.v);
+
+        let delta = b.v - a.v;
+        assert!((delta - 7.0).abs() < 0.01, "Expected delta 7.0, got {}", delta);
+    }
+
+    #[test]
+    fn cumulative_counter_midnight_rollover() {
+        let db = test_db();
+        // Use timestamps on different UTC days: 2023-11-15 00:00:00 UTC
+        let day1 = 1700006400i64; // 2023-11-15 00:00:00 UTC
+        let day2 = 1700092800i64; // 2023-11-16 00:00:00 UTC (next day)
+
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 82800, 150.0, 80.0));  // 23:00 UTC day1
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 3600, 5.0, 3.0));      // 01:00 UTC day2
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 15.0, 8.0));     // 02:00 UTC day2
+
+        let result = db
+            .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
+            .unwrap();
+
+        let import_points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+
+        let yesterday = import_points.iter().find(|p| (p.v - 150.0).abs() < 0.01);
+        let today_1 = import_points.iter().find(|p| (p.v - 5.0).abs() < 0.01);
+        let today_2 = import_points.iter().find(|p| (p.v - 15.0).abs() < 0.01);
+
+        assert!(yesterday.is_some(), "Missing yesterday's 150.0");
+        assert!(today_1.is_some(), "Missing today's 5.0");
+        assert!(today_2.is_some(), "Missing today's 15.0");
     }
 }

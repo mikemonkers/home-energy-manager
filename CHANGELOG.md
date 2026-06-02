@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.28] - 2026-06-02
+
+### Fixed
+
+- **Gen 1 hybrid misidentified as Gen 3**: The device type register (HR 0 =
+  0x2001) is shared across Gen1 and Gen3 hybrid inverters. The ARM firmware
+  version (HR 21) is now used to distinguish them: FW century 1–2 → Gen1Hybrid
+  (2600W), FW century 3+ → Gen3Hybrid (3600W). Added `refine_with_arm_fw()`
+  method and called from the decoder after the ARM FW is read.
+
+- **Cost calculation improved**: Midnight rollover detection now requires
+  `prev > 50 && raw < 10` (not just `raw < prev`), preventing small data
+  glitches from being treated as midnight resets and inflating costs.
+
+### Added
+
+- **6 new Rust tests**: 3 for device type refinement
+  (`refine_with_arm_fw`), 3 for cumulative counter MAX aggregation and
+  midnight rollover in the history module.
+
 ## [0.9.27] - 2026-06-02
 
 ### Added

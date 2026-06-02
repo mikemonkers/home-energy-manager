@@ -297,6 +297,8 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     } else {
         String::new()
     };
+    // Refine device type using ARM FW (0x20XX with FW century 1-2 = Gen1)
+    snap.device_type = snap.device_type.clone().refine_with_arm_fw(arm_fw);
 
     // Battery capacity in kWh = HR(55) × nominal_voltage / 1000
     // HR(55) reports total system Ah (inverter firmware accounts for all modules).

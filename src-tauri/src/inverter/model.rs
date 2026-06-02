@@ -102,12 +102,27 @@ impl DeviceType {
     pub fn from_register(val: u16) -> Self {
         let prefix = val >> 8;
         match prefix {
-            0x20 => Self::Gen3Hybrid, // simplified; real detection needs ARM FW
-            0x21 => Self::Gen3Hybrid,
+            0x20 | 0x21 => Self::Gen3Hybrid, // may be refined by refine_with_arm_fw
             0x30 => Self::ACCoupled,
             0x40 => Self::ThreePhase,
             0x80 => Self::AllInOne,
             _ => Self::Unknown(val),
+        }
+    }
+
+    /// Refine the device type using the ARM firmware version.
+    /// 0x20XX with ARM FW century 1 or 2 is Gen1 (2600W), not Gen3 (3600W).
+    pub fn refine_with_arm_fw(self, arm_fw: u16) -> Self {
+        match self {
+            Self::Gen3Hybrid => {
+                let century = arm_fw / 100;
+                if century == 1 || century == 2 {
+                    Self::Gen1Hybrid
+                } else {
+                    Self::Gen3Hybrid
+                }
+            }
+            other => other,
         }
     }
 
@@ -376,6 +391,27 @@ mod tests {
             DeviceType::from_register(0x9999),
             DeviceType::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn device_type_gen1_refined_by_low_arm_fw() {
+        // 0x2001 with ARM FW century 1 → Gen1
+        let dt = DeviceType::from_register(0x2001).refine_with_arm_fw(130);
+        assert_eq!(dt, DeviceType::Gen1Hybrid);
+    }
+
+    #[test]
+    fn device_type_gen3_confirmed_by_high_arm_fw() {
+        // 0x2001 with ARM FW century 3 → Gen3
+        let dt = DeviceType::from_register(0x2001).refine_with_arm_fw(352);
+        assert_eq!(dt, DeviceType::Gen3Hybrid);
+    }
+
+    #[test]
+    fn device_type_ac_unaffected_by_arm_fw() {
+        // AC coupled with any ARM FW stays AC
+        let dt = DeviceType::from_register(0x3001).refine_with_arm_fw(130);
+        assert_eq!(dt, DeviceType::ACCoupled);
     }
 
     // -- Serialization --------------------------------------------------------

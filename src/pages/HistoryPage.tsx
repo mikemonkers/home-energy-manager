@@ -223,7 +223,15 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
               const raw = row.today_import_kwh;
               let delta = 0;
               if (raw != null && prev != null) {
-                delta = raw >= prev ? raw - prev : raw;
+                if (raw >= prev) {
+                  delta = raw - prev;
+                } else if (prev > 50 && raw < 10) {
+                  // Midnight rollover: prev was yesterday's final value,
+                  // raw is today's running total (small since midnight)
+                  delta = raw;
+                }
+                // else: small data glitch (counter dipped slightly),
+                // skip this delta (delta stays 0)
               }
               if (raw != null) prev = raw;
               const rate = isOffPeak(row.t, importTariffCfg.off_peak_start, importTariffCfg.off_peak_end)
@@ -246,7 +254,11 @@ function getCharts(tab: MetricTab, importTariffCfg: TariffConfig, exportTariffCf
               const raw = row.today_export_kwh;
               let delta = 0;
               if (raw != null && prev != null) {
-                delta = raw >= prev ? raw - prev : raw;
+                if (raw >= prev) {
+                  delta = raw - prev;
+                } else if (prev > 50 && raw < 10) {
+                  delta = raw;
+                }
               }
               if (raw != null) prev = raw;
               const rate = isOffPeak(row.t, exportTariffCfg.off_peak_start, exportTariffCfg.off_peak_end)
