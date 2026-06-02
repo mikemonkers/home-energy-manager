@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now shows clear messages: "Connection lost — reconnecting…" or
   "Disconnected — will retry automatically".
 
+- **Cosy force-charge now sets eco mode**: The `ForceCharge` command now also
+  writes `HR_BATTERY_POWER_MODE = 1` (eco mode) before enabling charge.
+  Without this, if the inverter was in export-paused mode (`power_mode=0`,
+  `enable_discharge=false`), the force-charge command would enable charging
+  registers but the inverter would remain in ExportPaused and not actually
+  charge. This caused the Cosy timer to appear to switch to "Paused" instead
+  of charging.
+
 - **SVG crash on corrupted data (React error #31)**: When the snapshot contains
   non-string/number values due to register corruption, the `EnergyFlowDiagram`
   SVG text elements now coerce props to safe types before rendering. Prevents

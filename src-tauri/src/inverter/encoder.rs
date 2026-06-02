@@ -175,6 +175,7 @@ impl ControlCommand {
             }
             ControlCommand::ForceCharge => {
                 vec![
+                    rw(HR_BATTERY_POWER_MODE, 1), // eco mode — required for charge to work
                     rw(HR_ENABLE_CHARGE, 1),
                     rw(HR_ENABLE_CHARGE_TARGET, 1),
                     rw(HR_CHARGE_TARGET_SOC, 100),
@@ -362,13 +363,15 @@ mod tests {
     fn force_charge_encodes() {
         let cmd = ControlCommand::ForceCharge;
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 3);
-        assert_eq!(writes[0].address, HR_ENABLE_CHARGE);
-        assert_eq!(writes[0].value, 1);
-        assert_eq!(writes[1].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes.len(), 4);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1); // eco mode
+        assert_eq!(writes[1].address, HR_ENABLE_CHARGE);
         assert_eq!(writes[1].value, 1);
-        assert_eq!(writes[2].address, HR_CHARGE_TARGET_SOC);
-        assert_eq!(writes[2].value, 100);
+        assert_eq!(writes[2].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[2].value, 1);
+        assert_eq!(writes[3].address, HR_CHARGE_TARGET_SOC);
+        assert_eq!(writes[3].value, 100);
     }
 
     #[test]
