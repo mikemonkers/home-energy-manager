@@ -1265,11 +1265,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                 }
                                             }
                                         } else if !in_slot && *cosy_active {
-                                            // Exiting a cosy slot — stop force charge
-                                            tracing::info!("Cosy: exiting slot, stopping charge");
+                                            // Exiting a cosy slot — restore normal Eco mode
+                                            tracing::info!("Cosy: exiting slot, restoring Eco mode");
                                             *cosy_active = false;
                                             drop(cosy_active);
-                                            let cmd = ControlCommand::SetEnableCharge { enabled: false };
+                                            let cmd = ControlCommand::CosyExit;
                                             if let Ok(writes) = cmd.encode() {
                                                 for w in &writes {
                                                     match client.write_register(w.address, w.value).await {

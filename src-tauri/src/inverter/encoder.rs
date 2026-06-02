@@ -45,6 +45,10 @@ pub enum ControlCommand {
     SetBatterySocReserve { reserve: u16 },
     /// Set charge target SOC (0-100).
     SetChargeTargetSoc { soc: u16 },
+    /// Exit cosy mode: disable charge, disable charge target, re-enable discharge,
+    /// restore eco power mode. Puts the inverter back to normal Eco self-consumption
+    /// after a cosy force-charge slot ends.
+    CosyExit,
     /// Set charge slot 1 times (HHMM packed).
     SetChargeSlot1 { start: u16, end: u16 },
     /// Set charge slot 2 times (HHMM packed).
@@ -92,6 +96,14 @@ impl ControlCommand {
             }
             ControlCommand::SetEnableCharge { enabled } => {
                 vec![rw(HR_ENABLE_CHARGE, if *enabled { 1 } else { 0 })]
+            }
+            ControlCommand::CosyExit => {
+                vec![
+                    rw(HR_ENABLE_CHARGE, 0),          // stop force charge
+                    rw(HR_ENABLE_CHARGE_TARGET, 0),   // clear charge target
+                    rw(HR_BATTERY_POWER_MODE, 1),     // eco mode
+                    rw(HR_ENABLE_DISCHARGE, 1),       // allow discharge again
+                ]
             }
             ControlCommand::SetBatterySocReserve { reserve } => {
                 validate_range(*reserve, 0, 100, "SOC reserve")?;
