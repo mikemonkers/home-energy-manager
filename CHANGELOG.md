@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   charge. This caused the Cosy timer to appear to switch to "Paused" instead
   of charging.
 
+- **Cosy force-charge uses per-slot target SOC**: The `ForceCharge` command now
+  accepts a `target_soc` parameter. The Cosy timer passes the target SOC from
+  the slot's slider instead of always using 100%.
+
 - **SVG crash on corrupted data (React error #31)**: When the snapshot contains
   non-string/number values due to register corruption, the `EnergyFlowDiagram`
   SVG text elements now coerce props to safe types before rendering. Prevents

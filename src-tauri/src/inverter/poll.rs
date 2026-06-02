@@ -1205,7 +1205,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
                                             *cosy_active = true;
                                             drop(cosy_active);
-                                            let cmd = ControlCommand::ForceCharge;
+                                            let cmd = ControlCommand::ForceCharge { target_soc: slot_target_soc as u16 };
                                             if let Ok(writes) = cmd.encode() {
                                                 for w in &writes {
                                                     match client.write_register(w.address, w.value).await {

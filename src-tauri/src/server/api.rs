@@ -502,7 +502,7 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 /// POST /api/control/force-charge — enable charging with target SOC.
 pub async fn force_charge(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let cmd = ControlCommand::ForceCharge;
+    let cmd = ControlCommand::ForceCharge { target_soc: 100 };
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("ForceCharge encoded: {:?}", writes);
