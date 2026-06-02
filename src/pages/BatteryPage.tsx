@@ -215,6 +215,12 @@ export default function BatteryPage() {
                             <span className="text-text-primary font-mono text-right">{m.design_capacity_ah.toFixed(1)} Ah</span>
                           </>
                         )}
+                        {m.design_capacity_ah > 0 && m.capacity_ah > 0 && (
+                          <>
+                            <span className="text-text-secondary">State of Health</span>
+                            <span className="text-text-primary font-mono text-right">{(m.capacity_ah / m.design_capacity_ah * 100).toFixed(1)}%</span>
+                          </>
+                        )}
                         {m.capacity_ah > 0 && (
                           <>
                             <span className="text-text-secondary">Capacity</span>
