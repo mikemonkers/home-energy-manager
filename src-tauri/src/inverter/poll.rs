@@ -929,6 +929,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         let now = chrono::Local::now();
                         let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
                         let mut in_slot = false;
+                        let mut restore_target_soc: u16 = 100;
                         for slot in &settings.cosy_slots {
                             if !slot.enabled { continue; }
                             let start = slot.start_hour as u16 * 60 + slot.start_minute as u16;
@@ -936,15 +937,29 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             let crosses_midnight = end <= start;
                             if crosses_midnight {
                                 if now_minutes >= start || now_minutes < end {
-                                    in_slot = true; break;
+                                    in_slot = true;
+                                    restore_target_soc = slot.target_soc as u16;
+                                    break;
                                 }
                             } else if now_minutes >= start && now_minutes < end {
-                                in_slot = true; break;
+                                in_slot = true;
+                                restore_target_soc = slot.target_soc as u16;
+                                break;
                             }
                         }
                         if in_slot {
-                            tracing::info!("Cosy: restored active state on restart (inside slot)");
+                            tracing::info!("Cosy: restored active state on restart (inside slot, target SOC {}%)", restore_target_soc);
                             *state.cosy_active.lock().await = true;
+                            // Re-send ForceCharge so the inverter resumes charging
+                            // even after a client restart.
+                            let cmd = ControlCommand::ForceCharge {
+                                target_soc: restore_target_soc,
+                            };
+                            if let Ok(writes) = cmd.encode() {
+                                let mut pw = state.pending_writes.lock().await;
+                                pw.push(writes);
+                                state.write_notify.notify_one();
+                            }
                         }
                     }
                 }
