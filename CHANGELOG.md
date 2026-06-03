@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.36] - 2026-06-03
+
+### Fixed
+
+- **Cosy charging retries failed writes**: Cosy mode previously marked itself
+  active before the ForceCharge writes had actually succeeded. If the dongle
+  was busy or dropped a write, Cosy would not retry until the next schedule
+  transition. It now only marks Cosy active after all entry writes succeed,
+  and only marks inactive after all exit writes succeed — failed writes retry
+  on the next poll. Restarts inside a Cosy slot also re-enter through the
+  normal retry path. (#8)
+
 ## [0.9.35] - 2026-06-03
 
 ### Fixed

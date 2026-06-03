@@ -985,18 +985,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             }
                         }
                         if in_slot {
-                            tracing::info!("Cosy: restored active state on restart (inside slot, target SOC {}%)", restore_target_soc);
-                            *state.cosy_active.lock().await = true;
-                            // Re-send ForceCharge so the inverter resumes charging
-                            // even after a client restart.
-                            let cmd = ControlCommand::ForceCharge {
-                                target_soc: restore_target_soc,
-                            };
-                            if let Ok(writes) = cmd.encode() {
-                                let mut pw = state.pending_writes.lock().await;
-                                pw.push(writes);
-                                state.write_notify.notify_one();
-                            }
+                            tracing::info!(
+                                "Cosy: restart detected inside slot (target SOC {}%) — force-charge will be retried after first poll",
+                                restore_target_soc
+                            );
+                            // Leave cosy_active=false so the normal Cosy state machine
+                            // re-sends ForceCharge after the first successful poll. If a
+                            // write fails, it will keep retrying on subsequent polls.
                         }
                     }
                 }
@@ -1285,7 +1280,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
 
-                                        let mut cosy_active = state.cosy_active.lock().await;
+                                        let cosy_active = state.cosy_active.lock().await;
                                         if in_slot && !*cosy_active {
                                             // Entering a cosy slot — start force charge.
                                             // Drain stale frames first to avoid function code
@@ -1293,34 +1288,56 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             // for write acknowledgments).
                                             client.drain_stale_frames().await;
                                             tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
-                                            *cosy_active = true;
                                             drop(cosy_active);
                                             let cmd = ControlCommand::ForceCharge { target_soc: slot_target_soc as u16 };
+                                            let mut all_writes_ok = true;
                                             if let Ok(writes) = cmd.encode() {
                                                 for w in &writes {
                                                     match client.write_register(w.address, w.value).await {
                                                         Ok(()) => tracing::info!("Cosy: wrote reg {} = {}", w.address, w.value),
-                                                        Err(e) => tracing::error!("Cosy: write reg {} failed: {e}", w.address),
+                                                        Err(e) => {
+                                                            tracing::error!("Cosy: write reg {} failed: {e}", w.address);
+                                                            all_writes_ok = false;
+                                                        }
                                                     }
                                                     tokio::time::sleep(Duration::from_millis(1500)).await;
                                                 }
+                                            } else {
+                                                all_writes_ok = false;
+                                            }
+
+                                            if all_writes_ok {
+                                                *state.cosy_active.lock().await = true;
+                                            } else {
+                                                tracing::warn!("Cosy: force-charge writes failed — will retry on next poll");
                                             }
                                         } else if !in_slot && *cosy_active {
                                             // Exiting a cosy slot — restore normal Eco mode.
                                             // Drain stale frames for the same reason as entry.
                                             client.drain_stale_frames().await;
                                             tracing::info!("Cosy: exiting slot, restoring Eco mode");
-                                            *cosy_active = false;
                                             drop(cosy_active);
                                             let cmd = ControlCommand::CosyExit;
+                                            let mut all_writes_ok = true;
                                             if let Ok(writes) = cmd.encode() {
                                                 for w in &writes {
                                                     match client.write_register(w.address, w.value).await {
                                                         Ok(()) => tracing::info!("Cosy: wrote reg {} = {}", w.address, w.value),
-                                                        Err(e) => tracing::error!("Cosy: write reg {} failed: {e}", w.address),
+                                                        Err(e) => {
+                                                            tracing::error!("Cosy: write reg {} failed: {e}", w.address);
+                                                            all_writes_ok = false;
+                                                        }
                                                     }
                                                     tokio::time::sleep(Duration::from_millis(1500)).await;
                                                 }
+                                            } else {
+                                                all_writes_ok = false;
+                                            }
+
+                                            if all_writes_ok {
+                                                *state.cosy_active.lock().await = false;
+                                            } else {
+                                                tracing::warn!("Cosy: exit writes failed — will retry on next poll");
                                             }
                                         } else {
                                             drop(cosy_active);
