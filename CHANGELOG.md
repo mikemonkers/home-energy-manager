@@ -13,6 +13,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counter data (`today_import_kwh`, `today_export_kwh`, etc.). At midnight
   rollover, the repair replaced the legitimate reset value (e.g. 5 kWh)
   with yesterday's final value (e.g. 150 kWh), freezing the counter.
+  Fixed the repair CASE logic — values where `prev > 5 && raw < 5` are
+  now correctly kept as midnight rollover resets.
+
+- **Charge slots triggering force charge**: Setting a charge schedule slot
+  no longer writes `enable_charge_target` (HR 20) or `charge_target_soc`
+  (HR 116), which trigger immediate grid force charge. Slot settings now
+  only write the slot times (HR 94-95 or 31-32) and `enable_charge` (HR 96)
+  to permit slot-based scheduled charging.
+
+- **Charge slots showing disabled in GUI**: Removed global decoder override
+  that set ALL charge slots to `enabled=false` when `enable_charge` was 0,
+  and ALL discharge slots to disabled when `enable_discharge` was 0.
+  Per GivTCP reference, slot times and enable flags are independent — a
+  slot with `start != end` is always valid.
+
+- **Slot disabled detection**: Now uses `start == end` (zero-duration) to
+  determine disabled state, not just `start=0`. A slot at 00:00-08:00
+  (start=0, end=800) correctly shows as enabled; 00:00-00:00 shows disabled.
+
+- **00:00→00:01 clamping removed**: Was corrupting 00:00-00:01 slots into
+  (1,1) which falsely read as zero-duration disabled. Now sends 0 for
+  00:00, matching GivTCP exactly.
+
+### Added
+
+- **Per-slot target SOC registers** (Gen3 extended HR 242-269): Added
+  register constants for `HR_CHARGE_TARGET_SOC_1/2` and
+  `HR_DISCHARGE_TARGET_SOC_1/2` with SAFE_WRITE_REGS entries. The charge
+  slot API writes per-slot target SOC for Gen3 inverters (not Gen1/2/AC).
+  These are independent of `enable_charge_target` and don't trigger
+  immediate force charge.
+
+- **`DeviceType::supports_gen3_extended()`**: Helper to check if a device
+  supports Gen3 extended registers.
+
+- **3 new Rust tests**: `repair_sql_midnight_rollover_keeps_new_value`,
+  `repair_sql_small_glitch_is_fixed`, `repair_sql_large_increase_kept`,
+  `timeslot_midnight_start_valid`, `timeslot_non_zero_equal_values_disabled`
+  (140 total).
+
+### Changed
+
+- **SyncClock year encoding**: Now writes 2-digit year (`year - 2000`)
+  matching GivTCP reference. Was writing full 4-digit year.
+- **`decode_hhmm(0)`**: Now returns `Some((0, 0))` (valid 00:00) instead
+  of None. Disabled detection moved to `decode_timeslot` which checks
+  `start == end`.
   Fixed the repair CASE logic — values where `prev > 50 && raw < 10` are
   now correctly kept as midnight rollover resets.
 
