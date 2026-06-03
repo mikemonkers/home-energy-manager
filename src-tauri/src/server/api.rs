@@ -265,14 +265,7 @@ pub async fn set_charge_slot(
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
 
     let (start, end) = if enabled {
-        let mut raw_start = encode_hhmm(start_hour, start_minute);
-        let mut raw_end = encode_hhmm(end_hour, end_minute);
-        // The value 0 in a time register means "not set" / disabled.
-        // Clamp to 1 (00:01) so a slot starting or ending at midnight
-        // is seen as active by the inverter firmware.
-        if raw_start == 0 { raw_start = 1; }
-        if raw_end == 0 { raw_end = 1; }
-        (raw_start, raw_end)
+        (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
     } else {
         // Disabled: write 0 to clear the slot (per givenergy-modbus reference).
         (0, 0)
@@ -336,11 +329,7 @@ pub async fn set_discharge_slot(
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
 
     let (start, end) = if enabled {
-        let mut raw_start = encode_hhmm(start_hour, start_minute);
-        let mut raw_end = encode_hhmm(end_hour, end_minute);
-        if raw_start == 0 { raw_start = 1; }
-        if raw_end == 0 { raw_end = 1; }
-        (raw_start, raw_end)
+        (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute))
     } else {
         (0, 0)
     };
