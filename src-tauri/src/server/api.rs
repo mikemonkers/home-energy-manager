@@ -293,16 +293,29 @@ pub async fn set_charge_slot(
                 {
                     writes.extend(enable_writes);
                 }
-                // Write per-slot target SOC (Gen3 extended registers) if provided.
-                // These are independent of enable_charge_target (HR 20) and do
-                // NOT trigger immediate force charge.
-                let target_reg = match slot {
-                    1 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_1,
-                    2 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_2,
-                    _ => 0,
-                };
-                if target_reg != 0 && target_soc > 0 {
-                    writes.push(RegisterWrite { address: target_reg, value: target_soc as u16 });
+                // Write per-slot target SOC (Gen3 extended registers HR 242+) if:
+                //   a) target_soc provided,
+                //   b) the inverter is Gen3 (per latest snapshot).
+                // These registers are independent of enable_charge_target (HR 20)
+                // and do NOT trigger immediate force charge.
+                //
+                // Per GivTCP: Gen1/Gen2 and AC Coupled don't have per-slot target
+                // registers — writes to HR 242+ are silently ignored or may error.
+                if target_soc > 0 {
+                    let is_gen3 = state.latest_snapshot.lock().await
+                        .as_ref()
+                        .map(|s| s.device_type.supports_gen3_extended())
+                        .unwrap_or(false);
+                    if is_gen3 {
+                        let target_reg = match slot {
+                            1 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_1,
+                            2 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_2,
+                            _ => 0,
+                        };
+                        if target_reg != 0 {
+                            writes.push(RegisterWrite { address: target_reg, value: target_soc as u16 });
+                        }
+                    }
                 }
             }
 

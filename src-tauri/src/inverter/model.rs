@@ -215,6 +215,19 @@ impl DeviceType {
             Self::Unknown(_) => 5000,
         }
     }
+
+    /// Whether this device supports Gen3 extended registers (per-slot target SOC etc.).
+    /// Gen3 hybrids and AIO 8kW/10kW have HR 242+ for per-slot targets.
+    pub fn supports_gen3_extended(&self) -> bool {
+        matches!(
+            self,
+            Self::Gen3Hybrid
+                | Self::Gen3Hybrid8kW
+                | Self::Gen3Hybrid10kW
+                | Self::AIO8kW
+                | Self::AIO10kW
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
