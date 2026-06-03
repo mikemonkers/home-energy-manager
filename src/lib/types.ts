@@ -32,6 +32,7 @@ export interface InverterSnapshot {
   discharge_rate: number;
   active_power_rate: number;
   max_battery_power_w: number;
+  max_ac_power_w: number;
   target_soc: number;
   enable_charge_target: boolean;
   enable_charge: boolean;

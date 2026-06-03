@@ -603,7 +603,10 @@ fn sanitize_snapshot(
     // Battery voltage: reject spurious readings. Nominal is 51.2V (LV) or 307V (HV).
     // Anything > 60V on an LV system or > 400V on an HV system is a corrupt register.
     let max_battery_voltage = match snap.device_type {
-        crate::inverter::model::DeviceType::AllInOne => 400.0,
+        crate::inverter::model::DeviceType::AllInOne6kW
+        | crate::inverter::model::DeviceType::AllInOne5kW
+        | crate::inverter::model::DeviceType::AIO8kW
+        | crate::inverter::model::DeviceType::AIO10kW => 400.0,
         crate::inverter::model::DeviceType::ThreePhase => 100.0,
         _ => 60.0,
     };

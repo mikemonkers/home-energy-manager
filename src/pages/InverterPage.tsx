@@ -40,6 +40,8 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{s.firmware_version || '—'}</span>
           <span className="text-text-secondary">Max Battery Power</span>
           <span className="text-text-primary font-mono text-right">{formatPower(s.max_battery_power_w)}</span>
+          <span className="text-text-secondary">Max AC Output</span>
+          <span className="text-text-primary font-mono text-right">{formatPower(s.max_ac_power_w)}</span>
           <span className="text-text-secondary">Battery Capacity</span>
           <span className="text-text-primary font-mono text-right">{s.battery_capacity_kwh.toFixed(1)} kWh</span>
         </div>

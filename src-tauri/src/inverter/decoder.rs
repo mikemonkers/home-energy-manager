@@ -300,6 +300,7 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // Refine device type using ARM FW (0x20XX with FW century 1-2 = Gen1)
     snap.device_type = snap.device_type.refine_with_arm_fw(arm_fw);
     snap.device_type_display = snap.device_type.display_name().to_string();
+    snap.max_ac_power_w = snap.device_type.max_ac_power_w();
 
     // Battery capacity in kWh = HR(55) × nominal_voltage / 1000
     // HR(55) reports total system Ah (inverter firmware accounts for all modules).
@@ -330,22 +331,9 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     //   Hybrid Gen2/3 (FW century 3,8,9): 3600W, Gen1: 2600W
     //   AC (30xx): 3000W, All-in-One (80xx): varies
     snap.max_battery_power_w = {
-        let dtc = &snap.device_type_code;
-        if dtc.starts_with("20") {
-            let century = arm_fw / 100;
-            if century == 3 || century == 8 || century == 9 { 3600 } else { 2600 }
-        } else {
-            match dtc.as_str() {
-                "2201" => 5400,
-                "3001" | "3002" => 3000,
-                "8001" => 6000,
-                "8002" => 3600,
-                "8003" => 5000,
-                "8102" => 8000,
-                "8103" => 10000,
-                _ => snap.device_type.max_battery_power_w(),
-            }
-        }
+        // Use the device-type-specific battery limit, then cap at
+        // half battery capacity (per GivTCP formula).
+        snap.device_type.max_battery_power_w()
     };
     // Cap at half battery capacity (per GivTCP formula)
     let battery_capacity_w = snap.battery_capacity_kwh * 1000.0;

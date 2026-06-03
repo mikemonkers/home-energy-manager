@@ -85,9 +85,15 @@ pub enum DeviceType {
     Gen1Hybrid,
     Gen2Hybrid,
     Gen3Hybrid,
+    Gen3Hybrid8kW,
+    Gen3Hybrid10kW,
     ACCoupled,
-    AllInOne,
+    ACCoupledMk2,
     ThreePhase,
+    AllInOne6kW,
+    AllInOne5kW,
+    AIO8kW,
+    AIO10kW,
     Unknown(u16),
 }
 
@@ -100,24 +106,41 @@ impl Default for DeviceType {
 impl DeviceType {
     /// Map a raw HR(0) hex value to DeviceType.
     pub fn from_register(val: u16) -> Self {
-        let prefix = val >> 8;
-        match prefix {
-            0x20 | 0x21 => Self::Gen3Hybrid, // may be refined by refine_with_arm_fw
-            0x30 => Self::ACCoupled,
-            0x40 => Self::ThreePhase,
-            0x80 => Self::AllInOne,
-            _ => Self::Unknown(val),
+        match val {
+            0x1001 => Self::Gen1Hybrid,
+            0x2001 => Self::Gen3Hybrid, // may be refined by refine_with_arm_fw (Gen2 if FW century 1-2)
+            0x2101 => Self::Gen3Hybrid8kW,
+            0x2102 => Self::Gen3Hybrid10kW,
+            0x3001 => Self::ACCoupled,
+            0x3002 => Self::ACCoupledMk2,
+            0x4001 => Self::ThreePhase,
+            0x8001 => Self::AllInOne6kW,
+            0x8002 => Self::AllInOne5kW,
+            0x8003 => Self::AllInOne5kW,
+            0x8102 => Self::AIO8kW,
+            0x8103 => Self::AIO10kW,
+            _ => {
+                let prefix = val >> 8;
+                match prefix {
+                    0x10 => Self::Gen1Hybrid,
+                    0x20 | 0x21 => Self::Gen3Hybrid, // refined by refine_with_arm_fw
+                    0x30 => Self::ACCoupled,
+                    0x40 => Self::ThreePhase,
+                    0x80 | 0x81 => Self::AllInOne6kW,
+                    _ => Self::Unknown(val),
+                }
+            }
         }
     }
 
     /// Refine the device type using the ARM firmware version.
-    /// 0x20XX with ARM FW century 1 or 2 is Gen1 (2600W), not Gen3 (3600W).
+    /// 0x20XX with ARM FW century 1 or 2 is Gen2 (2600W), not Gen3 (3600W).
     pub fn refine_with_arm_fw(self, arm_fw: u16) -> Self {
         match self {
             Self::Gen3Hybrid => {
                 let century = arm_fw / 100;
                 if century == 1 || century == 2 {
-                    Self::Gen1Hybrid
+                    Self::Gen2Hybrid
                 } else {
                     Self::Gen3Hybrid
                 }
@@ -132,7 +155,7 @@ impl DeviceType {
     /// a fixed nominal voltage per device type, NOT the live system voltage.
     pub fn nominal_battery_voltage(&self) -> f32 {
         match self {
-            Self::AllInOne => 307.0,
+            Self::AllInOne6kW | Self::AllInOne5kW | Self::AIO8kW | Self::AIO10kW => 307.0,
             Self::ThreePhase => 76.8,
             _ => 51.2,
         }
@@ -144,9 +167,15 @@ impl DeviceType {
             Self::Gen1Hybrid => "Gen 1 Hybrid",
             Self::Gen2Hybrid => "Gen 2 Hybrid",
             Self::Gen3Hybrid => "Gen 3 Hybrid",
+            Self::Gen3Hybrid8kW => "Gen 3 Hybrid 8kW",
+            Self::Gen3Hybrid10kW => "Gen 3 Hybrid 10kW",
             Self::ACCoupled => "AC Coupled",
-            Self::AllInOne => "All-in-One",
+            Self::ACCoupledMk2 => "AC Coupled Mk2",
             Self::ThreePhase => "Three Phase",
+            Self::AllInOne6kW => "All-in-One 6kW",
+            Self::AllInOne5kW => "All-in-One 5kW",
+            Self::AIO8kW => "AIO 8kW",
+            Self::AIO10kW => "AIO 10kW",
             Self::Unknown(_) => "Unknown",
         }
     }
@@ -157,12 +186,33 @@ impl DeviceType {
     /// charge/discharge rate regardless of what the register says.
     pub fn max_battery_power_w(&self) -> u32 {
         match self {
-            Self::Gen1Hybrid => 2600,
-            Self::Gen2Hybrid | Self::Gen3Hybrid => 3600,
-            Self::ACCoupled => 5000,
-            Self::ThreePhase => 5000,
-            Self::AllInOne => 5000,
-            Self::Unknown(_) => 3600, // assume Gen2 hybrid as most common
+            Self::Gen1Hybrid => 2500,
+            Self::Gen2Hybrid => 2600,
+            Self::Gen3Hybrid => 3600,
+            Self::Gen3Hybrid8kW | Self::AIO8kW => 8000,
+            Self::Gen3Hybrid10kW | Self::AIO10kW => 10000,
+            Self::ACCoupled | Self::ACCoupledMk2 => 3000,
+            Self::ThreePhase => 6000,
+            Self::AllInOne6kW => 6000,
+            Self::AllInOne5kW => 5000,
+            Self::Unknown(_) => 3600, // assume Gen3 hybrid as fallback
+        }
+    }
+
+    /// Maximum AC output power in watts (per device model/spec).
+    pub fn max_ac_power_w(&self) -> u32 {
+        match self {
+            Self::Gen1Hybrid => 5000,
+            Self::Gen2Hybrid | Self::Gen3Hybrid => 5000,
+            Self::Gen3Hybrid8kW => 8000,
+            Self::Gen3Hybrid10kW => 10000,
+            Self::ACCoupled | Self::ACCoupledMk2 => 3000,
+            Self::ThreePhase => 6000,
+            Self::AllInOne6kW => 6000,
+            Self::AllInOne5kW => 5000,
+            Self::AIO8kW => 8000,
+            Self::AIO10kW => 10000,
+            Self::Unknown(_) => 5000,
         }
     }
 }
@@ -293,6 +343,9 @@ pub struct InverterSnapshot {
     pub active_power_rate: u8,
     /// Max battery charge/discharge power in watts (per inverter model).
     pub max_battery_power_w: u32,
+    /// Max AC output power in watts (per device model).
+    #[serde(default)]
+    pub max_ac_power_w: u32,
     pub target_soc: u8,
     pub enable_charge: bool,
     pub enable_charge_target: bool,
@@ -410,10 +463,30 @@ mod tests {
     }
 
     #[test]
-    fn device_type_gen1_refined_by_low_arm_fw() {
-        // 0x2001 with ARM FW century 1 → Gen1
+    fn device_type_gen1() {
+        assert_eq!(DeviceType::from_register(0x1001), DeviceType::Gen1Hybrid);
+    }
+
+    #[test]
+    fn device_type_gen3_8kw() {
+        assert_eq!(DeviceType::from_register(0x2101), DeviceType::Gen3Hybrid8kW);
+    }
+
+    #[test]
+    fn device_type_gen3_10kw() {
+        assert_eq!(DeviceType::from_register(0x2102), DeviceType::Gen3Hybrid10kW);
+    }
+
+    #[test]
+    fn device_type_ac_mk2() {
+        assert_eq!(DeviceType::from_register(0x3002), DeviceType::ACCoupledMk2);
+    }
+
+    #[test]
+    fn device_type_gen2_refined_by_low_arm_fw() {
+        // 0x2001 with ARM FW century 1 → Gen2
         let dt = DeviceType::from_register(0x2001).refine_with_arm_fw(130);
-        assert_eq!(dt, DeviceType::Gen1Hybrid);
+        assert_eq!(dt, DeviceType::Gen2Hybrid);
     }
 
     #[test]
