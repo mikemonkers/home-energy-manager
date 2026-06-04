@@ -164,6 +164,7 @@ pub async fn update_settings(
     }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
+        return error_response(&format!("Failed to save settings: {}", e));
     }
 
     let msg = format!(
@@ -680,6 +681,7 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
 
     Json(json!({
         "ok": true,
+        "subnets": subnets,
         "inverters": inverters,
     }))
 }

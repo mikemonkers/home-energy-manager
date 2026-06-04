@@ -24,10 +24,36 @@ export function getWsUrl(): string {
   return `ws://${window.location.hostname}:${port}/ws`;
 }
 
+async function parseApiResponse<T>(res: Response): Promise<T> {
+  let data: unknown = null;
+  try {
+    data = await res.json();
+  } catch {
+    // Some failed responses may not have a JSON body.
+  }
+
+  if (!res.ok) {
+    throw new Error(`API error: ${res.status}`);
+  }
+
+  if (
+    data != null
+    && typeof data === 'object'
+    && 'ok' in data
+    && (data as { ok?: unknown }).ok === false
+  ) {
+    const message = 'error' in data && typeof (data as { error?: unknown }).error === 'string'
+      ? (data as { error: string }).error
+      : 'API returned an error';
+    throw new Error(message);
+  }
+
+  return data as T;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const res = await fetch(`${getApiBase()}${path}`);
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  return parseApiResponse<T>(res);
 }
 
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
@@ -36,8 +62,7 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  return parseApiResponse<T>(res);
 }
 
 export async function apiPut<T>(path: string, body: unknown): Promise<T> {
@@ -46,8 +71,7 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  return parseApiResponse<T>(res);
 }
 
 export async function fetchHistory(

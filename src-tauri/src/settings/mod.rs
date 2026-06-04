@@ -212,13 +212,25 @@ impl Settings {
     /// Uses `GIVENERGY_LOCAL_CONFIG_DIR` env var if set, otherwise `~/.givenergy-local/`
     /// (or `%USERPROFILE%\.givenergy-local\` on Windows).
     pub fn settings_dir() -> PathBuf {
-        if let Ok(dir) = std::env::var("GIVENERGY_LOCAL_CONFIG_DIR") {
+        if let Some(dir) = std::env::var_os("GIVENERGY_LOCAL_CONFIG_DIR") {
             return PathBuf::from(dir);
         }
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".givenergy-local")
+
+        if let Some(home) = dirs::home_dir() {
+            return home.join(".givenergy-local");
+        }
+
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            return PathBuf::from(home).join(".givenergy-local");
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(".givenergy-local");
+        }
+
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".givenergy-local")
     }
 
     /// Get the path to the settings file.

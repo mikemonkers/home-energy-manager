@@ -58,3 +58,4 @@ parking_lot = "0.12"
 
 # TCP socket options (keepalive)
 socket2 = { version = "0.6.4", features = ["all"] }
+dirs = "6"

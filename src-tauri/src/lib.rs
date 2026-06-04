@@ -43,6 +43,8 @@ pub fn run() {
             }
 
             // Load persisted settings (or use defaults)
+            let settings_dir = crate::settings::Settings::settings_dir();
+            tracing::info!("Settings directory: {}", settings_dir.display());
             let app_settings = Settings::load();
             tracing::info!(
                 "Loaded settings: host={}, serial={}",
@@ -266,6 +268,8 @@ pub fn run_headless(args: &[String]) {
 
     let cli_port = parse_port(args);
     // Load settings
+    let settings_dir = crate::settings::Settings::settings_dir();
+    tracing::info!("Settings directory: {}", settings_dir.display());
     let app_settings = Settings::load();
     // CLI --port overrides settings; settings overrides default 7337
     let port = if cli_port != 7337 || args.iter().any(|a| a == "--port") {

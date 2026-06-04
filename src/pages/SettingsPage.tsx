@@ -122,8 +122,8 @@ export default function SettingsPage() {
     try {
       await apiPost('/api/settings', { host, port, serial });
       flash('Settings saved — reconnecting…', true);
-    } catch {
-      flash('Failed to save settings', false);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Failed to save settings', false);
     }
     setSaving(false);
   };
@@ -134,8 +134,8 @@ export default function SettingsPage() {
     try {
       await apiPost('/api/settings', { interval_secs: val });
       flash(`Refresh interval set to ${val}s`, true);
-    } catch {
-      flash('Failed to update interval', false);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Failed to update interval', false);
     }
   };
 
@@ -144,8 +144,8 @@ export default function SettingsPage() {
     try {
       await apiPost('/api/settings', { http_port: httpPort });
       flash(`HTTP port set to ${httpPort}. Restart required to take effect.`, true);
-    } catch {
-      flash('Failed to update HTTP port', false);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Failed to update HTTP port', false);
     }
   };
 
@@ -170,7 +170,7 @@ export default function SettingsPage() {
     setDiscoverError('');
     setDiscoverResults([]);
     try {
-      const res = await apiGet<{ok: boolean, inverters: DiscoveredInverter[]}>('/api/discover');
+      const res = await apiGet<{ok: boolean, subnets?: string[], inverters: DiscoveredInverter[]}>('/api/discover');
       const results: DiscoveredInverter[] = (res.inverters || []).map((inv) => ({
         host: 'ip' in inv ? (inv as Record<string, unknown>).ip as string : (inv as DiscoveredInverter).host,
         port: inv.port,
@@ -178,9 +178,12 @@ export default function SettingsPage() {
         generation: inv.generation ?? null,
       }));
       setDiscoverResults(results);
-      if (results.length === 0) setDiscoverError('No inverters found on the network.');
-    } catch {
-      setDiscoverError('Discovery failed — is the backend running?');
+      if (results.length === 0) {
+        const scanned = res.subnets?.length ? ` Scanned: ${res.subnets.join('.x, ')}.x` : '';
+        setDiscoverError(`No inverters found on the network.${scanned}`);
+      }
+    } catch (error) {
+      setDiscoverError(error instanceof Error ? error.message : 'Discovery failed — is the backend running?');
     }
     setDiscovering(false);
   };
