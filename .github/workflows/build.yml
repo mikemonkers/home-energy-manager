@@ -64,8 +64,17 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      - name: Build Tauri app
-        run: cargo tauri build --target ${{ matrix.target }}
+      - name: Build Tauri app (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: cargo tauri build --target ${{ matrix.target }} --bundles dmg
+
+      - name: Build Tauri app (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: cargo tauri build --target ${{ matrix.target }} --bundles nsis,msi
+
+      - name: Build Tauri app (Linux)
+        if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
+        run: cargo tauri build --target ${{ matrix.target }} --bundles deb,rpm,appimage
 
       - name: Customize macOS DMG
         if: matrix.platform == 'macos-latest'
