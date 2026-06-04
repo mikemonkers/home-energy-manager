@@ -51,6 +51,22 @@ The dashboard runs a local web server on port **7337**. To access it from anothe
 
 ---
 
+### I updated the app, but Settings still shows the old version
+
+This usually means an older copy of the app is still running in the background.
+Home Energy Manager runs a local web server on port **7337**; if the old app
+still owns that port, a newly opened app window can show the old app's frontend
+and version number.
+
+Fix:
+
+1. Close Home Energy Manager / GivEnergy Local.
+2. Check Task Manager, Activity Monitor, or `ps` for any remaining
+   `givenergy-local` process and stop it.
+3. Reopen the app. If unsure, reboot and then open the app again.
+
+---
+
 ### On macOS, the app says it "can't be opened because it is from an unidentified developer"
 
 1. Right-click (or Control-click) the app and select **Open**.
