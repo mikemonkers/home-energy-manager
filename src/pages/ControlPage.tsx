@@ -707,8 +707,12 @@ export default function ControlPage() {
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve)
     ? Math.max(4, Math.min(100, draftReserve))
     : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
-  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge) ? draftCharge : snapshot?.charge_rate;
-  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge) ? draftDischarge : snapshot?.discharge_rate;
+  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge)
+    ? Math.max(0, Math.min(50, draftCharge))
+    : snapshot?.charge_rate != null ? Math.max(0, Math.min(50, snapshot.charge_rate)) : undefined;
+  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge)
+    ? Math.max(0, Math.min(50, draftDischarge))
+    : snapshot?.discharge_rate != null ? Math.max(0, Math.min(50, snapshot.discharge_rate)) : undefined;
   const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
 
   // Calculate wattage from rate% × battery capacity (per GivTCP formula)
@@ -1004,10 +1008,10 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={100}
-                step={5}
+                max={50}
+                step={1}
                 value={chargeRate ?? 50}
-                onChange={(e) => setDraftCharge(Number(e.target.value))}
+                onChange={(e) => setDraftCharge(Math.max(0, Math.min(50, Number(e.target.value))))}
                 className="flex-1"
               />
               <button
@@ -1030,10 +1034,10 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={100}
-                step={5}
+                max={50}
+                step={1}
                 value={dischargeRate ?? 50}
-                onChange={(e) => setDraftDischarge(Number(e.target.value))}
+                onChange={(e) => setDraftDischarge(Math.max(0, Math.min(50, Number(e.target.value))))}
                 className="flex-1"
               />
               <button

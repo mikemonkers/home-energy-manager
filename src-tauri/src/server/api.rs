@@ -436,7 +436,7 @@ pub async fn set_charge_rate(
 ) -> Json<Value> {
     let limit: u16 = match body["limit"].as_u64() {
         Some(r) => r as u16,
-        None => return error_response("Missing 'limit' field"),
+        None => return error_response("Missing 'limit' field (0-50)"),
     };
 
     let cmd = ControlCommand::SetChargeLimit { limit };
@@ -457,7 +457,7 @@ pub async fn set_discharge_rate(
 ) -> Json<Value> {
     let limit: u16 = match body["limit"].as_u64() {
         Some(r) => r as u16,
-        None => return error_response("Missing 'limit' field"),
+        None => return error_response("Missing 'limit' field (0-50)"),
     };
 
     let cmd = ControlCommand::SetDischargeLimit { limit };

@@ -74,7 +74,7 @@ pub enum ControlCommand {
     SetDischargeSlot2 { start: u16, end: u16 },
     /// Set battery charge limit percentage (0-50).
     SetChargeLimit { limit: u16 },
-    /// Set battery discharge limit percentage (0-100).
+    /// Set battery discharge limit percentage (0-50).
     SetDischargeLimit { limit: u16 },
     /// Set inverter max output active power rate percentage (0-100).
     SetActivePowerRate { rate: u16 },
