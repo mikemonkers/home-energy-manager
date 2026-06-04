@@ -133,7 +133,7 @@ function Layout() {
               Home Energy Manager
             </h1>
             <p className="hidden sm:block text-xs text-text-secondary">
-              Local monitoring and control for GivEnergy solar/battery inverters
+              For GivEnergy Solar/Battery Systems
             </p>
           </div>
           <ConnectionIndicator />

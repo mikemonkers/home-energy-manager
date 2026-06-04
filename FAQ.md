@@ -76,7 +76,7 @@ terminal (not just `open`). **Fix**: Move the .app to your Desktop or home
 folder instead.
 
 ```bash
-mv "/Applications/Home Energy Manager.app" ~/Desktop/
+mv /Applications/GivEnergy-Local.app ~/Desktop/
 ```
 
 Then launch from there — it will work as long as the binary isn't in a system-
@@ -87,7 +87,7 @@ app in Finder), macOS may silently block the web server. **Workaround**: Run
 the binary directly:
 
 ```bash
-"$HOME/Desktop/Home Energy Manager.app/Contents/MacOS/givenergy-local"
+~/Desktop/GivEnergy-Local.app/Contents/MacOS/givenergy-local
 ```
 
 Or use the `launch.command` convenience script from the project root.
