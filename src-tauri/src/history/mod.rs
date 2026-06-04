@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection, Result as SqlResult};
 use serde::Serialize;
 
@@ -78,6 +79,54 @@ const CUMULATIVE_FIELDS: &[&str] = &[
 
 fn is_cumulative_field(field: &str) -> bool {
     CUMULATIVE_FIELDS.contains(&field)
+}
+
+fn local_date_for_timestamp_ms(timestamp_ms: i64) -> Option<chrono::NaiveDate> {
+    let secs = timestamp_ms.div_euclid(1000);
+    let nanos = (timestamp_ms.rem_euclid(1000) as u32) * 1_000_000;
+    Local
+        .timestamp_opt(secs, nanos)
+        .earliest()
+        .map(|dt| dt.date_naive())
+}
+
+fn same_local_day(a_ms: i64, b_ms: i64) -> bool {
+    match (
+        local_date_for_timestamp_ms(a_ms),
+        local_date_for_timestamp_ms(b_ms),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Repair cumulative daily counters after aggregation.
+///
+/// The inverter's `today_*_kwh` fields are cumulative counters: they should
+/// only rise within a local day and reset around midnight. Older app versions
+/// could persist plausible-but-wrong low values after reconnects; MAX bucket
+/// aggregation does not fix a whole bad bucket/plateau. This display-side
+/// repair clamps same-day decreases to the previous good value while allowing
+/// a normal day-boundary reset.
+fn repair_cumulative_points(points: &mut [TimePoint]) {
+    let mut last_t: Option<i64> = None;
+    let mut last_v: Option<f64> = None;
+    let mut repaired = 0usize;
+
+    for point in points {
+        if let (Some(prev_t), Some(prev_v)) = (last_t, last_v) {
+            if same_local_day(prev_t, point.t) && point.v < prev_v {
+                point.v = prev_v;
+                repaired += 1;
+            }
+        }
+        last_t = Some(point.t);
+        last_v = Some(point.v);
+    }
+
+    if repaired > 0 {
+        tracing::debug!(repaired, "Repaired same-day cumulative history dips");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +412,7 @@ impl HistoryDb {
                 .prepare(&sql)
                 .map_err(|e| format!("Failed to prepare query for {field}: {e}"))?;
 
-            let points: Vec<TimePoint> = stmt
+            let mut points: Vec<TimePoint> = stmt
                 .query_map(params![start_ts, end_ts], |row| {
                     Ok(TimePoint {
                         t: row.get(0)?,
@@ -373,6 +422,10 @@ impl HistoryDb {
                 .map_err(|e| format!("Query failed for {field}: {e}"))?
                 .filter_map(SqlResult::ok)
                 .collect();
+
+            if is_cumulative_field(field) {
+                repair_cumulative_points(&mut points);
+            }
 
             result.insert(
                 field.clone(),
@@ -420,6 +473,16 @@ mod tests {
             today_export_kwh: export_kwh,
             ..Default::default()
         }
+    }
+
+    fn local_noon_ms(day_offset: i64) -> i64 {
+        let date = Local::now().date_naive() + chrono::Duration::days(day_offset);
+        let naive = date.and_hms_opt(12, 0, 0).unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .unwrap()
+            .timestamp_millis()
     }
 
     #[test]
@@ -478,6 +541,69 @@ mod tests {
         for field in ALLOWED_FIELDS {
             assert!(is_allowed_field(field));
         }
+    }
+
+    #[test]
+    fn cumulative_point_repair_clamps_same_day_dips() {
+        let base = local_noon_ms(0);
+        let mut points = vec![
+            TimePoint { t: base, v: 5.0 },
+            TimePoint {
+                t: base + 60_000,
+                v: 1.0,
+            },
+            TimePoint {
+                t: base + 120_000,
+                v: 2.0,
+            },
+            TimePoint {
+                t: base + 180_000,
+                v: 6.0,
+            },
+        ];
+
+        repair_cumulative_points(&mut points);
+        let values: Vec<f64> = points.iter().map(|p| p.v).collect();
+        assert_eq!(values, vec![5.0, 5.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn cumulative_point_repair_allows_local_day_reset() {
+        let day1 = local_noon_ms(0);
+        let day2 = local_noon_ms(1);
+        let mut points = vec![
+            TimePoint { t: day1, v: 12.0 },
+            TimePoint { t: day2, v: 1.0 },
+            TimePoint {
+                t: day2 + 60_000,
+                v: 2.0,
+            },
+        ];
+
+        repair_cumulative_points(&mut points);
+        let values: Vec<f64> = points.iter().map(|p| p.v).collect();
+        assert_eq!(values, vec![12.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn cumulative_counter_query_repairs_same_day_plateau() {
+        let db = test_db();
+        let base_ms = local_noon_ms(0);
+        let base = base_ms / 1000;
+
+        db.insert_reading(&make_snapshot_with_kwh(base, 5.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 1.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 120, 2.0, 0.0));
+        db.insert_reading(&make_snapshot_with_kwh(base + 180, 6.0, 0.0));
+
+        let result = db
+            .query_history(100_000_000, 60, 0, &["today_import_kwh".to_string()])
+            .unwrap();
+        let points: Vec<TimePoint> =
+            serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
+        let values: Vec<f64> = points.iter().map(|p| p.v).collect();
+
+        assert_eq!(values, vec![5.0, 5.0, 5.0, 6.0]);
     }
 
     #[test]

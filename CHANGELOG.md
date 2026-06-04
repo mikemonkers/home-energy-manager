@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gen 3 extended schedule writes**: Charge/discharge slots 3-10 now write
   their extended register pairs instead of only being displayed in the UI.
   Per-slot charge target SOC writes now also cover slots 3-10.
+- **History chart daily energy dips**: Daily cumulative energy counters are now
+  repaired when queried so same-day drops from stale/corrupt history rows no
+  longer show as sudden dips in PV or load energy charts. Midnight resets are
+  still allowed. (#43)
 
 ## [0.11.1] - 2026-06-04
 
