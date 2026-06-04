@@ -338,18 +338,14 @@ pub const BATTERY_1_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Sourced from the givenergy-modbus reference library's WRITE_SAFE_REGISTERS.
 pub const SAFE_WRITE_REGS: &[u16] = &[
     20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
-    114, 116, 163, 166,
-    // Charge slots 3-10 (Gen3 extended)
-    246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269,
-    // Discharge slots 3-10 (Gen3 extended)
-    276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299,
-    // Per-slot charge targets (Gen3)
-    242, 245,
-    // Per-slot discharge targets (Gen3)
-    272, 275,
-    // AC-coupled features
-    311, 317,
-    // Pause mode/slot
+    114, 116, 163, 166, // Charge slots 3-10 (Gen3 extended)
+    246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264,
+    265, 266, 267, 268, 269, // Discharge slots 3-10 (Gen3 extended)
+    276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294,
+    295, 296, 297, 298, 299, // Per-slot charge targets (Gen3)
+    242, 245, // Per-slot discharge targets (Gen3)
+    272, 275, // AC-coupled features
+    311, 317, // Pause mode/slot
     318, 319, 320,
 ];
 
@@ -539,12 +535,12 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_2)); // 245
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_1)); // 272
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_2)); // 275
-        // Extended slots 3-10
+                                                                       // Extended slots 3-10
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_3_START)); // 246
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_SLOT_10_END)); // 268
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_SLOT_3_START)); // 276
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_SLOT_10_END)); // 298
-        // Per-slot target SOCs
+                                                                      // Per-slot target SOCs
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC_3)); // 248
         assert!(SAFE_WRITE_REGS.contains(&HR_DISCHARGE_TARGET_SOC_3)); // 278
     }

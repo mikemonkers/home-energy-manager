@@ -291,7 +291,8 @@ pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, FramerError> {
     if received_crc != calculated_crc {
         tracing::debug!(
             "Response CRC mismatch: received 0x{:04X}, calculated 0x{:04X}",
-            received_crc, calculated_crc
+            received_crc,
+            calculated_crc
         );
     }
 
@@ -663,17 +664,15 @@ mod tests {
             0x59, 0x59, // transaction ID
             0x00, 0x01, // protocol ID
             0x00, 0x02, // length = 2 (uid + fid only)
-            0x01,       // unit ID
-            0x01,       // function ID (heartbeat)
+            0x01, // unit ID
+            0x01, // function ID (heartbeat)
         ];
         assert!(is_heartbeat_request(&heartbeat));
     }
 
     #[test]
     fn heartbeat_response_echoes_request() {
-        let request = vec![
-            0x59, 0x59, 0x00, 0x01, 0x00, 0x02, 0x01, 0x01,
-        ];
+        let request = vec![0x59, 0x59, 0x00, 0x01, 0x00, 0x02, 0x01, 0x01];
         let response = build_heartbeat_response(&request);
         assert_eq!(response, request);
     }

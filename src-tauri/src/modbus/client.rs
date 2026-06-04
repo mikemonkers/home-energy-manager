@@ -192,11 +192,15 @@ impl ModbusClient {
         }
 
         // Log connection details for diagnostics.
-        let local = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
-        let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-        tracing::info!(
-            "TCP connected: local={local}, peer={peer}, nodelay=true, keepalive=10s"
-        );
+        let local = stream
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        let peer = stream
+            .peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        tracing::info!("TCP connected: local={local}, peer={peer}, nodelay=true, keepalive=10s");
 
         self.stream = Some(stream);
         Ok(())
@@ -273,7 +277,8 @@ impl ModbusClient {
 
             // Read the 6-byte MBAP header
             let mut header_buf = [0u8; 6];
-            let header_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf)).await;
+            let header_result =
+                tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf)).await;
             match &header_result {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
@@ -331,7 +336,8 @@ impl ModbusClient {
 
             // Read the remaining `length` bytes (everything after the 6-byte MBAP header).
             let mut rest = vec![0u8; length];
-            let body_result = tokio::time::timeout(self.timeout, stream.read_exact(&mut rest)).await;
+            let body_result =
+                tokio::time::timeout(self.timeout, stream.read_exact(&mut rest)).await;
             match &body_result {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
@@ -393,7 +399,11 @@ impl ModbusClient {
                     .trim_end()
                     .to_string();
                 if !discovered.is_empty() {
-                    let serial_hex: String = full[8..18].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+                    let serial_hex: String = full[8..18]
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     tracing::info!(
                         serial = %discovered,
                         serial_raw = %serial_hex,
@@ -401,7 +411,11 @@ impl ModbusClient {
                         "Auto-discovered dongle serial (pending decode validation)"
                     );
                     // Validate: serial should be printable ASCII, not all spaces
-                    if discovered.trim().is_empty() || discovered.chars().any(|c| !c.is_ascii_graphic() && c != ' ') {
+                    if discovered.trim().is_empty()
+                        || discovered
+                            .chars()
+                            .any(|c| !c.is_ascii_graphic() && c != ' ')
+                    {
                         tracing::warn!(
                             serial_raw = %serial_hex,
                             "Auto-discovered serial looks suspicious (non-printable chars)"
@@ -506,7 +520,12 @@ impl ModbusClient {
         // Log the raw request frame at debug level. This is essential for
         // diagnosing dongles that accept TCP but never respond — we need to
         // see the serial, slave address, and register range we sent.
-        let hex_preview: String = frame.iter().take(30).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ");
+        let hex_preview: String = frame
+            .iter()
+            .take(30)
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         tracing::debug!(
             req_len = frame.len(),
             send_ms = send_elapsed.as_millis() as u64,
@@ -664,13 +683,33 @@ impl ModbusClient {
             // Send and receive
             let decoded = self.send_and_receive(&request).await?;
 
-            // Check for stale response (function code from a previous request)
+            // Check for stale response (slave/function/base register from a previous request).
+            if decoded.slave != self.slave {
+                if attempt < Self::MAX_STALE_RETRIES {
+                    tracing::debug!(
+                        "Stale response (got slave 0x{:02X}, expected 0x{:02X}) — retrying ({}/{})",
+                        decoded.slave,
+                        self.slave,
+                        attempt + 1,
+                        Self::MAX_STALE_RETRIES,
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(ClientError::InvalidResponse(format!(
+                    "slave mismatch: expected 0x{:02X}, got 0x{:02X}",
+                    self.slave, decoded.slave
+                )));
+            }
+
             if decoded.function != expected_fc {
                 if attempt < Self::MAX_STALE_RETRIES {
                     tracing::debug!(
                         "Stale response (got 0x{:02X}, expected 0x{:02X}) — retrying ({}/{})",
-                        decoded.function, expected_fc,
-                        attempt + 1, Self::MAX_STALE_RETRIES,
+                        decoded.function,
+                        expected_fc,
+                        attempt + 1,
+                        Self::MAX_STALE_RETRIES,
                     );
                     // Brief pause before retry to let the dongle catch up
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -682,20 +721,48 @@ impl ModbusClient {
                 )));
             }
 
+            let (resp_base_register, resp_register_count) =
+                Self::response_register_metadata(&decoded)?;
+            if resp_base_register != start || resp_register_count > count {
+                if attempt < Self::MAX_STALE_RETRIES {
+                    tracing::debug!(
+                        "Stale response (got {reg_type_name} {}..{} count {}, expected {}..{} count {}) — retrying ({}/{})",
+                        resp_base_register,
+                        resp_base_register.saturating_add(resp_register_count.saturating_sub(1)),
+                        resp_register_count,
+                        start,
+                        start + count - 1,
+                        count,
+                        attempt + 1,
+                        Self::MAX_STALE_RETRIES,
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                return Err(ClientError::InvalidResponse(format!(
+                    "register range mismatch: expected {}..{} count {}, got {}..{} count {}",
+                    start,
+                    start + count - 1,
+                    count,
+                    resp_base_register,
+                    resp_base_register.saturating_add(resp_register_count.saturating_sub(1)),
+                    resp_register_count,
+                )));
+            }
+
             // --- Valid response, parse register data ---
             return Self::parse_register_response(&decoded, count);
         }
 
         // Unreachable, but keeps the compiler happy
-        Err(ClientError::InvalidResponse("exhausted retries".to_string()))
+        Err(ClientError::InvalidResponse(
+            "exhausted retries".to_string(),
+        ))
     }
 
-    /// Parse register values from a decoded read response frame.
-    fn parse_register_response(
-        decoded: &DecodedFrame,
-        count: u16,
-    ) -> Result<Vec<u16>, ClientError> {
-
+    /// Extract the base register and returned register count from a decoded
+    /// read response frame.
+    fn response_register_metadata(decoded: &DecodedFrame) -> Result<(u16, u16), ClientError> {
         let payload = &decoded.payload;
         const INVERTER_SERIAL_LEN: usize = 10;
         const MIN_INNER_LEN: usize = INVERTER_SERIAL_LEN + 4;
@@ -709,8 +776,22 @@ impl ModbusClient {
         }
 
         let inner = &payload[INVERTER_SERIAL_LEN..];
-        let _resp_base_register = u16::from_be_bytes([inner[0], inner[1]]);
-        let resp_register_count = u16::from_be_bytes([inner[2], inner[3]]) as usize;
+        let resp_base_register = u16::from_be_bytes([inner[0], inner[1]]);
+        let resp_register_count = u16::from_be_bytes([inner[2], inner[3]]);
+        Ok((resp_base_register, resp_register_count))
+    }
+
+    /// Parse register values from a decoded read response frame.
+    fn parse_register_response(
+        decoded: &DecodedFrame,
+        count: u16,
+    ) -> Result<Vec<u16>, ClientError> {
+        let payload = &decoded.payload;
+        let (_, resp_register_count) = Self::response_register_metadata(decoded)?;
+        const INVERTER_SERIAL_LEN: usize = 10;
+
+        let inner = &payload[INVERTER_SERIAL_LEN..];
+        let resp_register_count = resp_register_count as usize;
 
         let reg_data = &inner[4..];
         let max_values = count as usize;
@@ -756,12 +837,7 @@ impl ModbusClient {
         payload.extend_from_slice(&check.to_le_bytes());
 
         // Encode the full frame
-        let request = framer::encode_frame(
-            &self.serial,
-            device_address,
-            inner_function,
-            &payload,
-        );
+        let request = framer::encode_frame(&self.serial, device_address, inner_function, &payload);
 
         // GivEnergy dongles return exception code 67 (busy) frequently.
         // We retry a few times with moderate delays, but fail fast rather
@@ -795,7 +871,8 @@ impl ModbusClient {
                 if code == 67 && attempt + 1 < max_attempts {
                     tracing::debug!(
                         "Write at {register} got exception 67 (busy), retrying ({}/{})",
-                        attempt + 1, max_attempts
+                        attempt + 1,
+                        max_attempts
                     );
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     need_resend = true;
@@ -822,7 +899,9 @@ impl ModbusClient {
                 if attempt + 1 < max_attempts {
                     tracing::debug!(
                         "Write at {register} got stale response (func 0x{:02X}), resending ({}/{})",
-                        decoded.function, attempt + 1, max_attempts
+                        decoded.function,
+                        attempt + 1,
+                        max_attempts
                     );
                     need_resend = true;
                     continue;
@@ -866,14 +945,19 @@ impl ModbusClient {
             return Ok(());
         }
 
-        Err(ClientError::InvalidResponse("exhausted write retries".to_string()))
+        Err(ClientError::InvalidResponse(
+            "exhausted write retries".to_string(),
+        ))
     }
 
     /// Read a set of poll blocks, returning raw data per block.
     ///
     /// Iterates over the provided blocks and issues a read request for each
     /// one. If any block fails the entire operation fails.
-    pub async fn read_blocks(&mut self, blocks: &'static [RegisterBlock]) -> Result<Vec<BlockRead>, ClientError> {
+    pub async fn read_blocks(
+        &mut self,
+        blocks: &'static [RegisterBlock],
+    ) -> Result<Vec<BlockRead>, ClientError> {
         let mut results = Vec::with_capacity(blocks.len());
 
         for (i, block) in blocks.iter().enumerate() {
@@ -953,7 +1037,10 @@ impl ModbusClient {
                 };
 
                 let t0 = std::time::Instant::now();
-                match self.read_registers(reg_type, block.start, block.count).await {
+                match self
+                    .read_registers(reg_type, block.start, block.count)
+                    .await
+                {
                     Ok(data) => {
                         tracing::debug!(
                             block = block.name,
@@ -1051,6 +1138,35 @@ mod tests {
         let payload = vec![0x00];
         let values = parse_read_payload(&payload, 0).unwrap();
         assert!(values.is_empty());
+    }
+
+    fn decoded_read_response(slave: u8, function: u8, base: u16, count: u16) -> DecodedFrame {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"INV1234567");
+        payload.extend_from_slice(&base.to_be_bytes());
+        payload.extend_from_slice(&count.to_be_bytes());
+        for i in 0..count {
+            payload.extend_from_slice(&(base + i).to_be_bytes());
+        }
+        DecodedFrame {
+            slave,
+            function,
+            payload,
+        }
+    }
+
+    #[test]
+    fn response_register_metadata_reads_base_and_count() {
+        let decoded = decoded_read_response(0x32, 0x03, 80, 20);
+        let metadata = ModbusClient::response_register_metadata(&decoded).unwrap();
+        assert_eq!(metadata, (80, 20));
+    }
+
+    #[test]
+    fn parse_register_response_uses_returned_count() {
+        let decoded = decoded_read_response(0x32, 0x03, 80, 2);
+        let values = ModbusClient::parse_register_response(&decoded, 20).unwrap();
+        assert_eq!(values, vec![80, 81]);
     }
 
     #[test]

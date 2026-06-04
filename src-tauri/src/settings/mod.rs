@@ -424,10 +424,9 @@ mod tests {
 
         // All-zero time is the "not set" default on the server side —
         // must survive roundtrip unchanged (not collapse to nulls).
-        let raw = format!(
-            "{{\"enabled\":false,\"start_hour\":0,\"start_minute\":0,\"end_hour\":0,\"end_minute\":0,\"target_soc\":100}}"
-        );
-        let slot: CosySlot = serde_json::from_str(&raw).unwrap();
+        let raw = "{\"enabled\":false,\"start_hour\":0,\"start_minute\":0,\"end_hour\":0,\"end_minute\":0,\"target_soc\":100}";
+
+        let slot: CosySlot = serde_json::from_str(raw).unwrap();
         assert_eq!(slot.start_hour, 0);
         assert_eq!(slot.end_hour, 0);
         assert_eq!(slot.target_soc, 100);
@@ -489,15 +488,15 @@ mod tests {
             target_soc: 80,
         };
         // Before start
-        assert!(!slot.contains_minutes(119));  // 01:59
-        // At start
-        assert!(slot.contains_minutes(120));   // 02:00
-        // Middle
-        assert!(slot.contains_minutes(180));   // 03:00
-        // Just before end
-        assert!(slot.contains_minutes(299));   // 04:59
-        // At end (end is exclusive)
-        assert!(!slot.contains_minutes(300));  // 05:00
+        assert!(!slot.contains_minutes(119)); // 01:59
+                                              // At start
+        assert!(slot.contains_minutes(120)); // 02:00
+                                             // Middle
+        assert!(slot.contains_minutes(180)); // 03:00
+                                             // Just before end
+        assert!(slot.contains_minutes(299)); // 04:59
+                                             // At end (end is exclusive)
+        assert!(!slot.contains_minutes(300)); // 05:00
     }
 
     #[test]
@@ -513,16 +512,16 @@ mod tests {
         };
         // Before start on the first day
         assert!(!slot.contains_minutes(21 * 60 + 59)); // 21:59
-        // After start on the first day
-        assert!(slot.contains_minutes(22 * 60));        // 22:00
-        // Middle of the night
-        assert!(slot.contains_minutes(2 * 60 + 30));    // 02:30
-        // Just before end
-        assert!(slot.contains_minutes(5 * 60 + 29));    // 05:29
-        // At end (exclusive)
-        assert!(!slot.contains_minutes(5 * 60 + 30));   // 05:30
-        // Middle of the next day (outside slot)
-        assert!(!slot.contains_minutes(14 * 60));       // 14:00
+                                                       // After start on the first day
+        assert!(slot.contains_minutes(22 * 60)); // 22:00
+                                                 // Middle of the night
+        assert!(slot.contains_minutes(2 * 60 + 30)); // 02:30
+                                                     // Just before end
+        assert!(slot.contains_minutes(5 * 60 + 29)); // 05:29
+                                                     // At end (exclusive)
+        assert!(!slot.contains_minutes(5 * 60 + 30)); // 05:30
+                                                      // Middle of the next day (outside slot)
+        assert!(!slot.contains_minutes(14 * 60)); // 14:00
     }
 
     #[test]
@@ -536,9 +535,9 @@ mod tests {
             end_minute: 0,
             target_soc: 90,
         };
-        assert!(slot.contains_minutes(0));     // 00:00
-        assert!(slot.contains_minutes(359));   // 05:59
-        assert!(!slot.contains_minutes(360));  // 06:00 (end exclusive)
+        assert!(slot.contains_minutes(0)); // 00:00
+        assert!(slot.contains_minutes(359)); // 05:59
+        assert!(!slot.contains_minutes(360)); // 06:00 (end exclusive)
     }
 
     #[test]
@@ -546,29 +545,38 @@ mod tests {
         let slots = vec![
             CosySlot {
                 enabled: true,
-                start_hour: 0, start_minute: 30, end_hour: 5, end_minute: 30,
+                start_hour: 0,
+                start_minute: 30,
+                end_hour: 5,
+                end_minute: 30,
                 target_soc: 100,
             },
             CosySlot {
                 enabled: true,
-                start_hour: 13, start_minute: 0, end_hour: 16, end_minute: 0,
+                start_hour: 13,
+                start_minute: 0,
+                end_hour: 16,
+                end_minute: 0,
                 target_soc: 80,
             },
             CosySlot {
                 enabled: true,
-                start_hour: 20, start_minute: 0, end_hour: 22, end_minute: 0,
+                start_hour: 20,
+                start_minute: 0,
+                end_hour: 22,
+                end_minute: 0,
                 target_soc: 100,
             },
         ];
         // First slot matches (00:30-05:30)
-        assert_eq!(cosy_active_slot(2 * 60 + 0, &slots), Some(100));
+        assert_eq!(cosy_active_slot(2 * 60, &slots), Some(100));
         // Second slot matches (13:00-16:00)
         assert_eq!(cosy_active_slot(14 * 60 + 30, &slots), Some(80));
         // Third slot matches (20:00-22:00)
-        assert_eq!(cosy_active_slot(21 * 60 + 0, &slots), Some(100));
+        assert_eq!(cosy_active_slot(21 * 60, &slots), Some(100));
         // Gap between slots
-        assert_eq!(cosy_active_slot(11 * 60 + 0, &slots), None);
-        assert_eq!(cosy_active_slot(18 * 60 + 0, &slots), None);
+        assert_eq!(cosy_active_slot(11 * 60, &slots), None);
+        assert_eq!(cosy_active_slot(18 * 60, &slots), None);
     }
 
     #[test]
@@ -581,12 +589,18 @@ mod tests {
         let slots = vec![
             CosySlot {
                 enabled: false,
-                start_hour: 2, start_minute: 0, end_hour: 5, end_minute: 0,
+                start_hour: 2,
+                start_minute: 0,
+                end_hour: 5,
+                end_minute: 0,
                 target_soc: 100,
             },
             CosySlot {
                 enabled: true,
-                start_hour: 6, start_minute: 0, end_hour: 8, end_minute: 0,
+                start_hour: 6,
+                start_minute: 0,
+                end_hour: 8,
+                end_minute: 0,
                 target_soc: 90,
             },
         ];
@@ -602,12 +616,18 @@ mod tests {
         let slots = vec![
             CosySlot {
                 enabled: true,
-                start_hour: 22, start_minute: 0, end_hour: 0, end_minute: 30,
+                start_hour: 22,
+                start_minute: 0,
+                end_hour: 0,
+                end_minute: 30,
                 target_soc: 100,
             },
             CosySlot {
                 enabled: true,
-                start_hour: 0, start_minute: 30, end_hour: 5, end_minute: 0,
+                start_hour: 0,
+                start_minute: 30,
+                end_hour: 5,
+                end_minute: 0,
                 target_soc: 80,
             },
         ];

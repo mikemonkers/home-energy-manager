@@ -258,7 +258,7 @@ pub fn run_headless(args: &[String]) {
             .with_target(false)
             .with_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
             );
         tracing_subscriber::registry()
             .with(fmt_layer)
@@ -321,7 +321,8 @@ pub fn run_headless(args: &[String]) {
                 });
                 tracing::info!(
                     "Restored auto-winter saved state: enable={}, target_soc={}",
-                    enable_target, target_soc,
+                    enable_target,
+                    target_soc,
                 );
             }
         }

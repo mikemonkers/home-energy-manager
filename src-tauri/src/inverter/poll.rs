@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use chrono::Timelike;
 
-use tokio::sync::{broadcast, Mutex, Notify};
 use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
+use tokio::sync::{broadcast, Mutex, Notify};
 
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot;
@@ -59,7 +59,7 @@ pub enum ConnectionState {
 #[serde(rename_all = "snake_case")]
 pub enum PollMessage {
     /// A fresh snapshot has been decoded from the inverter registers.
-    Snapshot(InverterSnapshot),
+    Snapshot(Box<InverterSnapshot>),
     /// The connection state has changed.
     Connection {
         /// New connection state.
@@ -278,7 +278,10 @@ impl AppState {
 /// Without this, a transient BMS read failure causes the frontend to show empty or
 /// missing module panels, which is jarring. Instead, we keep the last known-good data
 /// until a fresh read succeeds.
-fn carry_forward_battery_modules_with(snap: &mut InverterSnapshot, prev_modules: Option<&[super::model::BatteryModule]>) {
+fn carry_forward_battery_modules_with(
+    snap: &mut InverterSnapshot,
+    prev_modules: Option<&[super::model::BatteryModule]>,
+) {
     if let Some(prev) = prev_modules {
         if !prev.is_empty() {
             // If NO modules were read this cycle, carry forward all previous modules.
@@ -292,7 +295,12 @@ fn carry_forward_battery_modules_with(snap: &mut InverterSnapshot, prev_modules:
             }
             // If we got fewer modules than before, fill in the gaps by index.
             // Modules are identified by their `index` field (0-based).
-            let max_index = snap.battery_modules.iter().map(|m| m.index).max().unwrap_or(0);
+            let max_index = snap
+                .battery_modules
+                .iter()
+                .map(|m| m.index)
+                .max()
+                .unwrap_or(0);
             let prev_max = prev.iter().map(|m| m.index).max().unwrap_or(0);
             if prev_max > max_index {
                 let present: std::collections::HashSet<usize> =
@@ -345,7 +353,10 @@ fn sanitize_snapshot(
     // SOC: if 0 but power is flowing, clearly a garbled register
     if snap.soc == 0 && (snap.solar_power > 0 || snap.battery_power != 0 || snap.grid_power != 0) {
         if let Some(p) = prev {
-            tracing::warn!(prev_soc = p.soc, "SOC=0 with live power — using previous SOC");
+            tracing::warn!(
+                prev_soc = p.soc,
+                "SOC=0 with live power — using previous SOC"
+            );
             snap.soc = p.soc;
             sanitized = true;
         }
@@ -354,7 +365,10 @@ fn sanitize_snapshot(
     // SOC: if 100 but battery is actively charging at high power, impossible
     if snap.soc == 100 && snap.battery_power > 500 {
         if let Some(p) = prev {
-            tracing::warn!(prev_soc = p.soc, "SOC=100 while charging >500W — using previous SOC");
+            tracing::warn!(
+                prev_soc = p.soc,
+                "SOC=100 while charging >500W — using previous SOC"
+            );
             snap.soc = p.soc;
             sanitized = true;
         }
@@ -398,7 +412,11 @@ fn sanitize_snapshot(
     let max_grid_power: i32 = 10_000;
     if snap.grid_power.abs() > max_grid_power {
         if let Some(p) = prev {
-            tracing::warn!(raw = snap.grid_power, prev = p.grid_power, "Grid power out of range — using previous");
+            tracing::warn!(
+                raw = snap.grid_power,
+                prev = p.grid_power,
+                "Grid power out of range — using previous"
+            );
             snap.grid_power = p.grid_power;
         } else {
             snap.grid_power = 0;
@@ -411,7 +429,8 @@ fn sanitize_snapshot(
     if snap.grid_voltage < 180.0 || snap.grid_voltage > 280.0 {
         if let Some(p) = prev {
             tracing::warn!(
-                raw = snap.grid_voltage, prev = p.grid_voltage,
+                raw = snap.grid_voltage,
+                prev = p.grid_voltage,
                 "Grid voltage out of range — using previous"
             );
             snap.grid_voltage = p.grid_voltage;
@@ -426,7 +445,8 @@ fn sanitize_snapshot(
     if snap.grid_frequency < 45.0 || snap.grid_frequency > 55.0 {
         if let Some(p) = prev {
             tracing::warn!(
-                raw = snap.grid_frequency, prev = p.grid_frequency,
+                raw = snap.grid_frequency,
+                prev = p.grid_frequency,
                 "Grid frequency out of range — using previous"
             );
             snap.grid_frequency = p.grid_frequency;
@@ -440,7 +460,11 @@ fn sanitize_snapshot(
     let max_solar_power: i32 = 10_000;
     if snap.solar_power > max_solar_power {
         if let Some(p) = prev {
-            tracing::warn!(raw = snap.solar_power, prev = p.solar_power, "Solar power out of range — using previous");
+            tracing::warn!(
+                raw = snap.solar_power,
+                prev = p.solar_power,
+                "Solar power out of range — using previous"
+            );
             snap.solar_power = p.solar_power;
         } else {
             snap.solar_power = 0;
@@ -478,7 +502,11 @@ fn sanitize_snapshot(
     let max_home_power: i32 = 15_000;
     if snap.home_power.abs() > max_home_power || snap.home_power < 0 {
         if let Some(p) = prev {
-            tracing::warn!(raw = snap.home_power, prev = p.home_power, "Home power out of range — using previous");
+            tracing::warn!(
+                raw = snap.home_power,
+                prev = p.home_power,
+                "Home power out of range — using previous"
+            );
             snap.home_power = p.home_power;
         } else {
             snap.home_power = 0;
@@ -539,13 +567,41 @@ fn sanitize_snapshot(
             };
         }
 
-        check_energy_field!("today_solar_kwh", snap.today_solar_kwh, prev.map(|p| p.today_solar_kwh));
-        check_energy_field!("today_import_kwh", snap.today_import_kwh, prev.map(|p| p.today_import_kwh));
-        check_energy_field!("today_export_kwh", snap.today_export_kwh, prev.map(|p| p.today_export_kwh));
-        check_energy_field!("today_charge_kwh", snap.today_charge_kwh, prev.map(|p| p.today_charge_kwh));
-        check_energy_field!("today_discharge_kwh", snap.today_discharge_kwh, prev.map(|p| p.today_discharge_kwh));
-        check_energy_field!("today_consumption_kwh", snap.today_consumption_kwh, prev.map(|p| p.today_consumption_kwh));
-        check_energy_field!("today_ac_charge_kwh", snap.today_ac_charge_kwh, prev.map(|p| p.today_ac_charge_kwh));
+        check_energy_field!(
+            "today_solar_kwh",
+            snap.today_solar_kwh,
+            prev.map(|p| p.today_solar_kwh)
+        );
+        check_energy_field!(
+            "today_import_kwh",
+            snap.today_import_kwh,
+            prev.map(|p| p.today_import_kwh)
+        );
+        check_energy_field!(
+            "today_export_kwh",
+            snap.today_export_kwh,
+            prev.map(|p| p.today_export_kwh)
+        );
+        check_energy_field!(
+            "today_charge_kwh",
+            snap.today_charge_kwh,
+            prev.map(|p| p.today_charge_kwh)
+        );
+        check_energy_field!(
+            "today_discharge_kwh",
+            snap.today_discharge_kwh,
+            prev.map(|p| p.today_discharge_kwh)
+        );
+        check_energy_field!(
+            "today_consumption_kwh",
+            snap.today_consumption_kwh,
+            prev.map(|p| p.today_consumption_kwh)
+        );
+        check_energy_field!(
+            "today_ac_charge_kwh",
+            snap.today_ac_charge_kwh,
+            prev.map(|p| p.today_ac_charge_kwh)
+        );
     }
 
     // Delta checks — only when we have a previous reading AND we're past
@@ -553,14 +609,14 @@ fn sanitize_snapshot(
     // absolute range check applies — the dongle can return plausible-but-wrong
     // values that would poison the delta baseline.
     if !skip_delta {
-    if let Some(p) = prev {
-        // Time-based increase threshold: scale with elapsed time since
-        // last reading so that reconnect/restart gaps don't trigger false
-        // rejections. 10 kW is a generous residential circuit capacity.
-        let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
-        let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
+        if let Some(p) = prev {
+            // Time-based increase threshold: scale with elapsed time since
+            // last reading so that reconnect/restart gaps don't trigger false
+            // rejections. 10 kW is a generous residential circuit capacity.
+            let elapsed_secs = (snap.timestamp - p.timestamp).max(0) as f32;
+            let max_increase_kwh = (elapsed_secs / 3600.0) * 10.0 + 1.0;
 
-        macro_rules! check_energy_delta {
+            macro_rules! check_energy_delta {
             ($name:literal, $value:expr, $prev:expr) => {
                 let raw = $value;
                 let prev_val = $prev;
@@ -618,14 +674,38 @@ fn sanitize_snapshot(
             };
         }
 
-        check_energy_delta!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh);
-        check_energy_delta!("today_import_kwh", snap.today_import_kwh, p.today_import_kwh);
-        check_energy_delta!("today_export_kwh", snap.today_export_kwh, p.today_export_kwh);
-        check_energy_delta!("today_charge_kwh", snap.today_charge_kwh, p.today_charge_kwh);
-        check_energy_delta!("today_discharge_kwh", snap.today_discharge_kwh, p.today_discharge_kwh);
-        check_energy_delta!("today_consumption_kwh", snap.today_consumption_kwh, p.today_consumption_kwh);
-        check_energy_delta!("today_ac_charge_kwh", snap.today_ac_charge_kwh, p.today_ac_charge_kwh);
-    }
+            check_energy_delta!("today_solar_kwh", snap.today_solar_kwh, p.today_solar_kwh);
+            check_energy_delta!(
+                "today_import_kwh",
+                snap.today_import_kwh,
+                p.today_import_kwh
+            );
+            check_energy_delta!(
+                "today_export_kwh",
+                snap.today_export_kwh,
+                p.today_export_kwh
+            );
+            check_energy_delta!(
+                "today_charge_kwh",
+                snap.today_charge_kwh,
+                p.today_charge_kwh
+            );
+            check_energy_delta!(
+                "today_discharge_kwh",
+                snap.today_discharge_kwh,
+                p.today_discharge_kwh
+            );
+            check_energy_delta!(
+                "today_consumption_kwh",
+                snap.today_consumption_kwh,
+                p.today_consumption_kwh
+            );
+            check_energy_delta!(
+                "today_ac_charge_kwh",
+                snap.today_ac_charge_kwh,
+                p.today_ac_charge_kwh
+            );
+        }
     } // skip_delta
 
     // Clamp battery limits to valid ranges (registers can return corrupted values)
@@ -637,15 +717,22 @@ fn sanitize_snapshot(
     // Anything > 60V on an LV system or > 400V on an HV system is a corrupt register.
     let max_battery_voltage = match snap.device_type {
         crate::inverter::model::DeviceType::AllInOne6kW
+        | crate::inverter::model::DeviceType::AllInOne3_6kW
         | crate::inverter::model::DeviceType::AllInOne5kW
-        | crate::inverter::model::DeviceType::AIO8kW
-        | crate::inverter::model::DeviceType::AIO10kW => 400.0,
-        crate::inverter::model::DeviceType::ThreePhase => 100.0,
+        | crate::inverter::model::DeviceType::AioCommercial
+        | crate::inverter::model::DeviceType::HybridHvGen3
+        | crate::inverter::model::DeviceType::AllInOneHybrid => 400.0,
+        crate::inverter::model::DeviceType::ThreePhase
+        | crate::inverter::model::DeviceType::ACThreePhase => 100.0,
         _ => 60.0,
     };
     if snap.battery_voltage > max_battery_voltage || snap.battery_voltage < 0.0 {
         if let Some(p) = prev {
-            tracing::warn!(raw = snap.battery_voltage, prev = p.battery_voltage, "Battery voltage out of range — using previous");
+            tracing::warn!(
+                raw = snap.battery_voltage,
+                prev = p.battery_voltage,
+                "Battery voltage out of range — using previous"
+            );
             snap.battery_voltage = p.battery_voltage;
         } else {
             snap.battery_voltage = 0.0;
@@ -740,7 +827,9 @@ fn sanitize_snapshot(
 
             if cur_en != prev_en && (cur_sh != prev_sh || cur_eh != prev_eh) {
                 tracing::warn!(
-                    slot = i, cur_enabled = cur_en, prev_enabled = prev_en,
+                    slot = i,
+                    cur_enabled = cur_en,
+                    prev_enabled = prev_en,
                     "Charge slot {i} enabled changed with different times — reverting",
                 );
                 snap.charge_slots[i].enabled = prev_en;
@@ -750,7 +839,11 @@ fn sanitize_snapshot(
                 || cur_eh.abs_diff(prev_eh) as i16 > MAX_SLOT_HOUR_SHIFT
             {
                 tracing::warn!(
-                    slot = i, cur_sh, prev_sh, cur_eh, prev_eh,
+                    slot = i,
+                    cur_sh,
+                    prev_sh,
+                    cur_eh,
+                    prev_eh,
                     "Charge slot {i} times jumped by >12h — using previous",
                 );
                 snap.charge_slots[i].start_hour = prev_sh;
@@ -772,7 +865,9 @@ fn sanitize_snapshot(
 
             if cur_en != prev_en && (cur_sh != prev_sh || cur_eh != prev_eh) {
                 tracing::warn!(
-                    slot = i, cur_enabled = cur_en, prev_enabled = prev_en,
+                    slot = i,
+                    cur_enabled = cur_en,
+                    prev_enabled = prev_en,
                     "Discharge slot {i} enabled changed with different times — reverting",
                 );
                 snap.discharge_slots[i].enabled = prev_en;
@@ -782,7 +877,11 @@ fn sanitize_snapshot(
                 || cur_eh.abs_diff(prev_eh) as i16 > MAX_SLOT_HOUR_SHIFT
             {
                 tracing::warn!(
-                    slot = i, cur_sh, prev_sh, cur_eh, prev_eh,
+                    slot = i,
+                    cur_sh,
+                    prev_sh,
+                    cur_eh,
+                    prev_eh,
                     "Discharge slot {i} times jumped by >12h — using previous",
                 );
                 snap.discharge_slots[i].start_hour = prev_sh;
@@ -888,8 +987,14 @@ fn check_auto_winter(
                     }
                     *state = AutoWinterState::WinterActive;
                     return Some(vec![
-                        RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 1 },
-                        RegisterWrite { address: HR_CHARGE_TARGET_SOC, value: config.target_soc as u16 },
+                        RegisterWrite {
+                            address: HR_ENABLE_CHARGE_TARGET,
+                            value: 1,
+                        },
+                        RegisterWrite {
+                            address: HR_CHARGE_TARGET_SOC,
+                            value: config.target_soc as u16,
+                        },
                     ]);
                 }
             } else if temp >= config.recovery_threshold {
@@ -912,7 +1017,10 @@ fn check_auto_winter(
                 if *consecutive >= config.debounce_readings {
                     let saved_settings = saved.take();
                     let (restore_target, restore_enable) = match saved_settings {
-                        Some(s) => (s.target_soc as u16, if s.enable_charge_target { 1 } else { 0 }),
+                        Some(s) => (
+                            s.target_soc as u16,
+                            if s.enable_charge_target { 1 } else { 0 },
+                        ),
                         None => (100, 0),
                     };
                     tracing::info!(
@@ -923,8 +1031,14 @@ fn check_auto_winter(
                     );
                     *state = AutoWinterState::Idle;
                     return Some(vec![
-                        RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: restore_enable },
-                        RegisterWrite { address: HR_CHARGE_TARGET_SOC, value: restore_target },
+                        RegisterWrite {
+                            address: HR_ENABLE_CHARGE_TARGET,
+                            value: restore_enable,
+                        },
+                        RegisterWrite {
+                            address: HR_CHARGE_TARGET_SOC,
+                            value: restore_target,
+                        },
                     ]);
                 }
             } else if temp < config.cold_threshold {
@@ -1045,10 +1159,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             );
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "Warmup read {}/3 — FAILED: {e}",
-                                i + 1,
-                            );
+                            tracing::warn!("Warmup read {}/3 — FAILED: {e}", i + 1,);
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1093,7 +1204,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     if settings.cosy_enabled {
                         let now = chrono::Local::now();
                         let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
-                        let in_slot = crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
+                        let in_slot =
+                            crate::settings::cosy_active_slot(now_minutes, &settings.cosy_slots);
                         if let Some(restore_target_soc) = in_slot {
                             tracing::info!(
                                 "Cosy: restart detected inside slot (target SOC {}%) — force-charge will be retried after first poll",
@@ -1123,7 +1235,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     if current_version != settings_version_at_connect {
                         tracing::info!(
                             "Settings changed (v{} → v{}) — reconnecting",
-                            current_version, settings_version_at_connect
+                            current_version,
+                            settings_version_at_connect
                         );
                         break;
                     }
@@ -1144,13 +1257,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     Ok(()) => {
                                         tracing::info!(
                                             "Wrote register {} = {}",
-                                            w.address, w.value
+                                            w.address,
+                                            w.value
                                         );
                                     }
                                     Err(e) => {
                                         tracing::error!(
                                             "Failed to write register {} = {}: {e}",
-                                            w.address, w.value
+                                            w.address,
+                                            w.value
                                         );
                                     }
                                 }
@@ -1546,7 +1661,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // Broadcast to WebSocket subscribers.
-                                let _ = state.tx.send(PollMessage::Snapshot(snapshot.clone()));
+                                let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot.clone())));
 
                                 // Persist to history database.
                                 // The snapshot has already been sanitized, so skip
@@ -1592,14 +1707,16 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                 tracing::warn!(
                                     "Poll read failed ({}/{}): — disconnecting",
-                                    consecutive_failures, MAX_CONSECUTIVE_FAILURES,
+                                    consecutive_failures,
+                                    MAX_CONSECUTIVE_FAILURES,
                                 );
                                 break; // tear down connection and reconnect
                             }
                             // Transient error — retry after a short pause
                             tracing::debug!(
                                 "Poll read failed ({}/{}): — retrying",
-                                consecutive_failures, MAX_CONSECUTIVE_FAILURES,
+                                consecutive_failures,
+                                MAX_CONSECUTIVE_FAILURES,
                             );
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             continue; // stay in the inner loop
@@ -1615,7 +1732,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     // the sleep loop compares against the PRE-POLL version
                     // so it detects version bumps that happened during the poll.
                     let interval_secs = state.settings.lock().await.interval_secs;
-                    let sleep_deadline = tokio::time::Instant::now() + Duration::from_secs(interval_secs);
+                    let sleep_deadline =
+                        tokio::time::Instant::now() + Duration::from_secs(interval_secs);
                     loop {
                         // Wait up to 1 second, or until writes are queued
                         tokio::select! {
@@ -1631,8 +1749,11 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         }
                         let cur = state.settings.lock().await;
                         if cur.version != current_version {
-                            tracing::info!("Settings changed (v{} → v{}) — reconnecting",
-                                current_version, cur.version);
+                            tracing::info!(
+                                "Settings changed (v{} → v{}) — reconnecting",
+                                current_version,
+                                cur.version
+                            );
                             break;
                         }
                         if cur.interval_secs != interval_secs {
@@ -1733,7 +1854,7 @@ mod tests {
     #[test]
     fn poll_message_snapshot_roundtrip() {
         let snap = InverterSnapshot::default();
-        let msg = PollMessage::Snapshot(snap);
+        let msg = PollMessage::Snapshot(Box::new(snap));
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"snapshot\""));
         let de: PollMessage = serde_json::from_str(&json).unwrap();

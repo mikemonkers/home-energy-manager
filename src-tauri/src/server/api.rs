@@ -106,7 +106,11 @@ pub async fn update_settings(
     if !incoming.host.is_empty() {
         settings.host = incoming.host.clone();
     }
-    settings.port = if incoming.port != 0 { incoming.port } else { settings.port };
+    settings.port = if incoming.port != 0 {
+        incoming.port
+    } else {
+        settings.port
+    };
     if !incoming.serial.is_empty() || body.get("serial").is_some() {
         settings.serial = incoming.serial.clone();
     }
@@ -128,11 +132,15 @@ pub async fn update_settings(
 
     // Update tariff config objects if provided
     let import_tariff_config = body.get("import_tariff_config").and_then(|v| {
-        if v.is_null() { return None; }
+        if v.is_null() {
+            return None;
+        }
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
     });
     let export_tariff_config = body.get("export_tariff_config").and_then(|v| {
-        if v.is_null() { return None; }
+        if v.is_null() {
+            return None;
+        }
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
     });
 
@@ -259,7 +267,10 @@ pub async fn set_charge_slot(
         None => return error_response("Missing 'slot' field (1-2)"),
     };
     // AC Coupled and Gen1 Hybrid only support charge slot 1 (HR 94-95).
-    let max_slots = state.latest_snapshot.lock().await
+    let max_slots = state
+        .latest_snapshot
+        .lock()
+        .await
         .as_ref()
         .map(|s| s.device_type.max_charge_slots())
         .unwrap_or(2);
@@ -282,7 +293,10 @@ pub async fn set_charge_slot(
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
     let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
-    let (start, end) = (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute));
+    let (start, end) = (
+        encode_hhmm(start_hour, start_minute),
+        encode_hhmm(end_hour, end_minute),
+    );
 
     let cmd = match (slot, enabled) {
         (1, true) => ControlCommand::SetChargeSlot1 { start, end },
@@ -317,7 +331,10 @@ pub async fn set_charge_slot(
                 // Per GivTCP: Gen1/Gen2 and AC Coupled don't have per-slot target
                 // registers — writes to HR 242+ are silently ignored or may error.
                 if target_soc > 0 {
-                    let is_gen3 = state.latest_snapshot.lock().await
+                    let is_gen3 = state
+                        .latest_snapshot
+                        .lock()
+                        .await
                         .as_ref()
                         .map(|s| s.device_type.supports_gen3_extended())
                         .unwrap_or(false);
@@ -328,7 +345,10 @@ pub async fn set_charge_slot(
                             _ => 0,
                         };
                         if target_reg != 0 {
-                            writes.push(RegisterWrite { address: target_reg, value: target_soc as u16 });
+                            writes.push(RegisterWrite {
+                                address: target_reg,
+                                value: target_soc as u16,
+                            });
                         }
                     }
                 }
@@ -358,7 +378,10 @@ pub async fn set_discharge_slot(
         None => return error_response("Missing 'slot' field (1-2)"),
     };
     // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
-    let max_slots = state.latest_snapshot.lock().await
+    let max_slots = state
+        .latest_snapshot
+        .lock()
+        .await
         .as_ref()
         .map(|s| s.device_type.max_discharge_slots())
         .unwrap_or(2);
@@ -380,7 +403,10 @@ pub async fn set_discharge_slot(
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
 
-    let (start, end) = (encode_hhmm(start_hour, start_minute), encode_hhmm(end_hour, end_minute));
+    let (start, end) = (
+        encode_hhmm(start_hour, start_minute),
+        encode_hhmm(end_hour, end_minute),
+    );
 
     let cmd = match (slot, enabled) {
         (1, true) => ControlCommand::SetDischargeSlot1 { start, end },
@@ -396,7 +422,9 @@ pub async fn set_discharge_slot(
             if enabled {
                 // User explicitly enabled the discharge slot; also enable the
                 // master discharge flag so the schedule becomes active again.
-                if let Ok(enable_writes) = (ControlCommand::SetEnableDischarge { enabled: true }).encode() {
+                if let Ok(enable_writes) =
+                    (ControlCommand::SetEnableDischarge { enabled: true }).encode()
+                {
                     writes.extend(enable_writes);
                 }
             }
@@ -596,8 +624,7 @@ pub async fn get_history(
     match history.as_ref() {
         Some(db) => match db.query_history(range_secs, bucket_secs, offset, &fields) {
             Ok(data) => {
-                let map: HashMap<String, Value> =
-                    data.into_iter().collect();
+                let map: HashMap<String, Value> = data.into_iter().collect();
                 Json(json!({ "ok": true, "data": map }))
             }
             Err(e) => error_response(&e),
@@ -712,14 +739,17 @@ pub async fn set_cosy(
     app_settings.cosy_enabled = enabled;
 
     if let Some(slots) = body["slots"].as_array() {
-        app_settings.cosy_slots = slots.iter().map(|s| crate::settings::CosySlot {
-            enabled: s["enabled"].as_bool().unwrap_or(false),
-            start_hour: s["start_hour"].as_u64().unwrap_or(0) as u8,
-            start_minute: s["start_minute"].as_u64().unwrap_or(0) as u8,
-            end_hour: s["end_hour"].as_u64().unwrap_or(0) as u8,
-            end_minute: s["end_minute"].as_u64().unwrap_or(0) as u8,
-            target_soc: s["target_soc"].as_u64().unwrap_or(100) as u8,
-        }).collect();
+        app_settings.cosy_slots = slots
+            .iter()
+            .map(|s| crate::settings::CosySlot {
+                enabled: s["enabled"].as_bool().unwrap_or(false),
+                start_hour: s["start_hour"].as_u64().unwrap_or(0) as u8,
+                start_minute: s["start_minute"].as_u64().unwrap_or(0) as u8,
+                end_hour: s["end_hour"].as_u64().unwrap_or(0) as u8,
+                end_minute: s["end_minute"].as_u64().unwrap_or(0) as u8,
+                target_soc: s["target_soc"].as_u64().unwrap_or(100) as u8,
+            })
+            .collect();
     }
 
     if let Err(e) = app_settings.save() {
@@ -756,9 +786,7 @@ pub async fn set_calibration(
 }
 
 /// POST /api/control/reboot — reboot the inverter.
-pub async fn reboot_inverter(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
+pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> Json<Value> {
     let cmd = ControlCommand::RebootInverter;
     match cmd.encode() {
         Ok(writes) => {

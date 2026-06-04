@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-04
+
+### Fixed
+
+- **Wrong inverter model on some hybrids**: Inverters such as `0x2001` are now
+  identified using the ARM firmware version as well as the device type code.
+  This fixes older Gen 1 hybrids being shown as Gen 3 and keeps the displayed
+  battery/AC limits in line with the actual hardware. (#40)
+- **Unexpected charge slots appearing**: Read responses now have to match the
+  register range that was requested before the app will use them. This stops a
+  late response from the dongle being mistaken for schedule data, which could
+  make random-looking charge slots appear in the Control page. (#41)
+
 ## [0.11.0] - 2026-06-04
 
 ### Added
@@ -263,7 +276,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (e.g. after data gaps). The MAX aggregation in queries and the poll.rs
   sanitizer already handle register corruption.
 
-### Added
+### Tests
 
 - **3 new Rust tests**: `cumulative_counter_query_midnight_rollover`,
   `cumulative_counter_query_pipeline_computes_deltas`,
@@ -306,7 +319,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **All-in-One renamed**: Split into AllInOne6kW, AllInOne5kW, AIO8kW, AIO10kW
   with correct battery limits and AC output per model.
 
-### Added
+### Tests
 
 - **10 new Rust tests**: Device type mapping for 0x1001, 0x2101, 0x2102, 0x3002,
   Gen2 refinement, cumulative counter MAX aggregation, two-bucket delta, and

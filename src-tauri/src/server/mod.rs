@@ -38,7 +38,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/control/reserve", post(api::set_reserve))
         .route("/api/control/charge-rate", post(api::set_charge_rate))
         .route("/api/control/discharge-rate", post(api::set_discharge_rate))
-        .route("/api/control/active-power-rate", post(api::set_active_power_rate))
+        .route(
+            "/api/control/active-power-rate",
+            post(api::set_active_power_rate),
+        )
         .route("/api/control/pause", post(api::pause_battery))
         .route("/api/control/force-charge", post(api::force_charge))
         .route("/api/control/force-discharge", post(api::force_discharge))
@@ -51,15 +54,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(api::get_auto_winter).post(api::set_auto_winter),
         )
         // Cosy charging
-        .route(
-            "/api/cosy",
-            get(api::get_cosy).post(api::set_cosy),
-        )
+        .route("/api/cosy", get(api::get_cosy).post(api::set_cosy))
         // Discovery
         .route("/api/discover", get(api::discover))
         // Developer logs
         .route("/api/logs", get(logs::get_logs))
-        .route("/api/log-level", get(logs::get_log_level).put(logs::set_log_level))
+        .route(
+            "/api/log-level",
+            get(logs::get_log_level).put(logs::set_log_level),
+        )
         // WebSocket real-time stream
         .route("/ws", get(ws::ws_handler))
         .layer(cors)
@@ -80,8 +83,7 @@ pub fn create_router_with_frontend(state: Arc<AppState>, dist_dir: &str) -> Rout
 
 /// Start the HTTP server (API + WebSocket only, no frontend serving).
 pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
-    let app = create_router(state)
-        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = create_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
     let addr = format!("{}:{}", bind_addr, port);
     tracing::info!("HTTP server starting on {}", addr);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -97,11 +99,20 @@ pub async fn start_server(state: Arc<AppState>, bind_addr: &str, port: u16) {
 }
 
 /// Start the HTTP server with frontend static file serving.
-pub async fn start_server_with_frontend(state: Arc<AppState>, bind_addr: &str, port: u16, dist_dir: String) {
+pub async fn start_server_with_frontend(
+    state: Arc<AppState>,
+    bind_addr: &str,
+    port: u16,
+    dist_dir: String,
+) {
     let app = create_router_with_frontend(state, &dist_dir)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
     let addr = format!("{}:{}", bind_addr, port);
-    tracing::info!("HTTP server starting on {} (serving frontend from {})", addr, dist_dir);
+    tracing::info!(
+        "HTTP server starting on {} (serving frontend from {})",
+        addr,
+        dist_dir
+    );
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -113,4 +124,3 @@ pub async fn start_server_with_frontend(state: Arc<AppState>, bind_addr: &str, p
         tracing::error!("HTTP server error: {e}");
     }
 }
-

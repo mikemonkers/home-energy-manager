@@ -123,8 +123,13 @@ fn level_u8_to_str(level: u8) -> &'static str {
 }
 
 /// GET /api/log-level — return current capture level.
-pub async fn get_log_level(State(state): State<Arc<crate::inverter::poll::AppState>>) -> Json<Value> {
-    let level = state.log_ring.min_level.load(std::sync::atomic::Ordering::Relaxed);
+pub async fn get_log_level(
+    State(state): State<Arc<crate::inverter::poll::AppState>>,
+) -> Json<Value> {
+    let level = state
+        .log_ring
+        .min_level
+        .load(std::sync::atomic::Ordering::Relaxed);
     Json(json!({
         "ok": true,
         "level": level_u8_to_str(level),
@@ -142,7 +147,10 @@ pub async fn set_log_level(
     let level_name = body.get("level").and_then(|v| v.as_str()).unwrap_or("");
     match level_str_to_u8(level_name) {
         Some(level_code) => {
-            state.log_ring.min_level.store(level_code, std::sync::atomic::Ordering::Relaxed);
+            state
+                .log_ring
+                .min_level
+                .store(level_code, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(%level_name, "Log capture level changed");
             Json(json!({
                 "ok": true,

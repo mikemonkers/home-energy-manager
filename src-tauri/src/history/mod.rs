@@ -134,8 +134,7 @@ impl HistoryDb {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create history db dir: {e}"))?;
         }
-        let conn = Connection::open(path)
-            .map_err(|e| format!("Failed to open history db: {e}"))?;
+        let conn = Connection::open(path).map_err(|e| format!("Failed to open history db: {e}"))?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
             .map_err(|e| format!("Failed to set pragmas: {e}"))?;
@@ -144,9 +143,7 @@ impl HistoryDb {
             .map_err(|e| format!("Failed to create schema: {e}"))?;
 
         // Migration: add today_ac_charge_kwh column if missing (added in v0.9.34)
-        let _ = conn.execute_batch(
-            "ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL"
-        );
+        let _ = conn.execute_batch("ALTER TABLE readings ADD COLUMN today_ac_charge_kwh REAL");
 
         // Migration: repair corrupted cumulative counter data.
         // For each today_*_kwh column, fix rows where the value decreased
@@ -408,13 +405,12 @@ mod tests {
     }
 
     fn make_snapshot(ts: i64, soc: u8, solar: i32) -> InverterSnapshot {
-        let s = InverterSnapshot {
+        InverterSnapshot {
             timestamp: ts,
             soc,
             solar_power: solar,
             ..Default::default()
-        };
-        s
+        }
     }
 
     fn make_snapshot_with_kwh(ts: i64, import_kwh: f32, export_kwh: f32) -> InverterSnapshot {
@@ -443,16 +439,29 @@ mod tests {
         // Use a very large range to ensure all data falls within the window,
         // regardless of current wall-clock time.
         let result = db
-            .query_history(100_000_000, 60, 0, &["soc".to_string(), "solar_power".to_string()])
+            .query_history(
+                100_000_000,
+                60,
+                0,
+                &["soc".to_string(), "solar_power".to_string()],
+            )
             .unwrap();
 
         let soc_points: Vec<TimePoint> =
             serde_json::from_value(result.get("soc").cloned().unwrap()).unwrap();
-        assert!(soc_points.len() >= 2, "Expected >= 2 SOC points, got {}", soc_points.len());
+        assert!(
+            soc_points.len() >= 2,
+            "Expected >= 2 SOC points, got {}",
+            soc_points.len()
+        );
 
         let solar_points: Vec<TimePoint> =
             serde_json::from_value(result.get("solar_power").cloned().unwrap()).unwrap();
-        assert!(solar_points.len() >= 2, "Expected >= 2 solar points, got {}", solar_points.len());
+        assert!(
+            solar_points.len() >= 2,
+            "Expected >= 2 solar points, got {}",
+            solar_points.len()
+        );
     }
 
     #[test]
@@ -485,20 +494,27 @@ mod tests {
                 100_000_000,
                 60,
                 0,
-                &["today_import_kwh".to_string(), "today_export_kwh".to_string()],
+                &[
+                    "today_import_kwh".to_string(),
+                    "today_export_kwh".to_string(),
+                ],
             )
             .unwrap();
 
         let import_points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
-        let bucket = import_points.iter().find(|p| (p.t / 1000) as i64 / 60 * 60 == base / 60 * 60);
+        let bucket = import_points
+            .iter()
+            .find(|p| (p.t / 1000) / 60 * 60 == base / 60 * 60);
         assert!(bucket.is_some());
         let b = bucket.unwrap();
         assert!((b.v - 15.0).abs() < 0.01, "Expected MAX=15.0, got {}", b.v);
 
         let export_points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_export_kwh").cloned().unwrap()).unwrap();
-        let eb = export_points.iter().find(|p| (p.t / 1000) as i64 / 60 * 60 == base / 60 * 60);
+        let eb = export_points
+            .iter()
+            .find(|p| (p.t / 1000) / 60 * 60 == base / 60 * 60);
         assert!(eb.is_some());
         let e = eb.unwrap();
         assert!((e.v - 9.0).abs() < 0.01, "Expected MAX=9.0, got {}", e.v);
@@ -521,21 +537,35 @@ mod tests {
         let import_points: Vec<TimePoint> =
             serde_json::from_value(result.get("today_import_kwh").cloned().unwrap()).unwrap();
 
-        let bucket_a = import_points.iter().find(|p| (p.t / 1000) as i64 / 60 * 60 == base / 60 * 60);
+        let bucket_a = import_points
+            .iter()
+            .find(|p| (p.t / 1000) / 60 * 60 == base / 60 * 60);
         let bucket_b = import_points
             .iter()
-            .find(|p| (p.t / 1000) as i64 / 60 * 60 == (base + 60) / 60 * 60);
+            .find(|p| (p.t / 1000) / 60 * 60 == (base + 60) / 60 * 60);
 
         assert!(bucket_a.is_some());
         assert!(bucket_b.is_some());
 
         let a = bucket_a.unwrap();
         let b = bucket_b.unwrap();
-        assert!((a.v - 15.0).abs() < 0.01, "Bucket A should be 15.0, got {}", a.v);
-        assert!((b.v - 22.0).abs() < 0.01, "Bucket B should be 22.0, got {}", b.v);
+        assert!(
+            (a.v - 15.0).abs() < 0.01,
+            "Bucket A should be 15.0, got {}",
+            a.v
+        );
+        assert!(
+            (b.v - 22.0).abs() < 0.01,
+            "Bucket B should be 22.0, got {}",
+            b.v
+        );
 
         let delta = b.v - a.v;
-        assert!((delta - 7.0).abs() < 0.01, "Expected delta 7.0, got {}", delta);
+        assert!(
+            (delta - 7.0).abs() < 0.01,
+            "Expected delta 7.0, got {}",
+            delta
+        );
     }
 
     #[test]
@@ -545,9 +575,9 @@ mod tests {
         let day1 = 1700006400i64; // 2023-11-15 00:00:00 UTC
         let day2 = 1700092800i64; // 2023-11-16 00:00:00 UTC (next day)
 
-        db.insert_reading(&make_snapshot_with_kwh(day1 + 82800, 150.0, 80.0));  // 23:00 UTC day1
-        db.insert_reading(&make_snapshot_with_kwh(day2 + 3600, 5.0, 3.0));      // 01:00 UTC day2
-        db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 15.0, 8.0));     // 02:00 UTC day2
+        db.insert_reading(&make_snapshot_with_kwh(day1 + 82800, 150.0, 80.0)); // 23:00 UTC day1
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 3600, 5.0, 3.0)); // 01:00 UTC day2
+        db.insert_reading(&make_snapshot_with_kwh(day2 + 7200, 15.0, 8.0)); // 02:00 UTC day2
 
         let result = db
             .query_history(100_000_000, 3600, 0, &["today_import_kwh".to_string()])
@@ -602,7 +632,10 @@ mod tests {
         sorted.sort_by_key(|p| p.t);
         let ri = sorted.windows(2).position(|w| w[1].v < w[0].v).unwrap();
         assert!(sorted[ri].v > 50.0, "Pre-rollover should be high");
-        assert!(sorted[ri + 1].v < 10.0, "Post-rollover should be low (reset)");
+        assert!(
+            sorted[ri + 1].v < 10.0,
+            "Post-rollover should be low (reset)"
+        );
     }
 
     #[test]
@@ -638,13 +671,18 @@ mod tests {
             .map(|w| w[1].v - w[0].v)
             .filter(|d| *d > 0.0)
             .collect();
-        assert!(day1_deltas.iter().sum::<f64>() > 0.0, "Day 1 should have import");
+        assert!(
+            day1_deltas.iter().sum::<f64>() > 0.0,
+            "Day 1 should have import"
+        );
 
         // Day 2: after rollover, values increase monotonically
         let day2_vals: Vec<f64> = sorted[ri + 1..].iter().map(|p| p.v).collect();
         assert!(day2_vals.len() >= 2, "Day 2 should have multiple buckets");
-        assert!(day2_vals.windows(2).all(|w| w[1] >= w[0]),
-            "Day 2 values should be monotonically increasing");
+        assert!(
+            day2_vals.windows(2).all(|w| w[1] >= w[0]),
+            "Day 2 values should be monotonically increasing"
+        );
     }
 
     #[test]
@@ -665,15 +703,21 @@ mod tests {
         let v5 = points.iter().find(|p| (p.v - 5.0).abs() < 0.01);
         assert!(v5.is_some(), "Should have 5.0");
         let v25 = points.iter().find(|p| (p.v - 25.0).abs() < 0.01);
-        assert!(v25.is_some(), "Should have 25.0 (large increase NOT suppressed)");
+        assert!(
+            v25.is_some(),
+            "Should have 25.0 (large increase NOT suppressed)"
+        );
         let v35 = points.iter().find(|p| (p.v - 35.0).abs() < 0.01);
         assert!(v35.is_some(), "Should have 35.0");
 
         let mut sorted = points.clone();
         sorted.sort_by_key(|p| p.t);
         let delta = sorted.last().unwrap().v - sorted.first().unwrap().v;
-        assert!((delta - 30.0).abs() < 0.01,
-            "Delta 5->35 should be 30, got {}", delta);
+        assert!(
+            (delta - 30.0).abs() < 0.01,
+            "Delta 5->35 should be 30, got {}",
+            delta
+        );
     }
 
     #[test]
@@ -684,7 +728,7 @@ mod tests {
         let base = 1700000000i64;
 
         db.insert_reading(&make_snapshot_with_kwh(base, 150.0, 80.0));
-        db.insert_reading(&make_snapshot_with_kwh(base + 60, 5.0, 1.0));   // midnight reset
+        db.insert_reading(&make_snapshot_with_kwh(base + 60, 5.0, 1.0)); // midnight reset
         db.insert_reading(&make_snapshot_with_kwh(base + 120, 8.0, 2.0));
         db.insert_reading(&make_snapshot_with_kwh(base + 180, 15.0, 5.0));
 
@@ -706,7 +750,13 @@ mod tests {
             ORDER BY timestamp";
         let mut stmt = conn.prepare(repair_sql).unwrap();
         let rows: Vec<(i64, f64, f64)> = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
@@ -717,8 +767,11 @@ mod tests {
         assert!((rows[0].2 - 150.0).abs() < 0.01);
         // Row 1: 5.0 → midnight rollover, keep 5.0 (NOT replace with 150.0!)
         assert!((rows[1].1 - 5.0).abs() < 0.01, "orig should be 5.0");
-        assert!((rows[1].2 - 5.0).abs() < 0.01,
-            "repaired should be 5.0 (midnight rollover kept), got {}", rows[1].2);
+        assert!(
+            (rows[1].2 - 5.0).abs() < 0.01,
+            "repaired should be 5.0 (midnight rollover kept), got {}",
+            rows[1].2
+        );
         // Row 2: 8.0 → normal increase from 5.0, keep 8.0
         assert!((rows[2].2 - 8.0).abs() < 0.01);
         // Row 3: 15.0 → normal increase, keep 15.0
@@ -754,15 +807,24 @@ mod tests {
             ORDER BY timestamp";
         let mut stmt = conn.prepare(repair_sql).unwrap();
         let rows: Vec<(i64, f64, f64)> = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
 
         // Row 2: 18.5 < 20.0 → small glitch, repaired to 20.0
         assert!((rows[2].1 - 18.5).abs() < 0.01, "orig should be 18.5");
-        assert!((rows[2].2 - 20.0).abs() < 0.01,
-            "repaired should be 20.0 (glitch fixed), got {}", rows[2].2);
+        assert!(
+            (rows[2].2 - 20.0).abs() < 0.01,
+            "repaired should be 20.0 (glitch fixed), got {}",
+            rows[2].2
+        );
         // Row 3: 30.0 > 20.0 → normal increase, keep 30.0
         assert!((rows[3].2 - 30.0).abs() < 0.01);
     }
@@ -795,15 +857,24 @@ mod tests {
             ORDER BY timestamp";
         let mut stmt = conn.prepare(repair_sql).unwrap();
         let rows: Vec<(i64, f64, f64)> = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)))
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
 
         // Row 1: 25.0 > 5.0 → increase kept (not suppressed to 5.0!)
         assert!((rows[1].1 - 25.0).abs() < 0.01, "orig should be 25.0");
-        assert!((rows[1].2 - 25.0).abs() < 0.01,
-            "repaired should be 25.0 (large increase kept), got {}", rows[1].2);
+        assert!(
+            (rows[1].2 - 25.0).abs() < 0.01,
+            "repaired should be 25.0 (large increase kept), got {}",
+            rows[1].2
+        );
         // Row 2: 35.0 > 25.0 → increase kept
         assert!((rows[2].2 - 35.0).abs() < 0.01);
     }

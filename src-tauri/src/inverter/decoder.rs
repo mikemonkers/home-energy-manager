@@ -72,7 +72,9 @@
 use crate::modbus::client::BlockRead;
 use crate::modbus::registers::{decode_hhmm, RegisterType};
 
-use super::model::{BatteryMode, BatteryModule, BatteryState, DeviceType, InverterSnapshot, MeterData, ScheduleSlot};
+use super::model::{
+    BatteryMode, BatteryModule, BatteryState, DeviceType, InverterSnapshot, MeterData, ScheduleSlot,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -107,16 +109,14 @@ fn decode_timeslot(data: &[u16], start_idx: usize, end_idx: usize) -> ScheduleSl
     }
 
     match (decode_hhmm(start_val), decode_hhmm(end_val)) {
-        (Some((sh, sm)), Some((eh, em))) => {
-            ScheduleSlot {
-                enabled: true,
-                start_hour: sh,
-                start_minute: sm,
-                end_hour: eh,
-                end_minute: em,
-                target_soc: 0,
-            }
-        }
+        (Some((sh, sm)), Some((eh, em))) => ScheduleSlot {
+            enabled: true,
+            start_hour: sh,
+            start_minute: sm,
+            end_hour: eh,
+            end_minute: em,
+            target_soc: 0,
+        },
         _ => ScheduleSlot::default(),
     }
 }
@@ -174,7 +174,10 @@ struct RawConfig {
 
 /// Decode raw register blocks into an InverterSnapshot.
 pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
-    let mut snap = InverterSnapshot { timestamp: chrono::Utc::now().timestamp(), ..Default::default() };
+    let mut snap = InverterSnapshot {
+        timestamp: chrono::Utc::now().timestamp(),
+        ..Default::default()
+    };
     let mut raw = RawConfig {
         battery_power_mode: 0,
         enable_discharge: false,
@@ -212,8 +215,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // have no native consumption register, so consumption is derived:
     //   consumption = solar_today + import_today - export_today - ac_charge_today
     // Battery DC charge/discharge throughput nets out and is not a term.
-    snap.today_consumption_kwh = snap.today_solar_kwh
-        + snap.today_import_kwh
+    snap.today_consumption_kwh = snap.today_solar_kwh + snap.today_import_kwh
         - snap.today_export_kwh
         - snap.today_ac_charge_kwh;
     if snap.today_consumption_kwh < 0.0 {
@@ -276,7 +278,7 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.battery_power = -signed(get_reg(data, 52));
     snap.soc = get_reg(data, 59) as u8; // IR(59): battery_soc (%)
     snap.battery_voltage = get_reg(data, 50) as f32 * 0.01; // IR(50): v_battery (/100 V)
-    // IR(51): i_battery — negate to match power sign convention (positive = charging current)
+                                                            // IR(51): i_battery — negate to match power sign convention (positive = charging current)
     snap.battery_current = -signed(get_reg(data, 51)) as f32 * 0.01;
     snap.battery_state = BatteryState::from_power(snap.battery_power);
     snap.battery_temperature = get_reg(data, 56) as f32 * 0.1; // IR(56): t_battery (/10 °C)
@@ -323,10 +325,11 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     } else {
         String::new()
     };
-    // Refine device type using ARM FW (0x20XX with FW century 1-2 = Gen1)
-    snap.device_type = snap.device_type.refine_with_arm_fw(arm_fw);
+    // Refine 0x20xx hybrid generation using ARM firmware.
+    snap.device_type = snap.device_type.refine_with_arm_fw(dtc_raw, arm_fw);
     snap.device_type_display = snap.device_type.display_name().to_string();
-    snap.max_ac_power_w = snap.device_type.max_ac_power_w();
+    snap.max_ac_power_w =
+        DeviceType::max_ac_power_for_dtc(dtc_raw, snap.device_type.max_ac_power_w());
 
     // Battery capacity in kWh = HR(55) × nominal_voltage / 1000
     // HR(55) reports total system Ah (inverter firmware accounts for all modules).
@@ -356,14 +359,16 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // generation; other models use a lookup table.
     //   Hybrid Gen2/3 (FW century 3,8,9): 3600W, Gen1: 2600W
     //   AC (30xx): 3000W, All-in-One (80xx): varies
-    snap.max_battery_power_w = {
-        // Use the device-type-specific battery limit, then cap at
-        // half battery capacity (per GivTCP formula).
-        snap.device_type.max_battery_power_w()
-    };
+    snap.max_battery_power_w = DeviceType::max_battery_power_for_dtc(
+        dtc_raw,
+        arm_fw,
+        snap.device_type.max_battery_power_w(),
+    );
     // Cap at half battery capacity (per GivTCP formula)
     let battery_capacity_w = snap.battery_capacity_kwh * 1000.0;
-    snap.max_battery_power_w = snap.max_battery_power_w.min((battery_capacity_w / 2.0) as u32);
+    snap.max_battery_power_w = snap
+        .max_battery_power_w
+        .min((battery_capacity_w / 2.0) as u32);
 
     // Charge slot 2: HR(31-32)
     snap.charge_slots[1] = decode_timeslot(data, 31, 32);
@@ -593,8 +598,7 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         .collect();
 
     // Total voltage: IR(82-83) uint32, mV → V
-    let voltage_raw =
-        ((get_reg(data, 82 - 60) as u32) << 16) | (get_reg(data, 83 - 60) as u32);
+    let voltage_raw = ((get_reg(data, 82 - 60) as u32) << 16) | (get_reg(data, 83 - 60) as u32);
     let voltage = voltage_raw as f32 * 0.001;
 
     // SOC: IR(100)
@@ -613,12 +617,9 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
 
     // Capacity registers: IR(84-85) cap_calibrated, IR(86-87) cap_design, IR(88-89) cap_remaining
     // All are uint32 in 0.01 Ah units.
-    let cap_calibrated =
-        ((get_reg(data, 84 - 60) as u32) << 16) | (get_reg(data, 85 - 60) as u32);
-    let cap_design =
-        ((get_reg(data, 86 - 60) as u32) << 16) | (get_reg(data, 87 - 60) as u32);
-    let cap_remaining =
-        ((get_reg(data, 88 - 60) as u32) << 16) | (get_reg(data, 89 - 60) as u32);
+    let cap_calibrated = ((get_reg(data, 84 - 60) as u32) << 16) | (get_reg(data, 85 - 60) as u32);
+    let cap_design = ((get_reg(data, 86 - 60) as u32) << 16) | (get_reg(data, 87 - 60) as u32);
+    let cap_remaining = ((get_reg(data, 88 - 60) as u32) << 16) | (get_reg(data, 89 - 60) as u32);
 
     BatteryModule {
         index,
@@ -979,17 +980,26 @@ mod tests {
         // Also set enable_charge=1 so the global override doesn't
         // disable the slot (HR(96) → index 36).
         let mut holding_data = vec![0u16; 60];
-        holding_data[34] = 0;   // charge_slot_1 start = 0 → 00:00
+        holding_data[34] = 0; // charge_slot_1 start = 0 → 00:00
         holding_data[35] = 800; // charge_slot_1 end = 800 → 08:00
-        holding_data[36] = 1;   // enable_charge = 1
+        holding_data[36] = 1; // enable_charge = 1
 
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", vec![0; 60]),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(snap.charge_slots[0].enabled, "00:00-08:00 should be enabled");
+        assert!(
+            snap.charge_slots[0].enabled,
+            "00:00-08:00 should be enabled"
+        );
         assert_eq!(snap.charge_slots[0].start_hour, 0);
         assert_eq!(snap.charge_slots[0].start_minute, 0);
         assert_eq!(snap.charge_slots[0].end_hour, 8);
@@ -1006,10 +1016,19 @@ mod tests {
         let blocks = vec![
             make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
             make_block(RegisterType::Holding, 0, 60, "holding_0_59", vec![0; 60]),
-            make_block(RegisterType::Holding, 60, 60, "holding_60_119", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_data,
+            ),
         ];
         let snap = decode_snapshot(&blocks);
-        assert!(!snap.charge_slots[0].enabled, "12:00-12:00 should be disabled");
+        assert!(
+            !snap.charge_slots[0].enabled,
+            "12:00-12:00 should be disabled"
+        );
     }
 
     #[test]

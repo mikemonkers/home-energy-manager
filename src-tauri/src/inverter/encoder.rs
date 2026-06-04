@@ -6,29 +6,76 @@
 use chrono::{Datelike, Timelike, Utc};
 
 use crate::modbus::registers::{
-    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT, HR_BATTERY_POWER_MODE,
-    HR_BATTERY_CALIBRATION_STAGE, HR_BATTERY_SOC_RESERVE, HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE,
-    HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START, HR_CHARGE_SLOT_2_END,
-    HR_CHARGE_SLOT_2_START, HR_CHARGE_TARGET_SOC, HR_DISCHARGE_SLOT_1_END,
-    HR_DISCHARGE_SLOT_1_START, HR_DISCHARGE_SLOT_2_END, HR_DISCHARGE_SLOT_2_START,
-    HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
-    HR_ACTIVE_POWER_RATE, HR_ENABLE_RTC,
-    HR_EXPORT_PRIORITY, HR_ENABLE_EPS,
-    HR_BATTERY_PAUSE_MODE, HR_BATTERY_PAUSE_SLOT_1_START, HR_BATTERY_PAUSE_SLOT_1_END,
-    HR_INVERTER_REBOOT, HR_SYSTEM_TIME_YEAR, HR_SYSTEM_TIME_MONTH, HR_SYSTEM_TIME_DAY,
-    HR_SYSTEM_TIME_HOUR, HR_SYSTEM_TIME_MINUTE, HR_SYSTEM_TIME_SECOND,
+    HR_ACTIVE_POWER_RATE,
+    HR_BATTERY_CALIBRATION_STAGE,
+    HR_BATTERY_CHARGE_LIMIT,
+    HR_BATTERY_DISCHARGE_LIMIT,
+    HR_BATTERY_DISCHARGE_MIN_POWER_RESERVE,
+    HR_BATTERY_PAUSE_MODE,
+    HR_BATTERY_PAUSE_SLOT_1_END,
+    HR_BATTERY_PAUSE_SLOT_1_START,
+    HR_BATTERY_POWER_MODE,
+    HR_BATTERY_SOC_RESERVE,
+    HR_CHARGE_SLOT_10_END,
+    HR_CHARGE_SLOT_10_START,
+    HR_CHARGE_SLOT_1_END,
+    HR_CHARGE_SLOT_1_START,
+    HR_CHARGE_SLOT_2_END,
+    HR_CHARGE_SLOT_2_START,
+    HR_CHARGE_SLOT_3_END,
     // Extended slots 3-10
-    HR_CHARGE_SLOT_3_START, HR_CHARGE_SLOT_3_END, HR_CHARGE_SLOT_4_START, HR_CHARGE_SLOT_4_END,
-    HR_CHARGE_SLOT_5_START, HR_CHARGE_SLOT_5_END, HR_CHARGE_SLOT_6_START, HR_CHARGE_SLOT_6_END,
-    HR_CHARGE_SLOT_7_START, HR_CHARGE_SLOT_7_END, HR_CHARGE_SLOT_8_START, HR_CHARGE_SLOT_8_END,
-    HR_CHARGE_SLOT_9_START, HR_CHARGE_SLOT_9_END, HR_CHARGE_SLOT_10_START, HR_CHARGE_SLOT_10_END,
-    HR_DISCHARGE_SLOT_3_START, HR_DISCHARGE_SLOT_3_END, HR_DISCHARGE_SLOT_4_START, HR_DISCHARGE_SLOT_4_END,
-    HR_DISCHARGE_SLOT_5_START, HR_DISCHARGE_SLOT_5_END, HR_DISCHARGE_SLOT_6_START, HR_DISCHARGE_SLOT_6_END,
-    HR_DISCHARGE_SLOT_7_START, HR_DISCHARGE_SLOT_7_END, HR_DISCHARGE_SLOT_8_START, HR_DISCHARGE_SLOT_8_END,
-    HR_DISCHARGE_SLOT_9_START, HR_DISCHARGE_SLOT_9_END, HR_DISCHARGE_SLOT_10_START, HR_DISCHARGE_SLOT_10_END,
+    HR_CHARGE_SLOT_3_START,
+    HR_CHARGE_SLOT_4_END,
+    HR_CHARGE_SLOT_4_START,
+    HR_CHARGE_SLOT_5_END,
+    HR_CHARGE_SLOT_5_START,
+    HR_CHARGE_SLOT_6_END,
+    HR_CHARGE_SLOT_6_START,
+    HR_CHARGE_SLOT_7_END,
+    HR_CHARGE_SLOT_7_START,
+    HR_CHARGE_SLOT_8_END,
+    HR_CHARGE_SLOT_8_START,
+    HR_CHARGE_SLOT_9_END,
+    HR_CHARGE_SLOT_9_START,
+    HR_CHARGE_TARGET_SOC,
     // Per-slot target SOCs
-    HR_CHARGE_TARGET_SOC_1, HR_CHARGE_TARGET_SOC_2,
-    HR_DISCHARGE_TARGET_SOC_1, HR_DISCHARGE_TARGET_SOC_2,
+    HR_CHARGE_TARGET_SOC_1,
+    HR_CHARGE_TARGET_SOC_2,
+    HR_DISCHARGE_SLOT_10_END,
+    HR_DISCHARGE_SLOT_10_START,
+    HR_DISCHARGE_SLOT_1_END,
+    HR_DISCHARGE_SLOT_1_START,
+    HR_DISCHARGE_SLOT_2_END,
+    HR_DISCHARGE_SLOT_2_START,
+    HR_DISCHARGE_SLOT_3_END,
+    HR_DISCHARGE_SLOT_3_START,
+    HR_DISCHARGE_SLOT_4_END,
+    HR_DISCHARGE_SLOT_4_START,
+    HR_DISCHARGE_SLOT_5_END,
+    HR_DISCHARGE_SLOT_5_START,
+    HR_DISCHARGE_SLOT_6_END,
+    HR_DISCHARGE_SLOT_6_START,
+    HR_DISCHARGE_SLOT_7_END,
+    HR_DISCHARGE_SLOT_7_START,
+    HR_DISCHARGE_SLOT_8_END,
+    HR_DISCHARGE_SLOT_8_START,
+    HR_DISCHARGE_SLOT_9_END,
+    HR_DISCHARGE_SLOT_9_START,
+    HR_DISCHARGE_TARGET_SOC_1,
+    HR_DISCHARGE_TARGET_SOC_2,
+    HR_ENABLE_CHARGE,
+    HR_ENABLE_CHARGE_TARGET,
+    HR_ENABLE_DISCHARGE,
+    HR_ENABLE_EPS,
+    HR_ENABLE_RTC,
+    HR_EXPORT_PRIORITY,
+    HR_INVERTER_REBOOT,
+    HR_SYSTEM_TIME_DAY,
+    HR_SYSTEM_TIME_HOUR,
+    HR_SYSTEM_TIME_MINUTE,
+    HR_SYSTEM_TIME_MONTH,
+    HR_SYSTEM_TIME_SECOND,
+    HR_SYSTEM_TIME_YEAR,
     SAFE_WRITE_REGS,
 };
 
@@ -134,10 +181,10 @@ impl ControlCommand {
             }
             ControlCommand::CosyExit => {
                 vec![
-                    rw(HR_ENABLE_CHARGE, 0),          // stop force charge
-                    rw(HR_ENABLE_CHARGE_TARGET, 0),   // clear charge target
-                    rw(HR_BATTERY_POWER_MODE, 1),     // eco mode
-                    rw(HR_ENABLE_DISCHARGE, 1),       // allow discharge again
+                    rw(HR_ENABLE_CHARGE, 0),        // stop force charge
+                    rw(HR_ENABLE_CHARGE_TARGET, 0), // clear charge target
+                    rw(HR_BATTERY_POWER_MODE, 1),   // eco mode
+                    rw(HR_ENABLE_DISCHARGE, 1),     // allow discharge again
                 ]
             }
             ControlCommand::SetBatterySocReserve { reserve } => {
@@ -240,8 +287,8 @@ impl ControlCommand {
             ControlCommand::ForceDischarge => {
                 vec![
                     rw(HR_ENABLE_DISCHARGE, 1),
-                    rw(HR_DISCHARGE_SLOT_1_START, 0),   // 00:00
-                    rw(HR_DISCHARGE_SLOT_1_END, 2359),  // 23:59
+                    rw(HR_DISCHARGE_SLOT_1_START, 0),  // 00:00
+                    rw(HR_DISCHARGE_SLOT_1_END, 2359), // 23:59
                 ]
             }
             ControlCommand::SyncClock => {
@@ -348,7 +395,10 @@ fn discharge_target_soc_for_slot(slot: u8) -> Result<u16, String> {
     match slot {
         1 => Ok(HR_DISCHARGE_TARGET_SOC_1),
         2 => Ok(HR_DISCHARGE_TARGET_SOC_2),
-        _ => Err(format!("Discharge target SOC slot must be 1-2, got {}", slot)),
+        _ => Err(format!(
+            "Discharge target SOC slot must be 1-2, got {}",
+            slot
+        )),
     }
 }
 
@@ -378,7 +428,10 @@ fn extended_discharge_slot(slot: u8) -> Result<(u16, u16), String> {
         8 => Ok((HR_DISCHARGE_SLOT_8_START, HR_DISCHARGE_SLOT_8_END)),
         9 => Ok((HR_DISCHARGE_SLOT_9_START, HR_DISCHARGE_SLOT_9_END)),
         10 => Ok((HR_DISCHARGE_SLOT_10_START, HR_DISCHARGE_SLOT_10_END)),
-        _ => Err(format!("Extended discharge slot must be 3-10, got {}", slot)),
+        _ => Err(format!(
+            "Extended discharge slot must be 3-10, got {}",
+            slot
+        )),
     }
 }
 
@@ -413,8 +466,10 @@ mod tests {
         assert!(
             !writes.iter().any(|w| matches!(
                 w.address,
-                HR_DISCHARGE_SLOT_1_START | HR_DISCHARGE_SLOT_1_END
-                    | HR_DISCHARGE_SLOT_2_START | HR_DISCHARGE_SLOT_2_END
+                HR_DISCHARGE_SLOT_1_START
+                    | HR_DISCHARGE_SLOT_1_END
+                    | HR_DISCHARGE_SLOT_2_START
+                    | HR_DISCHARGE_SLOT_2_END
             )),
             "Eco mode must preserve discharge slot times"
         );
@@ -454,17 +509,29 @@ mod tests {
     #[test]
     fn set_soc_reserve_validates() {
         // Now min 4, max 100
-        assert!(ControlCommand::SetBatterySocReserve { reserve: 3 }.encode().is_err());
-        assert!(ControlCommand::SetBatterySocReserve { reserve: 4 }.encode().is_ok());
-        assert!(ControlCommand::SetBatterySocReserve { reserve: 101 }.encode().is_err());
+        assert!(ControlCommand::SetBatterySocReserve { reserve: 3 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetBatterySocReserve { reserve: 4 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetBatterySocReserve { reserve: 101 }
+            .encode()
+            .is_err());
     }
 
     #[test]
     fn set_charge_target_soc_validates() {
         // Now min 4, max 100
-        assert!(ControlCommand::SetChargeTargetSoc { soc: 3 }.encode().is_err());
-        assert!(ControlCommand::SetChargeTargetSoc { soc: 4 }.encode().is_ok());
-        assert!(ControlCommand::SetChargeTargetSoc { soc: 101 }.encode().is_err());
+        assert!(ControlCommand::SetChargeTargetSoc { soc: 3 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetChargeTargetSoc { soc: 4 }
+            .encode()
+            .is_ok());
+        assert!(ControlCommand::SetChargeTargetSoc { soc: 101 }
+            .encode()
+            .is_err());
     }
 
     #[test]
@@ -523,8 +590,16 @@ mod tests {
             ControlCommand::SetPauseSlot { start: 0, end: 0 },
             ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 80 },
             ControlCommand::SetDischargeTargetSocSlot { slot: 2, soc: 60 },
-            ControlCommand::SetChargeSlotN { slot: 3, start: 600, end: 1000 },
-            ControlCommand::SetDischargeSlotN { slot: 4, start: 1600, end: 1900 },
+            ControlCommand::SetChargeSlotN {
+                slot: 3,
+                start: 600,
+                end: 1000,
+            },
+            ControlCommand::SetDischargeSlotN {
+                slot: 4,
+                start: 1600,
+                end: 1900,
+            },
         ];
         for cmd in &commands {
             match cmd.encode() {
@@ -580,7 +655,11 @@ mod tests {
         assert_eq!(writes.len(), 6);
         // All system time registers in order
         assert_eq!(writes[0].address, HR_SYSTEM_TIME_YEAR);
-        assert!(writes[0].value <= 99, "Year must be 2-digit (offset from 2000), got {}", writes[0].value);
+        assert!(
+            writes[0].value <= 99,
+            "Year must be 2-digit (offset from 2000), got {}",
+            writes[0].value
+        );
         assert_eq!(writes[1].address, HR_SYSTEM_TIME_MONTH);
         assert!(writes[1].value >= 1 && writes[1].value <= 12);
         assert_eq!(writes[2].address, HR_SYSTEM_TIME_DAY);
@@ -707,8 +786,12 @@ mod tests {
     #[test]
     fn set_discharge_limit_validates() {
         // New bound: 0-50
-        assert!(ControlCommand::SetDischargeLimit { limit: 51 }.encode().is_err());
-        assert!(ControlCommand::SetDischargeLimit { limit: 50 }.encode().is_ok());
+        assert!(ControlCommand::SetDischargeLimit { limit: 51 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetDischargeLimit { limit: 50 }
+            .encode()
+            .is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -726,9 +809,15 @@ mod tests {
 
     #[test]
     fn set_power_reserve_validates() {
-        assert!(ControlCommand::SetPowerReserve { reserve: 3 }.encode().is_err());
-        assert!(ControlCommand::SetPowerReserve { reserve: 101 }.encode().is_err());
-        assert!(ControlCommand::SetPowerReserve { reserve: 4 }.encode().is_ok());
+        assert!(ControlCommand::SetPowerReserve { reserve: 3 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetPowerReserve { reserve: 101 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetPowerReserve { reserve: 4 }
+            .encode()
+            .is_ok());
     }
 
     #[test]
@@ -749,8 +838,12 @@ mod tests {
 
     #[test]
     fn set_export_priority_validates() {
-        assert!(ControlCommand::SetExportPriority { priority: 3 }.encode().is_err());
-        assert!(ControlCommand::SetExportPriority { priority: 0 }.encode().is_ok());
+        assert!(ControlCommand::SetExportPriority { priority: 3 }
+            .encode()
+            .is_err());
+        assert!(ControlCommand::SetExportPriority { priority: 0 }
+            .encode()
+            .is_ok());
     }
 
     #[test]
@@ -770,7 +863,10 @@ mod tests {
 
     #[test]
     fn set_pause_slot_encodes() {
-        let cmd = ControlCommand::SetPauseSlot { start: 1400, end: 1600 };
+        let cmd = ControlCommand::SetPauseSlot {
+            start: 1400,
+            end: 1600,
+        };
         let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 2);
         assert_eq!(writes[0].address, HR_BATTERY_PAUSE_SLOT_1_START);
@@ -792,7 +888,9 @@ mod tests {
         assert_eq!(writes2[0].address, HR_CHARGE_TARGET_SOC_2);
 
         // Invalid slot
-        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 3, soc: 50 }.encode().is_err());
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 3, soc: 50 }
+            .encode()
+            .is_err());
     }
 
     #[test]
@@ -806,33 +904,67 @@ mod tests {
         assert_eq!(writes2[0].address, HR_DISCHARGE_TARGET_SOC_2);
 
         // Invalid slot
-        assert!(ControlCommand::SetDischargeTargetSocSlot { slot: 3, soc: 50 }.encode().is_err());
+        assert!(
+            ControlCommand::SetDischargeTargetSocSlot { slot: 3, soc: 50 }
+                .encode()
+                .is_err()
+        );
     }
 
     #[test]
     fn extended_charge_slots_encode() {
-        let cmd = ControlCommand::SetChargeSlotN { slot: 3, start: 600, end: 1000 };
+        let cmd = ControlCommand::SetChargeSlotN {
+            slot: 3,
+            start: 600,
+            end: 1000,
+        };
         let writes = cmd.encode().unwrap();
         assert_eq!(writes[0].address, HR_CHARGE_SLOT_3_START);
         assert_eq!(writes[1].address, HR_CHARGE_SLOT_3_END);
 
-        let cmd10 = ControlCommand::SetChargeSlotN { slot: 10, start: 0, end: 0 };
+        let cmd10 = ControlCommand::SetChargeSlotN {
+            slot: 10,
+            start: 0,
+            end: 0,
+        };
         let writes10 = cmd10.encode().unwrap();
         assert_eq!(writes10[0].address, HR_CHARGE_SLOT_10_START);
         assert_eq!(writes10[1].address, HR_CHARGE_SLOT_10_END);
 
-        assert!(ControlCommand::SetChargeSlotN { slot: 2, start: 0, end: 0 }.encode().is_err());
-        assert!(ControlCommand::SetChargeSlotN { slot: 11, start: 0, end: 0 }.encode().is_err());
+        assert!(ControlCommand::SetChargeSlotN {
+            slot: 2,
+            start: 0,
+            end: 0
+        }
+        .encode()
+        .is_err());
+        assert!(ControlCommand::SetChargeSlotN {
+            slot: 11,
+            start: 0,
+            end: 0
+        }
+        .encode()
+        .is_err());
     }
 
     #[test]
     fn extended_discharge_slots_encode() {
-        let cmd = ControlCommand::SetDischargeSlotN { slot: 5, start: 1600, end: 1900 };
+        let cmd = ControlCommand::SetDischargeSlotN {
+            slot: 5,
+            start: 1600,
+            end: 1900,
+        };
         let writes = cmd.encode().unwrap();
         assert_eq!(writes[0].address, HR_DISCHARGE_SLOT_5_START);
         assert_eq!(writes[1].address, HR_DISCHARGE_SLOT_5_END);
 
-        assert!(ControlCommand::SetDischargeSlotN { slot: 1, start: 0, end: 0 }.encode().is_err());
+        assert!(ControlCommand::SetDischargeSlotN {
+            slot: 1,
+            start: 0,
+            end: 0
+        }
+        .encode()
+        .is_err());
     }
 
     #[test]

@@ -16,8 +16,8 @@
 //! on port 8899 with a short connect-timeout.
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::net::IpAddr;
+use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::modbus::framer;
@@ -66,7 +66,11 @@ pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
         "Subnet scan on {}.x found {} inverter(s): {}",
         subnet_base,
         found.len(),
-        found.iter().map(|i| format!("{}:{}", i.ip, i.port)).collect::<Vec<_>>().join(", "),
+        found
+            .iter()
+            .map(|i| format!("{}:{}", i.ip, i.port))
+            .collect::<Vec<_>>()
+            .join(", "),
     );
     found
 }
@@ -93,9 +97,12 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
     let ip_for_result = ip.clone();
     let result = tokio::task::spawn_blocking(move || {
         // Step 1: TCP connect
-        let mut stream = TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(800)).ok()?;
+        let mut stream =
+            TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(800)).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-        stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .ok()?;
 
         // Step 2: Send a minimal GivEnergy Modbus read request
         // Read 1 input register at address 0, slave 0x32, empty serial
@@ -117,11 +124,13 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
                 // Not a GivEnergy device
                 log::debug!(
                     "Non-GivEnergy response from {}:{} (txn=0x{:04X})",
-                    ip_for_closure, MODBUS_PORT, txn_id
+                    ip_for_closure,
+                    MODBUS_PORT,
+                    txn_id
                 );
                 None
             }
-            Ok(_) => None, // too few bytes
+            Ok(_) => None,  // too few bytes
             Err(_) => None, // read timeout / error
         }
     })
@@ -129,7 +138,11 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
 
     match result {
         Ok(Some(_)) => {
-            log::debug!("Found GivEnergy device at {}:{}", ip_for_result, MODBUS_PORT);
+            log::debug!(
+                "Found GivEnergy device at {}:{}",
+                ip_for_result,
+                MODBUS_PORT
+            );
             Some(DiscoveredInverter {
                 ip: ip_for_result,
                 port: MODBUS_PORT,
@@ -153,9 +166,7 @@ pub fn detect_lan_subnets() -> Vec<String> {
 
     // Strategy 2: no physical LAN interface found (WSL2, Docker-only, etc.)
     // Fall back to probing common home-router subnets.
-    log::info!(
-        "No 10.x or 192.168.x interfaces found — trying common home subnets"
-    );
+    log::info!("No 10.x or 192.168.x interfaces found — trying common home subnets");
     FALLBACK_SUBNETS.iter().map(|s| (*s).to_string()).collect()
 }
 
@@ -291,8 +302,14 @@ mod tests {
     fn collect_physical_subnets_192_168() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("eth0".to_string(), IpAddr::from_str("192.168.1.100").unwrap()),
-            ("docker0".to_string(), IpAddr::from_str("172.17.0.1").unwrap()),
+            (
+                "eth0".to_string(),
+                IpAddr::from_str("192.168.1.100").unwrap(),
+            ),
+            (
+                "docker0".to_string(),
+                IpAddr::from_str("172.17.0.1").unwrap(),
+            ),
         ];
         let subnets = collect_physical_subnets(&interfaces);
         assert_eq!(subnets, vec!["192.168.1"]);
@@ -301,9 +318,10 @@ mod tests {
     #[test]
     fn collect_physical_subnets_10_network() {
         use std::str::FromStr;
-        let interfaces = vec![
-            ("ens192".to_string(), IpAddr::from_str("10.0.5.100").unwrap()),
-        ];
+        let interfaces = vec![(
+            "ens192".to_string(),
+            IpAddr::from_str("10.0.5.100").unwrap(),
+        )];
         let subnets = collect_physical_subnets(&interfaces);
         assert_eq!(subnets, vec!["10.0.5"]);
     }
@@ -312,8 +330,14 @@ mod tests {
     fn collect_physical_subnets_skips_172() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("eth0".to_string(), IpAddr::from_str("172.22.59.58").unwrap()),
-            ("docker0".to_string(), IpAddr::from_str("172.17.0.1").unwrap()),
+            (
+                "eth0".to_string(),
+                IpAddr::from_str("172.22.59.58").unwrap(),
+            ),
+            (
+                "docker0".to_string(),
+                IpAddr::from_str("172.17.0.1").unwrap(),
+            ),
         ];
         let subnets = collect_physical_subnets(&interfaces);
         assert!(subnets.is_empty());
@@ -323,9 +347,15 @@ mod tests {
     fn collect_physical_subnets_skips_virtual_names() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("docker0".to_string(), IpAddr::from_str("192.168.1.1").unwrap()),
+            (
+                "docker0".to_string(),
+                IpAddr::from_str("192.168.1.1").unwrap(),
+            ),
             ("br-abc".to_string(), IpAddr::from_str("10.0.0.1").unwrap()),
-            ("veth123".to_string(), IpAddr::from_str("192.168.1.50").unwrap()),
+            (
+                "veth123".to_string(),
+                IpAddr::from_str("192.168.1.50").unwrap(),
+            ),
         ];
         let subnets = collect_physical_subnets(&interfaces);
         assert!(subnets.is_empty());
@@ -335,8 +365,14 @@ mod tests {
     fn collect_physical_subnets_deduplicates() {
         use std::str::FromStr;
         let interfaces = vec![
-            ("eth0".to_string(), IpAddr::from_str("192.168.1.100").unwrap()),
-            ("wlan0".to_string(), IpAddr::from_str("192.168.1.101").unwrap()),
+            (
+                "eth0".to_string(),
+                IpAddr::from_str("192.168.1.100").unwrap(),
+            ),
+            (
+                "wlan0".to_string(),
+                IpAddr::from_str("192.168.1.101").unwrap(),
+            ),
         ];
         let subnets = collect_physical_subnets(&interfaces);
         assert_eq!(subnets, vec!["192.168.1"]);
@@ -345,9 +381,7 @@ mod tests {
     #[test]
     fn collect_physical_subnets_no_loopback() {
         use std::str::FromStr;
-        let interfaces = vec![
-            ("lo".to_string(), IpAddr::from_str("127.0.0.1").unwrap()),
-        ];
+        let interfaces = vec![("lo".to_string(), IpAddr::from_str("127.0.0.1").unwrap())];
         let subnets = collect_physical_subnets(&interfaces);
         assert!(subnets.is_empty());
     }

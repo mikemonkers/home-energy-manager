@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ConnectInfo;
 use axum::extract::State;
 use axum::response::IntoResponse;
 
@@ -100,8 +100,8 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, peer: std::net::
 
     // Send the current snapshot immediately on connect (if available).
     if let Some(snapshot) = state.latest_snapshot.lock().await.as_ref() {
-        let msg =
-            serde_json::to_string(&PollMessage::Snapshot(snapshot.clone())).unwrap_or_default();
+        let msg = serde_json::to_string(&PollMessage::Snapshot(Box::new(snapshot.clone())))
+            .unwrap_or_default();
         if socket.send(Message::Text(msg.into())).await.is_err() {
             // Client disconnected immediately.
             state.connected_clients.lock().remove(client_id);
