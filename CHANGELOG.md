@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Light/dark mode toggle**: Added a header theme switch with a persisted
+  preference. The app still defaults to dark mode for new installs/users.
+
 ## [0.10.0] - 2026-06-04
 
 ### Changed
