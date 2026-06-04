@@ -128,9 +128,14 @@ function Layout() {
       {/* Header */}
       <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 py-3 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-4">
-          <h1 className="text-base font-bold text-text-primary tracking-tight">
-            GivEnergy
-          </h1>
+          <div>
+            <h1 className="text-base font-bold text-text-primary tracking-tight">
+              Home Energy Manager
+            </h1>
+            <p className="hidden sm:block text-xs text-text-secondary">
+              Local monitoring and control for GivEnergy solar/battery inverters
+            </p>
+          </div>
           <ConnectionIndicator />
         </div>
       </header>

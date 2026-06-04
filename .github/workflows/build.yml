@@ -92,13 +92,13 @@ jobs:
           rm -f "$STAGE/Applications"
           # Add install instructions
           cat > "$STAGE/README.txt" << 'EOF'
-          GivEnergy Local — macOS Install Notes
+          Home Energy Manager — macOS Install Notes
           ======================================
 
           IMPORTANT: Do NOT drag this app to /Applications.
           macOS 26.5 (Sequoia) blocks unsigned apps in /Applications.
 
-          Instead, drag GivEnergy Local.app to your Desktop or Home folder.
+          Instead, drag Home Energy Manager.app to your Desktop or Home folder.
           Then double-click to run.
 
           On first launch you may see a Gatekeeper warning:
@@ -111,7 +111,7 @@ jobs:
           EOF
           # Rebuild DMG from staging directory
           hdiutil create -ov -srcfolder "$STAGE" -format UDZO \
-            -volname "GivEnergy Local" -fs HFS+ "${DMG_PATH}.new"
+            -volname "Home Energy Manager" -fs HFS+ "${DMG_PATH}.new"
           mv "${DMG_PATH}.new.dmg" "$DMG_PATH"
           echo "DMG customized successfully"
 
@@ -119,18 +119,20 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "GivEnergy Local ${{ github.ref_name }}"
+          name: "Home Energy Manager ${{ github.ref_name }}"
           body: |
             ## Which file should I download?
 
             | File | Platform |
             |---|---|
-            | `*_aarch64.dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
-            | `*_x64.dmg` | **macOS** — Intel |
-            | `*_amd64.deb` | **Linux** — Debian/Ubuntu x86_64 (`.deb` package) |
-            | `*_aarch64.deb` | **Linux** — Debian/Ubuntu ARM64 (`.deb` package) |
-            | `*_x86_64.rpm` | **Linux** — RHEL/Fedora/openSUSE (`.rpm` package) |
-            | `*_x64-setup.exe` | **Windows** — installer |
+            | File suffix | Platform |
+            |---|---|
+            | `.dmg` with `aarch64` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
+            | `.dmg` with `x64` / `x86_64` | **macOS** — Intel |
+            | `.deb` with `amd64` | **Linux** — Debian/Ubuntu x86_64 (`.deb` package) |
+            | `.deb` with `arm64` / `aarch64` | **Linux** — Debian/Ubuntu ARM64 (`.deb` package) |
+            | `.rpm` | **Linux** — RHEL/Fedora/openSUSE (`.rpm` package), not macOS |
+            | `.exe` / `.msi` | **Windows** — installer |
 
             > **macOS users**: Do NOT drag the app to `/Applications`. macOS 26.5+ blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. See the README.txt inside the DMG for details.
 

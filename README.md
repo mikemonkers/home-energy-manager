@@ -1,6 +1,6 @@
-# GivEnergy Local
+# Home Energy Manager
 
-**Desktop app for monitoring and controlling GivEnergy solar inverters over your local network — no cloud account needed.**
+**Local monitoring and control for GivEnergy solar/battery inverters — no cloud account needed.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -34,11 +34,14 @@ Download the latest release for your platform from the [**Releases page**](https
 
 | Platform | File |
 |---|---|
-| 🪟 Windows | `GivEnergy_Local_*_x64-setup.exe` |
-| 🍎 macOS (Apple Silicon — M1/M2/M3/M4) | `GivEnergy Local_*_aarch64.dmg` |
-| 🍎 macOS (Intel) | `GivEnergy Local_*_x64.dmg` |
-| 🐧 Linux (x86_64) | `givenergy-local_*_amd64.deb` |
-| 🐧 Linux (ARM64 — Raspberry Pi) | `givenergy-local_*_arm64.deb` |
+| 🪟 Windows | `.exe` / `.msi` with `x64` or `x86_64` |
+| 🍎 macOS (Apple Silicon — M1/M2/M3/M4) | `.dmg` with `aarch64` |
+| 🍎 macOS (Intel) | `.dmg` with `x64` or `x86_64` |
+| 🐧 Linux (x86_64) | `.deb` with `amd64`, or `.rpm` with `x86_64` |
+| 🐧 Linux (ARM64 — Raspberry Pi) | `.deb` with `arm64`/`aarch64`, or `.rpm` with `aarch64` |
+
+> `.rpm` files are Linux packages, not macOS installers. For Apple Silicon
+> macOS, download the `.dmg` file containing `aarch64`.
 
 > **macOS users**: Do NOT drag the app to `/Applications` — macOS blocks unsigned apps there. Drag it to your **Desktop** or **Home folder** instead. On first launch, right-click the app → **Open** → **Open** to bypass Gatekeeper.
 
@@ -81,7 +84,7 @@ Click **Scan Network** on the Settings page. The app will scan your local networ
 
 ## What it does
 
-GivEnergy Local connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.
+Home Energy Manager connects directly to your inverter's WiFi or Ethernet data adapter over your home network. It shows you what's happening right now and lets you change settings without needing a GivEnergy cloud account or portal login.
 
 - **Real-time dashboard** — see solar generation, battery charge level, grid import/export, and home consumption updating live
 - **Energy flow diagram** — visual animation showing where power is flowing right now (solar → battery → home → grid)
@@ -177,7 +180,7 @@ is mounted into the container at `/root/.givenergy-local`. This survives restart
 
 ## Running on unRAID
 
-Community contributor instructions for running GivEnergy Local as a Docker container on unRAID.
+Community contributor instructions for running Home Energy Manager as a Docker container on unRAID.
 
 ### 1. Create a folder
 

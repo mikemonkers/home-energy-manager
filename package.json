@@ -2,7 +2,7 @@
   "name": "givenergy-local",
   "private": true,
   "version": "0.9.38",
-  "description": "Desktop app for monitoring and controlling GivEnergy solar inverters over local Modbus TCP",
+  "description": "Local monitoring and control for GivEnergy solar/battery inverters",
   "author": "Stuart Harding",
   "license": "MIT",
   "repository": {

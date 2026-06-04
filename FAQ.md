@@ -1,6 +1,6 @@
 # FAQ
 
-Common problems and solutions for GivEnergy Local.
+Common problems and solutions for Home Energy Manager.
 
 ---
 
@@ -13,8 +13,8 @@ This usually means the app can't reach your inverter. Check the following:
 2. **Same network** — Your computer/phone must be on the same WiFi or wired network as the inverter. VPNs, guest networks, and VLANs can block the connection.
 
 3. **Firewall** — When the app first starts, your operating system may ask for permission to access the network. If you missed or denied this prompt:
-   - **Windows**: Open **Windows Defender Firewall** → **Allow an app through firewall** → find **GivEnergy Local** and check both Private and Public networks. Or restart the app to trigger the prompt again.
-   - **macOS**: Open **System Settings** → **Network** → **Firewall** → make sure GivEnergy Local is allowed.
+   - **Windows**: Open **Windows Defender Firewall** → **Allow an app through firewall** → find **Home Energy Manager** and check both Private and Public networks. Or restart the app to trigger the prompt again.
+   - **macOS**: Open **System Settings** → **Network** → **Firewall** → make sure Home Energy Manager is allowed.
    - **Linux**: Check `ufw status` or `iptables` — you may need to allow port 8899 outbound and port 7337 inbound.
 
 4. **Restart the app** — Sometimes a clean restart resolves connection issues.
@@ -61,10 +61,10 @@ If the right-click → Open method doesn't work:
 
 1. Open **System Settings** → **Privacy & Security**.
 2. Scroll down to the **Security** section.
-3. You should see a message saying "GivEnergy Local was blocked from opening."
+3. You should see a message saying "Home Energy Manager was blocked from opening."
 4. Click **Open Anyway**.
 
-> ⚠️ Only do this if you are comfortable trusting the app. GivEnergy Local is open source — you can [inspect the code](https://github.com/psylsph/givenergy-local) yourself.
+> ⚠️ Only do this if you are comfortable trusting the app. Home Energy Manager is open source — you can [inspect the code](https://github.com/psylsph/givenergy-local) yourself.
 
 ### On macOS 26.5+, the app launches but the web UI never loads
 
@@ -76,7 +76,7 @@ terminal (not just `open`). **Fix**: Move the .app to your Desktop or home
 folder instead.
 
 ```bash
-mv /Applications/GivEnergy-Local.app ~/Desktop/
+mv "/Applications/Home Energy Manager.app" ~/Desktop/
 ```
 
 Then launch from there — it will work as long as the binary isn't in a system-
@@ -87,7 +87,7 @@ app in Finder), macOS may silently block the web server. **Workaround**: Run
 the binary directly:
 
 ```bash
-~/Desktop/GivEnergy-Local.app/Contents/MacOS/givenergy-local
+"$HOME/Desktop/Home Energy Manager.app/Contents/MacOS/givenergy-local"
 ```
 
 Or use the `launch.command` convenience script from the project root.
