@@ -707,20 +707,28 @@ export default function ControlPage() {
   const reserveSoc = (draftReserve != null && snapshot?.battery_reserve !== draftReserve)
     ? Math.max(4, Math.min(100, draftReserve))
     : Math.max(4, Math.min(100, snapshot?.battery_reserve ?? 4));
-  const chargeRate = (draftCharge != null && snapshot?.charge_rate !== draftCharge)
-    ? Math.max(0, Math.min(50, draftCharge))
-    : snapshot?.charge_rate != null ? Math.max(0, Math.min(50, snapshot.charge_rate)) : undefined;
-  const dischargeRate = (draftDischarge != null && snapshot?.discharge_rate !== draftDischarge)
-    ? Math.max(0, Math.min(50, draftDischarge))
-    : snapshot?.discharge_rate != null ? Math.max(0, Math.min(50, snapshot.discharge_rate)) : undefined;
+  // GivTCP / inverter registers HR111 and HR112 are 0-50, but expose them
+  // in the GUI as 0-100% for a more natural user-facing control.
+  const snapshotChargeRate = snapshot?.charge_rate != null
+    ? Math.max(0, Math.min(50, snapshot.charge_rate))
+    : undefined;
+  const snapshotDischargeRate = snapshot?.discharge_rate != null
+    ? Math.max(0, Math.min(50, snapshot.discharge_rate))
+    : undefined;
+  const chargeRate = (draftCharge != null && (snapshotChargeRate == null || snapshotChargeRate * 2 !== draftCharge))
+    ? Math.max(0, Math.min(100, draftCharge))
+    : snapshotChargeRate != null ? snapshotChargeRate * 2 : undefined;
+  const dischargeRate = (draftDischarge != null && (snapshotDischargeRate == null || snapshotDischargeRate * 2 !== draftDischarge))
+    ? Math.max(0, Math.min(100, draftDischarge))
+    : snapshotDischargeRate != null ? snapshotDischargeRate * 2 : undefined;
   const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
 
   // Calculate wattage from rate% × battery capacity (per GivTCP formula)
   // capped by the inverter's max battery power rate
   const maxBatteryPowerW = snapshot?.max_battery_power_w ?? 0;
   const batteryCapacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-  const chargeWatts = chargeRate != null ? Math.min(Math.round(chargeRate / 100 * batteryCapacityW), maxBatteryPowerW) : null;
-  const dischargeWatts = dischargeRate != null ? Math.min(Math.round(dischargeRate / 100 * batteryCapacityW), maxBatteryPowerW) : null;
+  const chargeWatts = chargeRate != null ? Math.min(Math.round(chargeRate / 200 * batteryCapacityW), maxBatteryPowerW) : null;
+  const dischargeWatts = dischargeRate != null ? Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW) : null;
 
   const [reserveSaving, setReserveSaving] = useState(false);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
@@ -795,7 +803,7 @@ export default function ControlPage() {
     if (chargeRate == null) return;
     setChargeRateSaving(true);
     try {
-      await apiPost('/api/control/charge-rate', { limit: chargeRate });
+      await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / 2) });
     } catch { /* handled silently */ }
     setChargeRateSaving(false);
   };
@@ -804,7 +812,7 @@ export default function ControlPage() {
     if (dischargeRate == null) return;
     setDischargeRateSaving(true);
     try {
-      await apiPost('/api/control/discharge-rate', { limit: dischargeRate });
+      await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / 2) });
     } catch { /* handled silently */ }
     setDischargeRateSaving(false);
   };
@@ -1008,10 +1016,10 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={50}
+                max={100}
                 step={1}
-                value={chargeRate ?? 50}
-                onChange={(e) => setDraftCharge(Math.max(0, Math.min(50, Number(e.target.value))))}
+                value={chargeRate ?? 100}
+                onChange={(e) => setDraftCharge(Math.max(0, Math.min(100, Number(e.target.value))))}
                 className="flex-1"
               />
               <button
@@ -1034,10 +1042,10 @@ export default function ControlPage() {
               <input
                 type="range"
                 min={0}
-                max={50}
+                max={100}
                 step={1}
-                value={dischargeRate ?? 50}
-                onChange={(e) => setDraftDischarge(Math.max(0, Math.min(50, Number(e.target.value))))}
+                value={dischargeRate ?? 100}
+                onChange={(e) => setDraftDischarge(Math.max(0, Math.min(100, Number(e.target.value))))}
                 className="flex-1"
               />
               <button
