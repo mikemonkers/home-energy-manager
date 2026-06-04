@@ -95,7 +95,7 @@ jobs:
           IMPORTANT: Do NOT drag this app to /Applications.
           macOS 26.5 (Sequoia) blocks unsigned apps in /Applications.
 
-          Instead, drag GivEnergy-Local.app to your Desktop or Home folder.
+          Instead, drag Home Energy Manager.app to your Desktop or Home folder.
           Then double-click to run.
 
           On first launch you may see a Gatekeeper warning:

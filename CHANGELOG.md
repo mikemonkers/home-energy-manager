@@ -9,11 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **User-facing rename**: Begin presenting the app as **Home Energy Manager**
-  with the subtitle "Local monitoring and control for GivEnergy solar/battery
-  inverters". Technical identifiers remain unchanged for upgrade safety:
-  package/binary name stays `givenergy-local`, and settings/history remain in
-  `~/.givenergy-local` (`%USERPROFILE%\.givenergy-local` on Windows).
+- **User-facing rename**: Begin presenting the app as **Home Energy Manager**.
+  Linux launcher/package names and macOS/Windows app names now use the new
+  name. The executable remains `givenergy-local`, and settings/history remain
+  in `~/.givenergy-local` (`%USERPROFILE%\.givenergy-local` on Windows).
 
 ### Fixed
 
