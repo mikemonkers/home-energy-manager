@@ -21,7 +21,7 @@ export default function StatusPage() {
           If data doesn't appear, try restarting the app and check your firewall settings.
           If you've recently factory-reset your dongle, make sure the <strong>WiFi-UART</strong>
           setting is <strong>Server</strong> (not Client).
-          See the <a href="https://github.com/psylsph/givenergy-local/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
+          See the <a href="https://github.com/psylsph/home-energy-manager/blob/master/FAQ.md" target="_blank" rel="noopener noreferrer" className="text-flow-active hover:underline">FAQ</a> for help.
         </p>
       </div>
     );
@@ -41,9 +41,9 @@ export default function StatusPage() {
       </div>
 
       {/* Data accuracy warning */}
-      <p className="text-text-secondary/40 text-xs text-center leading-relaxed max-w-xl mx-auto">
-        Data is polled from the inverter based on the Refresh Interval set on the Settings pane. The app attempts to filter out
-        physically impossible values, but brief inaccuracies may appear between reads.
+      <p className="text-text-secondary/40 text-xs text-center leading-relaxed mx-auto">
+        Data is polled from the inverter based on the Refresh Interval on the Settings pane. The app attempts to filter out
+        erroneous values, which can slow updates.
       </p>
     </div>
   );

@@ -940,6 +940,7 @@ export default function ControlPage() {
       {/* Section 3: Charge Schedule */}
       {!cosyEnabled && <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Charge Schedule</h2>
+        <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Take Effect</p>
         <div className="space-y-3">
           {chargeSlots.map((slot, i) => (
             <ScheduleSlotEditor
@@ -957,6 +958,7 @@ export default function ControlPage() {
       {!cosyEnabled && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
+          <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Take Effect</p>
           <div className="space-y-3">
             {dischargeSlots.map((slot, i) => (
               <ScheduleSlotEditor

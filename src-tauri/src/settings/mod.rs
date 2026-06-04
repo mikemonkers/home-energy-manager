@@ -244,7 +244,7 @@ impl Settings {
         match fs::read_to_string(&path) {
             Ok(content) => match serde_json::from_str(&content) {
                 Ok(settings) => {
-                    log::info!("Loaded settings from {}", path.display());
+                    log::debug!("Loaded settings from {}", path.display());
                     settings
                 }
                 Err(e) => {
@@ -272,7 +272,7 @@ impl Settings {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
         fs::write(&path, json).map_err(|e| format!("Failed to write settings: {}", e))?;
-        log::info!("Settings saved to {}", path.display());
+        log::debug!("Settings saved to {}", path.display());
         Ok(())
     }
 }
