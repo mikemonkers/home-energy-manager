@@ -40,7 +40,15 @@ use crate::modbus::registers::{
     HR_CHARGE_TARGET_SOC,
     // Per-slot target SOCs
     HR_CHARGE_TARGET_SOC_1,
+    HR_CHARGE_TARGET_SOC_10,
     HR_CHARGE_TARGET_SOC_2,
+    HR_CHARGE_TARGET_SOC_3,
+    HR_CHARGE_TARGET_SOC_4,
+    HR_CHARGE_TARGET_SOC_5,
+    HR_CHARGE_TARGET_SOC_6,
+    HR_CHARGE_TARGET_SOC_7,
+    HR_CHARGE_TARGET_SOC_8,
+    HR_CHARGE_TARGET_SOC_9,
     HR_DISCHARGE_SLOT_10_END,
     HR_DISCHARGE_SLOT_10_START,
     HR_DISCHARGE_SLOT_1_END,
@@ -62,7 +70,15 @@ use crate::modbus::registers::{
     HR_DISCHARGE_SLOT_9_END,
     HR_DISCHARGE_SLOT_9_START,
     HR_DISCHARGE_TARGET_SOC_1,
+    HR_DISCHARGE_TARGET_SOC_10,
     HR_DISCHARGE_TARGET_SOC_2,
+    HR_DISCHARGE_TARGET_SOC_3,
+    HR_DISCHARGE_TARGET_SOC_4,
+    HR_DISCHARGE_TARGET_SOC_5,
+    HR_DISCHARGE_TARGET_SOC_6,
+    HR_DISCHARGE_TARGET_SOC_7,
+    HR_DISCHARGE_TARGET_SOC_8,
+    HR_DISCHARGE_TARGET_SOC_9,
     HR_ENABLE_CHARGE,
     HR_ENABLE_CHARGE_TARGET,
     HR_ENABLE_DISCHARGE,
@@ -381,22 +397,38 @@ fn validate_range(val: u16, min: u16, max: u16, name: &str) -> Result<(), String
     }
 }
 
-/// Map slot index (1-2) to charge target SOC register (HR 242, 245).
+/// Map slot index (1-10) to charge target SOC register.
 fn charge_target_soc_for_slot(slot: u8) -> Result<u16, String> {
     match slot {
         1 => Ok(HR_CHARGE_TARGET_SOC_1),
         2 => Ok(HR_CHARGE_TARGET_SOC_2),
-        _ => Err(format!("Charge target SOC slot must be 1-2, got {}", slot)),
+        3 => Ok(HR_CHARGE_TARGET_SOC_3),
+        4 => Ok(HR_CHARGE_TARGET_SOC_4),
+        5 => Ok(HR_CHARGE_TARGET_SOC_5),
+        6 => Ok(HR_CHARGE_TARGET_SOC_6),
+        7 => Ok(HR_CHARGE_TARGET_SOC_7),
+        8 => Ok(HR_CHARGE_TARGET_SOC_8),
+        9 => Ok(HR_CHARGE_TARGET_SOC_9),
+        10 => Ok(HR_CHARGE_TARGET_SOC_10),
+        _ => Err(format!("Charge target SOC slot must be 1-10, got {}", slot)),
     }
 }
 
-/// Map slot index (1-2) to discharge target SOC register (HR 272, 275).
+/// Map slot index (1-10) to discharge target SOC register.
 fn discharge_target_soc_for_slot(slot: u8) -> Result<u16, String> {
     match slot {
         1 => Ok(HR_DISCHARGE_TARGET_SOC_1),
         2 => Ok(HR_DISCHARGE_TARGET_SOC_2),
+        3 => Ok(HR_DISCHARGE_TARGET_SOC_3),
+        4 => Ok(HR_DISCHARGE_TARGET_SOC_4),
+        5 => Ok(HR_DISCHARGE_TARGET_SOC_5),
+        6 => Ok(HR_DISCHARGE_TARGET_SOC_6),
+        7 => Ok(HR_DISCHARGE_TARGET_SOC_7),
+        8 => Ok(HR_DISCHARGE_TARGET_SOC_8),
+        9 => Ok(HR_DISCHARGE_TARGET_SOC_9),
+        10 => Ok(HR_DISCHARGE_TARGET_SOC_10),
         _ => Err(format!(
-            "Discharge target SOC slot must be 1-2, got {}",
+            "Discharge target SOC slot must be 1-10, got {}",
             slot
         )),
     }
@@ -887,8 +919,16 @@ mod tests {
         let writes2 = cmd2.encode().unwrap();
         assert_eq!(writes2[0].address, HR_CHARGE_TARGET_SOC_2);
 
+        let cmd3 = ControlCommand::SetChargeTargetSocSlot { slot: 3, soc: 50 };
+        let writes3 = cmd3.encode().unwrap();
+        assert_eq!(writes3[0].address, HR_CHARGE_TARGET_SOC_3);
+
+        let cmd10 = ControlCommand::SetChargeTargetSocSlot { slot: 10, soc: 50 };
+        let writes10 = cmd10.encode().unwrap();
+        assert_eq!(writes10[0].address, HR_CHARGE_TARGET_SOC_10);
+
         // Invalid slot
-        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 3, soc: 50 }
+        assert!(ControlCommand::SetChargeTargetSocSlot { slot: 11, soc: 50 }
             .encode()
             .is_err());
     }
@@ -903,9 +943,17 @@ mod tests {
         let writes2 = cmd2.encode().unwrap();
         assert_eq!(writes2[0].address, HR_DISCHARGE_TARGET_SOC_2);
 
+        let cmd3 = ControlCommand::SetDischargeTargetSocSlot { slot: 3, soc: 50 };
+        let writes3 = cmd3.encode().unwrap();
+        assert_eq!(writes3[0].address, HR_DISCHARGE_TARGET_SOC_3);
+
+        let cmd10 = ControlCommand::SetDischargeTargetSocSlot { slot: 10, soc: 50 };
+        let writes10 = cmd10.encode().unwrap();
+        assert_eq!(writes10[0].address, HR_DISCHARGE_TARGET_SOC_10);
+
         // Invalid slot
         assert!(
-            ControlCommand::SetDischargeTargetSocSlot { slot: 3, soc: 50 }
+            ControlCommand::SetDischargeTargetSocSlot { slot: 11, soc: 50 }
                 .encode()
                 .is_err()
         );

@@ -301,6 +301,7 @@ pub async fn set_charge_slot(
     let cmd = match (slot, enabled) {
         (1, true) => ControlCommand::SetChargeSlot1 { start, end },
         (2, true) => ControlCommand::SetChargeSlot2 { start, end },
+        (3..=10, true) => ControlCommand::SetChargeSlotN { slot, start, end },
         // Disabling should not clear the slot times — preserve the user's
         // schedule and only disable the master charge schedule flag.
         (_, false) => ControlCommand::SetEnableCharge { enabled: false },
@@ -339,16 +340,13 @@ pub async fn set_charge_slot(
                         .map(|s| s.device_type.supports_gen3_extended())
                         .unwrap_or(false);
                     if is_gen3 {
-                        let target_reg = match slot {
-                            1 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_1,
-                            2 => crate::modbus::registers::HR_CHARGE_TARGET_SOC_2,
-                            _ => 0,
-                        };
-                        if target_reg != 0 {
-                            writes.push(RegisterWrite {
-                                address: target_reg,
-                                value: target_soc as u16,
-                            });
+                        if let Ok(target_writes) = (ControlCommand::SetChargeTargetSocSlot {
+                            slot,
+                            soc: target_soc as u16,
+                        })
+                        .encode()
+                        {
+                            writes.extend(target_writes);
                         }
                     }
                 }
@@ -411,6 +409,7 @@ pub async fn set_discharge_slot(
     let cmd = match (slot, enabled) {
         (1, true) => ControlCommand::SetDischargeSlot1 { start, end },
         (2, true) => ControlCommand::SetDischargeSlot2 { start, end },
+        (3..=10, true) => ControlCommand::SetDischargeSlotN { slot, start, end },
         // Disabling should not clear slot times — preserve schedule and only
         // disable the master discharge schedule flag.
         (_, false) => ControlCommand::SetEnableDischarge { enabled: false },

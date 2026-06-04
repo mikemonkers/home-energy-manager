@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gen 3 extended schedule writes**: Charge/discharge slots 3-10 now write
+  their extended register pairs instead of only being displayed in the UI.
+  Per-slot charge target SOC writes now also cover slots 3-10.
+
 ## [0.11.1] - 2026-06-04
 
 ### Fixed
