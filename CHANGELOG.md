@@ -7,15 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-04
+
 ### Changed
 
-- **User-facing rename**: Begin presenting the app as **Home Energy Manager**.
-  Linux launcher/package names and macOS/Windows app names now use the new
-  name. The executable remains `givenergy-local`, and settings/history remain
-  in `~/.givenergy-local` (`%USERPROFILE%\.givenergy-local` on Windows).
+- **Renamed to avoid confusion**: The app is now presented to users as
+  **Home Energy Manager** instead of **GivEnergy-Local**. This is a display and
+  packaging rename only; the project is still focused on local GivEnergy
+  inverter monitoring/control.
+- **Installer and release asset names updated**: New release files use
+  hyphenated names such as `Linux-Debian-x86_64-Home-Energy-Manager-v0.10.0.deb`
+  and `macOS-Apple-Silicon-Home-Energy-Manager-v0.10.0.dmg` so downloads do not
+  contain spaces in their filenames.
+- **Upgrade compatibility**: The executable remains `givenergy-local`. Existing
+  settings and history should be retained in `~/.givenergy-local` on macOS/Linux
+  and `%USERPROFILE%\.givenergy-local` on Windows, so `settings.json` and
+  `history.db` should continue to be used after upgrading. The Debian package
+  replaces/conflicts with the old `giv-energy-local` package to avoid duplicate
+  menu entries.
 
 ### Fixed
 
+- **Start menu / app launcher naming**: Linux desktop entries, Debian/RPM
+  package metadata, and macOS/Windows app names now show **Home Energy Manager**
+  instead of **GivEnergy-Local**.
 - **Reserve SOC lower bound**: UI, API wording, and poll sanitisation now
   consistently enforce the inverter-safe 4-100% range for battery reserve SOC.
 
