@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-06-05
+
+### Fixed
+
+- **Bizarre solar/load energy history dips** ([#43](https://github.com/psylsph/home-energy-manager/issues/43)):
+  `today_solar_kwh` now reads the combined `e_pv_total` at IR(11-12) as a single
+  uint32 instead of summing two separate uint16 registers (IR(17)+IR(19)). Each
+  of those per-string registers can be independently corrupted by the dongle,
+  producing dips in the solar energy chart and amplifying noise in the computed
+  consumption formula (`solar + import - export - ac_charge`).
+  The three-phase consumption guard now uses a more robust detection (checking
+  whether `today_ac_charge_kwh` diverges from `today_consumption_kwh`, which only
+  happens when the native `e_load_today` register was decoded).
+
+### Added
+
+- **History grid lines visible in both themes**: The chart grid lines on the
+  History page now use theme-aware colors — `#6E7681` in dark mode and
+  `#57606A` in light mode — and are thicker (`strokeWidth={2}`) so they're
+  easy to see in any theme.
+
 ## [0.13.1] - 2026-06-05
 
 ### Fixed
@@ -62,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumption figures for three-phase models now correctly show the values
   reported by the inverter, rather than being recalculated using a
   single-phase formula that overwrote the real data.
+
+- **Model no longer flips on corrupted register reads**: Once the app
+  identifies your inverter model, it locks it in. Previously, a corrupted
+  ARM firmware register (HR 21) could flip the displayed model on a single
+  bad poll cycle — for example, showing Gen 3 when you have a Gen 2.
+  The displayed model is now frozen after the first successful detection
+  until the app reconnects.
 
 ## [0.12.x] — June 2026
 
