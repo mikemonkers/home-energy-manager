@@ -6,8 +6,9 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 
 - **Frontend**: React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
-- **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**)
+- **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
 - **Testing**: Rust unit tests only (no frontend tests, no integration tests)
+- **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are the source of truth for register layout, slot maps, slave addressing, and command encoding
 
 ## Prerequisites
 
@@ -23,7 +24,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
 | `npm run preview` | `vite preview` |
-| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (101 tests) |
+| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (186 tests) |
 | `cargo clippy` (in `src-tauri/`) | Run Rust linter |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
@@ -75,7 +76,7 @@ Run: `npx markdownlint '**/*.md' --ignore node_modules`
 
 React app. Entrypoint: `src/main.tsx`.
 
-- **Pages**: `StatusPage` (dashboard + energy flow), `BatteryPage` (cell-level detail), `HistoryPage` (charts), `ControlPage` (schedules, modes, limits), `SettingsPage` (connection config, connected clients, developer mode, about), `LogsPage` (developer console — only visible when developer mode is enabled)
+- **Pages**: `StatusPage` (dashboard + energy flow), `BatteryPage` (cell-level detail), `HistoryPage` (charts), `ControlPage` (schedules, modes, limits — model-aware rate scaling and slot-labelling warnings), `InverterPage` (device info: serial, ARM + DSP firmware versions, device type, rated powers), `SettingsPage` (connection config, connected clients, developer mode, about), `LogsPage` (developer console — only visible when developer mode is enabled)
 - **Components**: `EnergyFlowDiagram` (radial SVG power flow), `BatteryPanel` (per-module cell data), `SummaryTiles` (power stats)
 - **Hooks**: `useWebSocket` — connects to `/ws`, reconnects on drop, fetches initial snapshot via REST
 - **Lib**: `api.ts` (fetch helpers), `format.ts` (power/voltage/temp formatters), `types.ts` (InverterSnapshot etc.)
@@ -90,15 +91,15 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 - **`history/`** — SQLite-backed history storage (`~/.givenergy-local/history.db`)
   - `mod.rs` — `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG (or MAX for cumulative fields)
 - **`inverter/`** — data model, register decode/encode, discovery, poll loop
-  - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`
-  - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; applies global `enable_charge`/`enable_discharge` flags to slot states
-  - `encoder.rs` — translates `ControlCommand` enum into `RegisterWrite` lists (whitelist-validated)
-  - `poll.rs` — main polling loop: drain pending writes → read registers → sanitize → broadcast snapshot; uses `Notify` for immediate write execution; warmup reads and grace period after connect
+  - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`, plus `DeviceType` enum (Gen1/Gen2/Gen3 hybrids, AC-coupled variants, three-phase/commercial, AIO, HV Gen3, Gen4, EMS) with model-aware helpers: `preferred_read_slave_address()`, `supports_gen3_extended()`, `extra_poll_blocks()`, `max_charge_slots()`, `max_discharge_slots()`, `max_battery_power_for_dtc()`. Gen3 generation is resolved from `arm_fw / 100` (3 → Gen3, 8/9 → Gen2, else Gen1).
+  - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; applies global `enable_charge`/`enable_discharge` flags to slot states; per-block decoders for `holding_0_59`, `holding_60_119`, `holding_240_299` (extended 10-slot schedules), `holding_300_359` (AC-coupled config: HR313/314 limits, HR311 export priority, HR317 EPS, HR318-320 pause slot), `holding_1080_1124` (three-phase config: HR1108 discharge limit, HR1109 SOC reserve, HR1110 charge limit, HR1111 target SOC, HR1112/1122/1123 force/AC-charge flags). AC-coupled models skip HR111/112; three-phase models read limits from HR1110/1108 instead.
+  - `encoder.rs` — translates `ControlCommand` enum into `RegisterWrite` lists (whitelist-validated). Includes model-specific commands: `SetAcChargeLimit`/`SetAcDischargeLimit` (HR313/314, 1-100%), `SetThreePhaseChargeLimit`/`SetThreePhaseDischargeLimit` (HR1110/1108, 1-100%), `SetThreePhaseBatterySocReserve` (HR1109), `SetThreePhaseChargeTargetSoc` (HR1111). Standard DC hybrid `SetChargeLimit`/`SetDischargeLimit` use HR111/112 (0-50% register, displayed as 0-100%).
+  - `poll.rs` — main polling loop: drain pending writes → read registers → sanitize → broadcast snapshot; uses `Notify` for immediate write execution; warmup reads and grace period after connect. Includes: (a) `is_suspicious()` dongle memory-leak fingerprint detection that flags 60-register blocks matching the known 7-fingerprint corruption pattern (matches givenergy-modbus `>5` threshold); (b) model-aware slave address switching — after first detection, switches to `preferred_read_slave_address()` for operational reads (0x31 for AC/Gen1, 0x11 for all others); (c) immediate re-poll after model detection when slave address changes or extra blocks are needed (`should_repoll_after_model_detection()`); (d) carry-forward for optional blocks (AC config HR300-359, extended slots HR240-299, three-phase config HR1080-1124) — if an optional block is missed on one poll, preserves previous values rather than flashing zeros in the UI; (e) battery BMS read explicitly targets slave 0x32 regardless of inverter slave.
   - `discovery.rs` — network scanning with GivEnergy Modbus protocol verification (sends a read request and validates the 0x5959 magic header in the response)
 - **`modbus/`** — GivEnergy Modbus TCP protocol
-  - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain
+  - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain. **Default slave address is `0x11`** (canonical detection address per givenergy-modbus and GivTCP), not `0x32`. `read_all_with_extras()` takes `device_type` and `arm_fw` to decide which optional blocks (extended schedules, AC config, three-phase config) to poll.
   - `framer.rs` — proprietary frame encode/decode (MBAP header + transparent sub-frame + CRC); response CRC validation is lenient (logged, not rejected)
-  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode
+  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard poll blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, plus per-battery `IR(60,60)` blocks. Optional model-specific blocks: `EXTENDED_SLOTS_BLOCK` (HR240-299), `AC_CONFIG_BLOCK` (HR300-359), `THREE_PHASE_CONFIG_BLOCK` (HR1080-1124), plus composite constants `AC_AND_THREE_PHASE_BLOCKS`, `EXTENDED_AND_THREE_PHASE_BLOCKS`. `SAFE_WRITE_REGS` is the union of the givenergy-modbus safe-write allowlist and is asserted against key addresses in unit tests.
 - **`server/`** — Axum HTTP layer
   - `api.rs` — REST endpoints for control commands; queues writes to `AppState::pending_writes` and notifies poll loop
   - `ws.rs` — WebSocket endpoint streaming `PollMessage` (snapshot or connection state)
@@ -177,10 +178,23 @@ threshold while the neighbors differ by less than half the threshold.
 Per the [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library:
 
 - **Function code 6** (Write Single Holding Register) — one register per request
-- **Device address 0x11** (inverter setup address) — NOT 0x32 (BMS/poll address)
+- **Default device address `0x11`** — canonical detection address used by both givenergy-modbus and GivTCP. The ModbusClient defaults to `0x11` and switches to the model-specific operational address after detection (`0x31` for AC-coupled and Gen1 Hybrid; `0x11` for everything else). Battery BMS reads remain pinned to `0x32`/`0x33+`.
 - **CRC/check**: `CrcModbus(function_code + register + value)` — computed per the reference library
 - **Slot clearing**: write `0` (not sentinel 60) — `00:00–00:00` is treated as disabled
 - **Retry policy**: 6 attempts with 2s delay for exception code 67 (dongle busy); fail fast and continue
+
+### Model-specific write targets
+
+The same UI control may write different registers depending on the inverter model:
+
+| UI control | DC hybrid (Gen2/Gen3+) | AC-coupled | Three-phase / commercial / HV |
+|---|---|---|---|
+| Charge power limit | HR111 (0-50%) | HR313 (1-100%) | HR1110 (1-100%) |
+| Discharge power limit | HR112 (0-50%) | HR314 (1-100%) | HR1108 (1-100%) |
+| Battery SOC reserve | HR110 | HR110 | HR1109 |
+| Charge target SOC | HR116 | HR116 | HR1111 |
+
+The API routes (`set_charge_rate`, `set_discharge_rate`, `set_reserve` in `server/api.rs`) inspect the latest snapshot's `device_type` to choose the right command. The frontend (`ControlPage.tsx`) similarly picks the correct register max (50 vs 100) and display formula based on the device type code.
 
 Known limitation: register 32 (charge slot 2 end time) consistently returns exception 67 on some inverters despite being in the reference library's safe-write list. The system handles this gracefully — `enable_charge` flag still updates correctly.
 
@@ -225,6 +239,46 @@ cd src-tauri && cargo build --release
 ```
 
 The `--dist` flag specifies the frontend static files directory. Search order: `--dist` arg > `./dist/` (cwd) > `<exe_dir>/dist/` > `/usr/share/givenergy-local/dist/`. If no dist is found, runs API-only (REST + WebSocket still work).
+
+## Schedule slot register layout (and the GE Cloud label mismatch)
+
+Schedule slot registers are documented in `model/slot_map.py` of the reference library. There are four physical slot register pairs in the standard poll blocks:
+
+| Reference library name | Register | UI label |
+|---|---|---|
+| `charge_slot_1` | HR 94-95 | Slot 1 (per canonical naming) |
+| `charge_slot_2` | HR 31-32 | Slot 2 (per canonical naming) |
+| `discharge_slot_1` | HR 56-57 | Slot 1 (per canonical naming) |
+| `discharge_slot_2` | HR 44-45 | Slot 2 (per canonical naming) |
+
+Slots 3-10 (on models that support them) live in the HR 240-299 extended block, with per-slot target SOCs interleaved (HR 242/245 for slots 1/2, then HR 248, 251, 254, …, 269 for slots 3-10).
+
+### GE Cloud UI disagreement
+
+GivEnergy's cloud portal appears to label the slots in the opposite order to both reference libraries (Cloud "Slot 1" = HR 31-32 / 44-45 = our "Slot 2"). This causes confusion for users coming from the cloud UI to our app, or vice-versa. The underlying data is identical — only the labels differ.
+
+See [`issue #41`](https://github.com/psylsph/home-energy-manager/issues/41) for the original report and discussion.
+
+### Frontend warnings
+
+`ControlPage.tsx` shows yellow callout banners above Slot 2 in both Charge and Discharge Schedule sections to flag this:
+
+1. **Slot ordering mismatch** — shown for any hybrid inverter with `max_charge_slots >= 2`. Explains the canonical-vs-cloud naming difference and links to issue #41.
+2. **Legacy Gen3 firmware (ARM FW ≤ 302)** — shown only when `device_type_code` starts with `20` AND `firmware_version` (as integer) is `1..=302`. Warns that the extended HR 240-299 block may return stale or garbage data on this firmware, since the reference library and GivTCP only enable extended polling when `arm_fw > 302`.
+
+The labelling warning fires for the issue #41 user's hardware (ARM FW 318). The legacy-firmware warning fires only for older Gen3 firmware (≤ 302) and is shown in addition to the labelling warning when both conditions are true.
+
+## Optional block carry-forward
+
+Three optional register blocks are conditionally polled based on device type:
+
+- `EXTENDED_SLOTS_BLOCK` (HR 240-299) — Gen3 (ARM FW > 302), AIO, HV Gen3, Gen4, AllInOneHybrid
+- `AC_CONFIG_BLOCK` (HR 300-359) — AC-coupled models and AC three-phase
+- `THREE_PHASE_CONFIG_BLOCK` (HR 1080-1124) — three-phase, AC three-phase, AIO commercial, HV Gen3, AllInOneHybrid
+
+When an optional block is requested but the read fails (timeout, exception, or skipped due to corruption), `carry_forward_optional_block_values()` in `poll.rs` preserves the previous snapshot's values for fields that only come from that block — instead of leaving them at default/zero. This prevents the UI from flashing misleading zeros for one poll cycle.
+
+Flags passed in: `has_ac_config_block`, `has_extended_slots_block`, `has_three_phase_config_block` (computed from the actual `BlockRead`s returned in the current cycle, not from `device_type`). Carry-forward only triggers when the device type matches the expected model AND the optional block is absent in the current cycle.
 
 ## Known issues
 
