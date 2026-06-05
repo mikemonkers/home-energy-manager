@@ -66,11 +66,13 @@ and version number.
 
 If the version still shows as old after the above:
 
-4. **Hard refresh** the app window with `Cmd+Shift+R`.
-5. Or clear the Tauri webview cache:
+1. **Hard refresh** the app window with `Cmd+Shift+R`.
+2. Or clear the Tauri webview cache:
+
    ```bash
    rm -rf ~/Library/Caches/com.givenergy.local/
    ```
+
    Then reopen the app.
 
 This last step removes any stale Service Worker from a previous version

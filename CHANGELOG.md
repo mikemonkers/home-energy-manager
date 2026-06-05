@@ -9,12 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Stale Service Worker causing old UI on update**: Added Service Worker
-  unregistration at app startup. Old Service Workers from previous versions
-  persist in Tauri's webview cache and intercept fetch requests, serving
-  stale JS even when the server has been updated. The app now cleans up any
-  lingering Service Workers before mounting. Affected users may need to
-  hard-refresh (`Cmd+Shift+R`) once after upgrading to clear the cached
+- **macOS stale UI after updating**: Added Service Worker unregistration at
+  app startup to fix macOS/Tauri WebView installs showing an old app UI (for
+  example v0.9.x) even when the newly-installed DMG contains the latest code.
+  Old Service Workers from previous versions can persist in the WebView cache
+  and intercept requests, serving stale JavaScript after an update. The app now
+  cleans up lingering Service Workers before mounting. Affected users may need
+  to hard-refresh (`Cmd+Shift+R`) once after upgrading to clear the cached
   Service Worker.
 
 ## [0.12.2] - 2026-06-05
