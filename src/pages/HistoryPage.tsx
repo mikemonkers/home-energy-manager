@@ -857,20 +857,20 @@ export default function HistoryPage() {
       </div>
 
       {/* Navigation */}
-      <div className="flex items-center justify-center gap-2 bg-bg-surface rounded-xl p-2">
+      <div className="flex items-center justify-center gap-1 bg-bg-surface rounded-xl p-1.5">
         <button
           onClick={() => setOffset((o) => o + 1)}
-          className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors"
+          className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors"
         >
           ◀ Older
         </button>
-        <span className="text-text-secondary text-xs font-sans text-center truncate px-1">
+        <span className="text-text-secondary text-sm font-sans text-center truncate px-1">
           {formatWindowLabel(range, offset)}
         </span>
         <button
           onClick={() => setOffset((o) => Math.max(0, o - 1))}
           disabled={offset === 0}
-          className="shrink-0 text-text-secondary hover:text-text-primary text-xs font-sans px-2 py-1 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30"
+          className="shrink-0 text-text-secondary hover:text-text-primary text-sm font-sans px-2.5 py-1.5 rounded-lg hover:bg-bg-elevated transition-colors disabled:opacity-30"
         >
           Newer ▶
         </button>

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.4] - 2026-06-05
+
+### Changed
+
+- **Mobile-friendly Quick Actions**: The four Quick Action buttons on the
+  Control page now stay on a single row on small screens, with smaller icons
+  and tighter spacing on mobile (and normal sizing on tablet/desktop).
+- **Larger bottom tab bar icons on mobile**: Bottom navigation icons are now
+  significantly larger on phones (with tighter horizontal spacing) so they're
+  easier to tap; layout adapts back to the compact form on larger screens.
+
 ## [0.13.3] - 2026-06-05
 
 ### Added

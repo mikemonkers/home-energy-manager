@@ -70,10 +70,10 @@ function ActionButton({
       <button
         onClick={() => execute(path, body)}
         disabled={loading}
-        className="w-full flex flex-col items-center gap-2 p-4 bg-bg-surface rounded-xl border border-transparent hover:border-battery/40 hover:bg-bg-elevated transition disabled:opacity-50"
+        className="w-full flex flex-col items-center gap-1 sm:gap-2 p-2 sm:p-4 bg-bg-surface rounded-xl border border-transparent hover:border-battery/40 hover:bg-bg-elevated transition disabled:opacity-50"
       >
-        <span className="text-2xl">{icon}</span>
-        <span className="text-text-primary text-sm font-medium">{label}</span>
+        <span className="text-xl sm:text-2xl">{icon}</span>
+        <span className="text-text-primary text-xs sm:text-sm font-medium leading-tight text-center">{label}</span>
       </button>
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center bg-bg-surface/80 rounded-xl">
@@ -885,7 +885,7 @@ export default function ControlPage() {
       {/* Section 1: Quick Actions */}
       <section className="space-y-3">
         <h2 className="text-text-primary font-semibold text-lg">Quick Actions</h2>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-4 gap-2 sm:gap-3">
           <ActionButton
             label="Force Charge"
             icon="☀️"
