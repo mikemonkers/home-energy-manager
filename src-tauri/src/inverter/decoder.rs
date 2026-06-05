@@ -744,21 +744,28 @@ fn decode_input_1240_1299(data: &[u16], snap: &mut InverterSnapshot) {
 fn decode_input_1300_1359(data: &[u16], snap: &mut InverterSnapshot) {
     // Offsets within this block (subtract 1300):
     //  17 → IR(1317)-IR(1319): software version string (3 registers = 6 chars)
-    //  20 → IR(1320)-IR(1324): firmware version string (5 registers = 10 chars)
+    //  20 → IR(1320)-IR(1324): tph_firmware_version string (5 registers = 10 chars)
     //  25 → IR(1325): ac_dsp_firmware_version
     //  26 → IR(1326): dc_dsp_firmware_version
     //  27 → IR(1327): tph_arm_firmware_version
     //
-    // We only capture the numeric ARM firmware version for downstream use
-    // (model refinement, max battery power, etc). The string fields are
-    // available for future diagnostic display.
-    let arm_fw = get_reg(data, 27);
-    if arm_fw > 0 {
-        snap.firmware_version = format!("{}", arm_fw);
+    // Decode the 5-register firmware string (IR 1320-1324) as the display version,
+    // matching GivTCP which uses GEInv.tph_firmware_version for the firmware label.
+    let fw_string = decode_serial(data, 20, 5);
+    if !fw_string.is_empty() && fw_string.trim_matches(char::MIN).len() > 0 {
+        snap.firmware_version = fw_string.trim_matches(char::MIN).to_string();
     }
+
+    // AC-side DSP: IR(1325) as uint16
     let ac_dsp = get_reg(data, 25);
     if ac_dsp > 0 {
         snap.dsp_firmware_version = format!("{}", ac_dsp);
+    }
+
+    // DC-side DSP: IR(1326) as uint16
+    let dc_dsp = get_reg(data, 26);
+    if dc_dsp > 0 {
+        snap.dc_dsp_firmware_version = format!("{}", dc_dsp);
     }
 }
 

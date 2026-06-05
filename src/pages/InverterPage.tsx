@@ -38,6 +38,8 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{s.inverter_serial || '—'}</span>
           <span className="text-text-secondary">ARM Firmware</span>
           <span className="text-text-primary font-mono text-right">{s.firmware_version || '—'}</span>
+          <span className="text-text-secondary">DC DSP Firmware</span>
+          <span className="text-text-primary font-mono text-right">{s.dc_dsp_firmware_version || '—'}</span>
           <span className="text-text-secondary">DSP Firmware</span>
           <span className="text-text-primary font-mono text-right">{s.dsp_firmware_version || '—'}</span>
           <span className="text-text-secondary">Max Battery Power</span>

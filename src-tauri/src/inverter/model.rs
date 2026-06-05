@@ -585,6 +585,9 @@ pub struct InverterSnapshot {
     /// versions can indicate a partial firmware update.
     #[serde(default)]
     pub dsp_firmware_version: String,
+    /// DC-side DSP firmware version (three-phase only, IR(1326)).
+    #[serde(default)]
+    pub dc_dsp_firmware_version: String,
 
     // -- Schedules --
     /// Charge slots 0-9 (10 slots for Gen3 extended; slots 3-9 unused on Gen1/2).

@@ -5,1472 +5,397 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-06-05
+
+### Fixed
+
+- **Three-phase firmware display** ([#48](https://github.com/psylsph/home-energy-manager/issues/48)):
+  The Inverter tab now shows the full firmware string from IR 1320-1324 (instead of a
+  raw number from IR 1327), plus the DC-side DSP version from IR 1326 — matching
+  both GivTCP and the givenergy-modbus reference library.
+- **Three-phase CT meter support**: Synthetic grid CT meter is now created from
+  IR 1079-1082 import/export power registers, and a second CT meter at IR 1244-1245
+  is decoded if present. External meter probe is skipped for three-phase models.
+- **Three-phase daily energy totals**: Load energy (`today_consumption_kwh`) is now
+  read directly from IR 1396-1397 instead of being derived via formula, and home
+  power is read from IR 1089-1090 instead of being formula-derived.
+
 ## [0.13.0] - 2026-06-05
 
 ### Added
 
-- **Calendar month view for history charts**: New "Month" range button in the
-  history page alongside 1h/6h/24h/7d/30d/6m/1y. Shows data bucketed by hour
-  for the current calendar month (1st to last day). Navigation arrows page
-  through previous months. Backend uses local-time month boundaries with
-  explicit start/end timestamps.
+- **Calendar month view for history**: You can now view your history as a
+  calendar month — just select "Month" in the time range buttons. It shows
+  data from the 1st to the last day of the month, with readings averaged by
+  hour. The ◀ Older / Newer ▶ buttons let you page through previous months.
 
-- **Three-phase inverter full data support**: Seven new input register blocks
-  (IR 1000-1413) are now polled on three-phase, AC three-phase, AIO commercial,
-  HV Gen3, and All-in-One Hybrid models to provide real-time PV, grid, battery,
-  and energy-accumulated readings. Dashboard fields (solar, grid, battery power;
-  grid voltage; SOC; daily energy totals) are now populated for these models
-  instead of showing zeros. Internal grid CT meter is synthesised from
-  IR 1060-1119.
+- **Three-phase and HV inverter support**: The dashboard now works properly
+  with three-phase, commercial, and high-voltage hybrid inverters. Solar
+  generation, grid export/import, battery charge/discharge, and daily energy
+  totals now show real values instead of zeros. If you have one of these
+  models, you should see live data on the Status page for the first time.
 
-- **Three-phase model-aware schedule hiding**: Charge/discharge schedule UI is
-  hidden with an explanatory notice for three-phase/HV models, since they use
-  a different schedule register map (HR 1113-1121) not yet implemented.
+- **Schedule editor hidden for three-phase models**: If your inverter is
+  three-phase or HV, the charge/discharge schedule section now shows a notice
+  explaining that schedule editing isn't supported yet (these models use a
+  different internal register layout). Real-time monitoring and all other
+  controls still work.
 
-- **Three-phase external meter probe skip**: External CT clamp meter probing
-  is skipped for three-phase models — they use internal grid CT measurements
-  at IR 1079-1082 instead.
-
-- **Backend `explicit_window` query support**: `HistoryDb::query_history()`
-  now accepts an optional `(start_ts, end_ts)` explicit window for custom
-  time ranges (used by the calendar month view).
+- **Smarter external meter detection**: The app no longer wastes time probing
+  for external CT clamp meters on three-phase inverters — those models have
+  their grid CT built in, so the scan is skipped automatically.
 
 ### Changed
 
-- **History chart x-axis ticks**: All time ranges now use explicit evenly-spaced
-  tick values instead of relying on Recharts auto-calculation. Intra-day ranges
-  (1h/6h/24h) show ticks every 10min/1h/3h. Multi-day ranges show ticks every
-  ~5 days. Multi-month ranges show ticks every ~1-2 months. This fixes "weird
-  spacing" issues where labels were sparse or uneven.
+- **History chart labels are now evenly spaced**: The x-axis labels across all
+  time ranges now show clean, evenly-spaced ticks. For example, the 6-hour
+  view ticks every hour, the 7-day view ticks every few days, and the month
+  view shows day numbers spaced evenly across the calendar. No more odd gaps
+  or missing labels.
 
-- **App title**: HTML title and error messages updated to "Home Energy Manager"
-  (was "givenergy-local").
+- **App name consistency**: The browser tab title and error pages now say
+  "Home Energy Manager" instead of "givenergy-local".
 
 ### Fixed
 
-- **Three-phase input decoder test**: Home power and consumption fields now
-  preserve three-phase direct-register values instead of being overwritten by
-  the single-phase derived formula. The derived formula (= solar - battery -
-  grid) is only applied when no three-phase measurement exists.
+- **Three-phase home power and consumption**: Home power use and daily
+  consumption figures for three-phase models now correctly show the values
+  reported by the inverter, rather than being recalculated using a
+  single-phase formula that overwrote the real data.
 
-## [0.12.4] - 2026-06-05
+## [0.12.x] — June 2026
 
 ### Added
 
-- **Schedule slot labelling warnings** ([#41](https://github.com/psylsph/home-energy-manager/issues/41)):
-  Added yellow callout warnings above Slot 2 in the Charge Schedule and
-  Discharge Schedule sections explaining two things that have confused users:
-
-  1. **Slot ordering mismatch with the GE Cloud UI.** Our app uses the
-     canonical `givenergy-modbus` reference library register layout (Slot 1 =
-     HR 94-95 / HR 56-57, Slot 2 = HR 31-32 / HR 44-45), which labels slots in
-     the opposite order to the GivEnergy cloud UI. Underlying schedule data is
-     identical — only the labels differ. The warning explains this and links
-     to issue #41 for full context. Shown on hybrids with 2+ schedule slots.
-
-  2. **Older Gen3 firmware (ARM FW ≤ 302) lacks extended register support.**
-  Slots 3-10 and per-slot target SOCs come from HR 240-299, which is only
-  supported on Gen3 firmware > 302 per the reference library. On older
-  firmware these registers may return stale or garbage values. The warning
-  recommends updating firmware to 303+ if available. Shown only on Gen3
-  hybrids with ARM FW ≤ 302.
-
-## [0.12.3] - 2026-06-05
-
-### Fixed
-
-- **macOS stale UI after updating**: Added Service Worker unregistration at
-  app startup to fix macOS/Tauri WebView installs showing an old app UI (for
-  example v0.9.x) even when the newly-installed DMG contains the latest code.
-  Old Service Workers from previous versions can persist in the WebView cache
-  and intercept requests, serving stale JavaScript after an update. The app now
-  cleans up lingering Service Workers before mounting. Affected users may need
-  to hard-refresh (`Cmd+Shift+R`) once after upgrading to clear the cached
-  Service Worker.
-
-## [0.12.2] - 2026-06-05
-
-### Fixed
-
-- **macOS release packaging**: Made DMG customization retry-safe after
-  detaching the source image, fixing intermittent Apple Silicon release
-  failures from `hdiutil: create failed - Resource busy`.
-- **Release asset verification**: macOS release jobs now mount the prepared
-  DMG and verify the app bundle version, bundled frontend version, and the
-  responsive bottom-navigation marker before uploading assets. This prevents
-  old frontend bundles being published unnoticed.
-
-## [0.12.1] - 2026-06-05
-
-### Fixed
-
-- **macOS stale version display**: Desktop builds now wait for the embedded
-  local server to bind before navigating the window. If an older app instance
-  is still holding the preferred port (usually `7337`), the new app falls
-  forward to the next available port and navigates there, preventing the window
-  from accidentally showing an old frontend such as v0.9.3.
-- **Mobile bottom navigation**: The bottom navigation now switches to icon-only
-  mode on narrow screens, shrinks icons below the `sm` breakpoint, and uses
-  equal-width flexible items so tabs no longer run off the side of phone
-  screens.
-
-## [0.12.0] - 2026-06-05
-
-### Added
-
-- **AC-coupled battery controls**: AC-coupled inverters now read and write
-  their battery charge/discharge limits through the correct AC registers
-  (HR 313/314, 1-100%) instead of the DC-coupled HR 111/112 (0-50%). The
-  Control page adapts the slider scale and labelling automatically for AC
-  models.
-- **Three-phase / HV / commercial battery controls**: Three-phase,
-  all-in-one commercial, HV Gen 3, and AllInOne Hybrid models now read and
-  write the mirrored 1000-range register bank (HR 1080-1124) for discharge
-  limit, SOC reserve, charge limit, charge target SOC, AC-charge enable,
-  force discharge, and force charge. The poll loop dynamically requests the
-  three-phase config block based on the detected model.
-- **DSP firmware display**: The inverter page now shows both ARM and DSP
-  firmware versions. The two chips run independently and mismatched versions
-  can indicate a partial firmware update.
-- **Model-specific Modbus slave addressing**: Initial reads now use the
-  canonical GivEnergy detection address `0x11`, switching to `0x31` for
-  AC-coupled and Gen 1 Hybrid models once detected. This matches the
-  givenergy-modbus / GivTCP reference behaviour. Battery BMS reads still
-  target `0x32` / `0x33+` explicitly.
-- **Dongle memory-leak corruption detection**: 60-register blocks are now
-  checked against the known GivEnergy data-adapter memory-leak fingerprint
-  (e.g. `0xC0A8` from the dongle's own IP at characteristic offsets). When
-  detected, the entire poll cycle is re-polled rather than broadcasting
-  garbage values.
-- **Optional block carry-forward**: When an optional block (AC config,
-  Gen3 extended slots, three-phase config) is skipped or times out for a
-  single poll, the previously-known values are kept on-screen rather than
-  flashing back to zeros/defaults. This prevents transient flicker on slow
-  links and after model-aware polls that arrive out-of-order.
+- **Schedule slot labelling gotchas explained**: Yellow warning banners now
+  appear on the schedule page explaining that our slot 1/2 labels are swapped
+  vs the GivEnergy cloud app (the data is the same, only the names differ),
+  and that older Gen3 firmware (below version 303) can't use slots 3-10.
+  ([#41](https://github.com/psylsph/home-energy-manager/issues/41))
+- **AC-coupled battery controls**: Charge/discharge limit sliders now use the
+  correct 1-100% range for AC-coupled inverters (was 0-50%).
+- **Three-phase and commercial battery controls**: Discharge limits, charge
+  limits, SOC reserve, and force charge/discharge now work on three-phase,
+  commercial, and high-voltage hybrid inverters.
+- **Both firmware versions shown**: Inverter details page now displays ARM
+  and DSP firmware versions (helpful for diagnosing partial updates).
+- **Smarter inverter detection**: Uses GivEnergy's standard address first,
+  then switches to the model-specific one — fewer failed reads on connect.
+- **Dongle memory glitch protection**: Recognises corrupted reads from the
+  dongle's known memory leak and retries before showing garbage on screen.
+- **No more flickering zeros**: When optional data times out, the last known
+  values stay on screen instead of flashing to zero for one poll cycle.
 
 ### Changed
 
-- **Control page labelling**: Section renamed from "Battery Limits" to
-  "Battery & Power Limits". Individual controls relabelled for the detected
-  model (e.g. "Three-phase Charge Power Limit", "AC Discharge Power Limit").
-  "Reserve SOC" renamed to "Minimum SOC". "Inverter Max Output" renamed to
-  "Inverter Active Power Limit" and now shows the equivalent kW alongside
-  the percentage.
-
-## [0.11.2] - 2026-06-04
-
-### Added
-
-- **Roadmap document**: Added `ROADMAP.md` to track planned and investigative
-  work, including the current self-contained GivEnergy EVC tab plan.
+- **Clearer control labels**: "Battery Limits" → "Battery & Power Limits",
+  "Reserve SOC" → "Minimum SOC". Sliders show kW alongside percentages.
 
 ### Fixed
 
-- **Gen 3 extended schedule writes**: Charge/discharge slots 3-10 now write
-  their extended register pairs instead of only being displayed in the UI.
-  Per-slot charge target SOC writes now also cover slots 3-10.
-- **History chart daily energy dips**: Daily cumulative energy counters are now
-  repaired when queried so same-day drops from stale/corrupt history rows no
-  longer show as sudden dips in PV or load energy charts. Midnight resets are
-  still allowed. (#43)
+- **macOS showing old interface after update**: The app now clears cached
+  browser data on startup. If already affected, `Cmd+Shift+R` fixes it.
+- **macOS release builds**: Fixed "Resource busy" errors during DMG creation
+  on Apple Silicon. Builds now self-verify before uploading.
+- **Bottom nav on small phones**: Tabs shrink to icons only on narrow screens.
 
-## [0.11.1] - 2026-06-04
-
-### Fixed
-
-- **Wrong inverter model on some hybrids**: Inverters such as `0x2001` are now
-  identified using the ARM firmware version as well as the device type code.
-  This fixes older Gen 1 hybrids being shown as Gen 3 and keeps the displayed
-  battery/AC limits in line with the actual hardware. (#40)
-- **Unexpected charge slots appearing**: Read responses now have to match the
-  register range that was requested before the app will use them. This stops a
-  late response from the dongle being mistaken for schedule data, which could
-  make random-looking charge slots appear in the Control page. (#41)
-
-## [0.11.0] - 2026-06-04
+## [0.11.x] — June 2026
 
 ### Added
 
-- **Light/dark mode toggle**: Added a header theme switch with a persisted
-  preference. The app still defaults to dark mode for new installs/users.
+- **Light/dark mode toggle**: Header theme switch with persisted preference.
+- **Roadmap document** so you can see what's planned next.
 
-## [0.10.0] - 2026-06-04
+### Fixed
+
+- **Gen 3 schedule slots 3-10 now actually work** — previously they only
+  appeared in the UI but didn't write to the inverter.
+- **History charts no longer show sudden mid-day dips**: Stale data is now
+  smoothed out — only genuine midnight resets are shown. (#43)
+- **Some hybrids showing wrong model**: Gen 1 inverters were being
+  misidentified as Gen 3, showing incorrect battery/AC limits. (#40)
+- **Mystery charge slots appearing**: A late dongle response mistaken for
+  schedule data is now rejected. (#41)
+
+## [0.10.0] — June 2026
 
 ### Changed
 
-- **Renamed to avoid confusion**: The app is now presented to users as
-  **Home Energy Manager** instead of **GivEnergy-Local**. This is a display and
-  packaging rename only; the project is still focused on local GivEnergy
-  inverter monitoring/control.
-- **Installer and release asset names updated**: New release files use
-  hyphenated names such as `Linux-Debian-x86_64-Home-Energy-Manager-v0.10.0.deb`
-  and `macOS-Apple-Silicon-Home-Energy-Manager-v0.10.0.dmg` so downloads do not
-  contain spaces in their filenames.
-- **Upgrade compatibility**: The executable remains `givenergy-local`. Existing
-  settings and history should be retained in `~/.givenergy-local` on macOS/Linux
-  and `%USERPROFILE%\.givenergy-local` on Windows, so `settings.json` and
-  `history.db` should continue to be used after upgrading. The Debian package
-  replaces/conflicts with the old `giv-energy-local` package to avoid duplicate
-  menu entries.
+- **Renamed to Home Energy Manager**: The app is now presented as "Home
+  Energy Manager" instead of "GivEnergy-Local". Installer names, start menu
+  entries, and browser tab titles all updated. The executable remains
+  `givenergy-local` and existing settings/history are preserved.
 
 ### Fixed
 
-- **Start menu / app launcher naming**: Linux desktop entries, Debian/RPM
-  package metadata, and macOS/Windows app names now show **Home Energy Manager**
-  instead of **GivEnergy-Local**.
-- **Reserve SOC lower bound**: UI, API wording, and poll sanitisation now
-  consistently enforce the inverter-safe 4-100% range for battery reserve SOC.
-
-## [0.9.38] - 2026-06-03
-
-### Added
-
-- **External CT meter data**: The app now probes for external clamp meters
-  at device addresses 0x01-0x08 on first connect and displays per-phase
-  voltage, current, power, power factor, frequency, and cumulative import/
-  export energy. New `/meters` tab with individual meter cards.
-
-- **Cosy slot timing tests**: 8 new unit tests covering the Cosy slot logic
-  (midnight crossing, multiple slots, disabled slots, edge cases). The
-  inline slot-matching code was extracted into `CosySlot::contains_minutes()`
-  and `cosy_active_slot()` helper functions, now used by both the poll loop
-  and the restart recovery code.
-
-- **Meter data model**: `MeterData` struct with all phase measurements.
-  `decode_meter_data()` and `validate_meter_data()` in the decoder module.
-
-### Fixed
-
-- **Cosy state machine correctness audit**: Verified the entry (`ForceCharge`)
-  and exit (`CosyExit`) register writes match the reference library's intent.
-  Entry correctly enables charging with target SOC (HR 20, 96, 116) in eco
-  mode (HR 27). Exit cleanly stops charging and re-enables timed discharge
-  (HR 59).
-
-## [0.9.37] - 2026-06-03
-
-### Added
-
-- **Heartbeat handling**: Respond to dongle heartbeat requests (function ID
-  0x01) to prevent TCP disconnections after ~9 minutes of inactivity. The
-  heartbeat is now handled transparently in the receive loop.
-
-- **Battery pause mode support**: New `SetPauseMode` and `SetPauseSlot`
-  encoder commands for configuring the battery pause schedule (HR 318-320).
-
-- **AC-coupled inverter features**: Export priority (HR 311), EPS enable
-  (HR 317) register support and `SetExportPriority` / `SetEps` commands.
-
-- **Per-slot target SOC commands**: New `SetChargeTargetSocSlot` and
-  `SetDischargeTargetSocSlot` encoder commands for Gen3 per-slot targets
-  (HR 242/245, 272/275) — independent of the global charge target.
-
-- **Extended 10-slot scheduling**: Full register support for charge/discharge
-  slots 3-10 (HR 246-268, 276-298). New `SetChargeSlotN` / `SetDischargeSlotN`
-  commands and `decode_holding_240_299()` to read extended slot data. Polling
-  is model-aware: Gen3/AIO inverters automatically read the extended block.
-
-- **Model-aware polling**: `DeviceType::extra_poll_blocks()` returns additional
-  register blocks appropriate to the detected inverter model. Three-phase,
-  AC-coupled, and Gen3/AIO now read their respective extended configuration
-  blocks automatically after the first poll cycle.
-
-- **Battery power reserve**: New `SetPowerReserve` command for HR 114
-  (discharge min power reserve), distinct from the SOC reserve.
-
-- **RTC enable control**: New `SetRtc` command for HR 166 to persist settings
-  to EEPROM.
-
-- **Max slot count in snapshot**: `max_charge_slots` and `max_discharge_slots`
-  fields exposed in the snapshot so the frontend adapts to the device model.
-  AC Coupled/Gen1 see 1 slot, Gen3/AIO see up to 10, others see 2.
-
-### Fixed
-
-- **Switching inverters fails to reconnect**: The poll loop captured the
-  settings version *after* the poll operation, creating a race condition.
-  If the API bumped the version during the poll (1-3 second window), the
-  capture already saw the new version and never detected the change.
-  Fixed by capturing version at the top of the loop iteration with a
-  persistent connect-time baseline, and by waking the poll loop via
-  `write_notify` when settings are updated.
-
-- **Toggling control schedules loses slot settings**: Eco/Timed mode switches
-  no longer clear the discharge slot registers (HR 56-57, 44-45). Toggling a
-  slot off now writes only the master enable flag (HR 96 or HR 59) instead of
-  zeroing the slot times. The decoder preserves time fields but exposes
-  effective enabled state via the master flags.
-
-- **Exception 67 on register 32 (AC Coupled)**: Write to HR 32 (charge slot 2
-  end) consistently fails with exception 67 on AC Coupled and some other
-  models. The `write_register` method now treats exception 67 on the final
-  retry as a soft failure (logs WARNING, returns Ok). The API also rejects
-  slot 2 writes when `max_charge_slots = 1` (AC Coupled/Gen1).
-
-- **Charge/discharge limit bounds too permissive**: Tightened validation bounds
-  to match the reference library — SOC reserve [4-100], charge/discharge
-  limits [0-50], charge target SOC [4-100].
-
-- **Corrupted slot data and enable flags flickering on control screen**: Added
-  slot time delta checks (>12h change triggers revert to previous),
-  enable_charge/enable_discharge change detection (triggers immediate re-read
-  for confirmation), and target SOC / battery reserve range checks.
-
-## [0.9.36] - 2026-06-03
-
-### Fixed
-
-- **Cosy charging retries failed writes**: Cosy mode previously marked itself
-  active before the ForceCharge writes had actually succeeded. If the dongle
-  was busy or dropped a write, Cosy would not retry until the next schedule
-  transition. It now only marks Cosy active after all entry writes succeed,
-  and only marks inactive after all exit writes succeed — failed writes retry
-  on the next poll. Restarts inside a Cosy slot also re-enter through the
-  normal retry path. (#8)
-
-## [0.9.35] - 2026-06-03
-
-### Fixed
-
-- **Consumption always shows 0.0 kWh**: IR(35) was incorrectly treated as house
-  consumption — the reference library proved it's actually "AC charge from grid
-  today" (givenergy-modbus #174). When a user hasn't done AC charging, the
-  register is 0, so consumption appeared as zero. Consumption is now **computed**
-  from energy balance matching the GE app: `solar + import − export − ac_charge`.
-  New `today_ac_charge_kwh` field stores the raw IR(35) value. History DB
-  auto-migrates with `ALTER TABLE`. (#30)
-
-- **Import cost spikes (17p → £1.75 in 5 minutes)**: Multiple defense gaps
-  allowed corrupted `today_import_kwh` counter values to reach the cost
-  calculation:
-  - **Absolute check clamped to 0** instead of carrying forward previous value,
-    poisoning the delta baseline for the next reading
-  - **Delta check skipped entirely** when `prev < 1.0`, allowing any value through
-  - **Spike threshold too high** (50 kWh) — a 3.5 kWh corruption creates a £1 cost
-    spike but passes the filter
-  All three gaps are now closed. Cost preprocess also hard-clamps per-bucket
-  delta to 2 kWh maximum. DB repair now detects and fixes zero-clamp artifacts
-  from previous versions. (#26)
-
-## [0.9.34] - 2026-06-03
-
-### Fixed
-
-- **Cosy ForceCharge write reduction**: The `ForceCharge` command now only writes
-  the registers that differ from the current snapshot state, reducing unnecessary
-  Modbus writes and the chance of hitting dongle busy errors (exception code 67).
-
-- **Stale frame drain after writes**: Pending write operations now drain stale
-  response frames from the TCP buffer after each write batch, preventing
-  subsequent poll reads from consuming stale data and returning corrupted values.
-
-### Added
-
-- **Per-slot target SOC for Gen3 inverters**: Charge slot writes now include
-  per-slot target SOC registers (HR 242-269) for Gen3 inverters that support
-  extended registers. Gen1/Gen2/AC inverters continue using the shared target SOC.
-
-- **E2E test scaffolding**: Playwright test framework with mock Modbus server,
-  global setup, fixtures, and control API tests.
-
-## [0.9.33] - 2026-06-03
-
-### Fixed
-
-- **Energy cost calculation**: History DB repair was corrupting cumulative
-  counter data (`today_import_kwh`, `today_export_kwh`, etc.). At midnight
-  rollover, the repair replaced the legitimate reset value (e.g. 5 kWh)
-  with yesterday's final value (e.g. 150 kWh), freezing the counter.
-  Fixed the repair CASE logic — values where `prev > 5 && raw < 5` are
-  now correctly kept as midnight rollover resets.
-
-- **Charge slots triggering force charge**: Setting a charge schedule slot
-  no longer writes `enable_charge_target` (HR 20) or `charge_target_soc`
-  (HR 116), which trigger immediate grid force charge. Slot settings now
-  only write the slot times (HR 94-95 or 31-32) and `enable_charge` (HR 96)
-  to permit slot-based scheduled charging.
-
-- **Charge slots showing disabled in GUI**: Removed global decoder override
-  that set ALL charge slots to `enabled=false` when `enable_charge` was 0,
-  and ALL discharge slots to disabled when `enable_discharge` was 0.
-  Per GivTCP reference, slot times and enable flags are independent — a
-  slot with `start != end` is always valid.
-
-- **Slot disabled detection**: Now uses `start == end` (zero-duration) to
-  determine disabled state, not just `start=0`. A slot at 00:00-08:00
-  (start=0, end=800) correctly shows as enabled; 00:00-00:00 shows disabled.
-
-- **00:00→00:01 clamping removed**: Was corrupting 00:00-00:01 slots into
-  (1,1) which falsely read as zero-duration disabled. Now sends 0 for
-  00:00, matching GivTCP exactly.
-
-### Added
-
-- **Per-slot target SOC registers** (Gen3 extended HR 242-269): Added
-  register constants for `HR_CHARGE_TARGET_SOC_1/2` and
-  `HR_DISCHARGE_TARGET_SOC_1/2` with SAFE_WRITE_REGS entries. The charge
-  slot API writes per-slot target SOC for Gen3 inverters (not Gen1/2/AC).
-  These are independent of `enable_charge_target` and don't trigger
-  immediate force charge.
-
-- **`DeviceType::supports_gen3_extended()`**: Helper to check if a device
-  supports Gen3 extended registers.
-
-- **3 new Rust tests**: `repair_sql_midnight_rollover_keeps_new_value`,
-  `repair_sql_small_glitch_is_fixed`, `repair_sql_large_increase_kept`,
-  `timeslot_midnight_start_valid`, `timeslot_non_zero_equal_values_disabled`
-  (140 total).
-
-### Changed
-
-- **SyncClock year encoding**: Now writes 2-digit year (`year - 2000`)
-  matching GivTCP reference. Was writing full 4-digit year.
-- **`decode_hhmm(0)`**: Now returns `Some((0, 0))` (valid 00:00) instead
-  of None. Disabled detection moved to `decode_timeslot` which checks
-  `start == end`.
-  Fixed the repair CASE logic — values where `prev > 50 && raw < 10` are
-  now correctly kept as midnight rollover resets.
-
-- **Charge slots triggering force charge**: Setting a charge schedule slot
-  no longer auto-writes `enable_charge=1`, which was immediately starting
-  a grid force charge on the inverter. Slot times define WHEN charging is
-  permitted; the actual charge/discharge toggle is managed separately
-  (ForceCharge button, Cosy timer, or mode selection). Discharge slots
-  similarly no longer auto-toggle `enable_discharge`.
-
-- **Cumulative counter spike suppression removed**: The old repair suppressed
-  any increase > 2 kWh as a "spike", which broke legitimate large increases
-  (e.g. after data gaps). The MAX aggregation in queries and the poll.rs
-  sanitizer already handle register corruption.
-
-### Tests
-
-- **3 new Rust tests**: `cumulative_counter_query_midnight_rollover`,
-  `cumulative_counter_query_pipeline_computes_deltas`,
-  `cumulative_counter_query_large_increase_preserved` (116 total).
-
-## [0.9.32] - 2026-06-02
-
-### Added
-
-- **Complete device type registry**: All known GivEnergy models are now
-  properly identified:
-  - 0x1001 → Gen 1 Hybrid (2500W battery, 5000W AC)
-  - 0x2001 → Gen3 Hybrid / Gen2 (via ARM FW detection)
-  - 0x2101 → Gen3 Hybrid 8kW, 0x2102 → Gen3 Hybrid 10kW
-  - 0x3001/3002 → AC Coupled / Mk2
-  - 0x4001 → Three Phase
-  - 0x8001-0x8103 → All-in-One / AIO variants
-
-- **Inverter Details page**: New tab between Battery and Solar showing every
-  available snapshot field — device info (type, hex code, serial, firmware,
-  battery limit, AC max output, capacity), solar inputs, grid, battery config
-  (mode, SOC, voltage, current, temp, rates, enable flags, modules), and
-  features (auto winter, cosy, calibration).
-
-- **Human-readable inverter type on status screen**: The energy flow diagram
-  now shows "Gen 1 Hybrid", "Gen 3 Hybrid 8kW", "AC Coupled Mk2" etc. instead
-  of the raw enum name. Added `DeviceType::display_name()` method and
-  `device_type_display` field.
-
-### Fixed
-
-- **Gen 1/2 hybrid misidentified as Gen 3**: `DeviceType::refine_with_arm_fw()`
-  now uses ARM firmware (HR 21) to distinguish: FW century 1–2 → Gen2Hybrid,
-  FW century 3+ → Gen3Hybrid. Also added explicit 0x1001 detection for Gen 1.
-
-- **Cost calculation improved**: Midnight rollover detection requires
-  `prev > 50 && raw < 10` (not just `raw < prev`), preventing small data
-  glitches from inflating costs.
-
-- **All-in-One renamed**: Split into AllInOne6kW, AllInOne5kW, AIO8kW, AIO10kW
-  with correct battery limits and AC output per model.
-
-### Tests
-
-- **10 new Rust tests**: Device type mapping for 0x1001, 0x2101, 0x2102, 0x3002,
-  Gen2 refinement, cumulative counter MAX aggregation, two-bucket delta, and
-  midnight rollover.
-
-## [0.9.28] - 2026-06-02
-
-### Fixed
-
-- **Gen 1 hybrid misidentified as Gen 3**: The device type register (HR 0 =
-  0x2001) is shared across Gen1 and Gen3 hybrid inverters. The ARM firmware
-  version (HR 21) is now used to distinguish them: FW century 1–2 → Gen1Hybrid
-  (2600W), FW century 3+ → Gen3Hybrid (3600W). Added `refine_with_arm_fw()`
-  method and called from the decoder after the ARM FW is read.
-
-- **Cost calculation improved**: Midnight rollover detection now requires
-  `prev > 50 && raw < 10` (not just `raw < prev`), preventing small data
-  glitches from being treated as midnight resets and inflating costs.
-
-### Added
-
-- **6 new Rust tests**: 3 for device type refinement
-  (`refine_with_arm_fw`), 3 for cumulative counter MAX aggregation and
-  midnight rollover in the history module.
-
-## [0.9.27] - 2026-06-02
-
-### Added
-
-- **Solar page**: New tab in the bottom navigation (between Battery and History)
-  showing PV1 and PV2 input breakdown. Includes a bar chart, per-input detail
-  cards (power, voltage, current), and total solar overview. PV2 is only shown
-  when the inverter has a second string active.
-
-- **CSV export with Save As**: History charts now have a **CSV** button in the
-  navigation bar. Downloads the current time window's data as a CSV file with
-  ISO timestamps. In the Tauri desktop app, downloads directly to the default
-  Downloads folder. In a remote browser, opens a native Save As dialog.
-  A toast notification confirms the export.
-
-- **Linux ARM64 (.deb) build**: Added `aarch64-unknown-linux-gnu` target to
-  the GitHub Actions release workflow using `ubuntu-24.04-arm` runner,
-  producing `*_aarch64.deb` alongside the existing `*_amd64.deb`.
-
-## [0.9.26] - 2026-06-02
-
-### Added
-
-- **State of Health on Battery page**: Each battery module panel now shows a
-  State of Health percentage computed from the calibrated capacity vs design
-  capacity registers (cap_calibrated / cap_design × 100). Only displayed when
-  both values are available and non-zero.
-
-- **Buy Me a Coffee button**: Centered sponsor link in the README.
-
-### Changed
-
-- **Cosy mode completely overhauls the UI**: Cosy Charging is now shown to all
-  users in Eco mode (no longer gated behind Developer Mode). Quick Actions are
-  always visible. When cosy is actively charging, a "Cosy Charging" badge with
-  pulsing green dot appears next to the Battery Mode heading instead of hiding
-  the controls.
-
-- **Mode display shows "Cosy" everywhere**: The Status page (energy flow diagram)
-  and Battery page now display "Cosy" whenever cosy mode is enabled in settings,
-  not just during active charging periods. When cosy is actively force-charging,
-  the label overrides ALL decoded modes (not just eco/eco_paused) since
-  force-charging can change the inverter's register mode to export_paused.
-
-- **Cosy enabled state persisted across restarts**: `cosyEnabled` is now derived
-  from `snapshot.cosy_enabled` (set by the backend from settings.json) instead of
-  local React state that reset on every app load.
-
-- **Discharge Schedule hidden when cosy enabled**: The Discharge Schedule section
-  is now hidden whenever cosy mode is enabled (in addition to the existing Charge
-  Schedule hide). The condition `!cosyEnabled` is added alongside the existing
-  `modeToCategory === 'timed'` check.
-
-### Fixed
-
-- **Cosy mode survives client restart**: On startup, if the current time falls
-  inside an enabled cosy slot, the app now re-sends the `ForceCharge` command
-  with the matching slot's target SOC (queued as pending writes on the first
-  inner-loop iteration). Previously only `cosy_active` was restored but the
-  inverter never received the force-charge registers.
-
-- **Cosy slot exit now properly restores Eco mode**: Previously exiting a cosy
-  slot only wrote `enable_charge = 0`, leaving charge target enabled and
-  discharge disabled. The new `CosyExit` command writes:
-  - `enable_charge = 0` (stop force charge)
-  - `enable_charge_target = 0` (clear charge target)
-  - `battery_power_mode = 1` (eco mode)
-  - `enable_discharge = 1` (allow discharge again)
-  This ensures the inverter returns to normal Eco self-consumption between slots.
-
-- **Inverter charge slot registers cleared on force-charge**: The `ForceCharge`
-  command now also writes 0 to all four charge slot time registers
-  (HR 94/95 for slot 1, HR 31/32 for slot 2). Previously, stale charge slot
-  configs persisted in the inverter's registers and appeared as active
-  alongside the cosy force-charge.
-
-## [0.9.25] - 2026-06-02
-
-### Fixed
-
-- **History graphs aligned to local timezone**: The chart domain was aligned to
-  UTC midnight using `setUTCHours`, while axis labels displayed local time via
-  `toLocaleTimeString`. In BST (UTC+1) this caused the 24h graph to start at
-  1am instead of midnight. Changed `alignDown` to use `setHours`/`setMinutes`
-  so domain boundaries match the local timezone.
-
-- **Stale data no longer shown as live**: When the connection to the inverter
-  drops, the frontend now immediately clears the snapshot from the store.
-  Previously the last known values continued to be displayed as if they were
-  live, and the connection indicator was too subtle to notice. The StatusPage
-  now shows clear messages: "Connection lost — reconnecting…" or
-  "Disconnected — will retry automatically".
-
-- **Cosy force-charge now sets eco mode**: The `ForceCharge` command now also
-  writes `HR_BATTERY_POWER_MODE = 1` (eco mode) before enabling charge.
-  Without this, if the inverter was in export-paused mode (`power_mode=0`,
-  `enable_discharge=false`), the force-charge command would enable charging
-  registers but the inverter would remain in ExportPaused and not actually
-  charge. This caused the Cosy timer to appear to switch to "Paused" instead
-  of charging.
-
-- **Cosy force-charge uses per-slot target SOC**: The `ForceCharge` command now
-  accepts a `target_soc` parameter. The Cosy timer passes the target SOC from
-  the slot's slider instead of always using 100%.
-
-- **Cosy mode survives restart**: `cosy_active` state is restored on reconnect
-  by checking if the current time falls inside any enabled cosy slot. Added
-  `cosy_active` field to `InverterSnapshot` so the frontend knows when cosy
-  is actively charging. `GET /api/cosy` now returns `active` field.
-
-- **Cosy mode UI overhaul**: The Cosy Charging section is now shown to all
-  users (not just developer mode) when in Eco mode. When cosy is enabled,
-  the Battery Mode selector and Quick Actions are hidden, replaced with a
-  banner explaining the inverter is locked to Eco mode. Active cosy slots
-  are highlighted with a pulsing green dot and "Charging" label.
-
-- **Mode display shows "Cosy" when cosy timer is active**: Status page
-  (energy flow diagram) and Battery page now display "Cosy" instead of
-  "Eco" or "Eco Paused" when the cosy timer is actively charging. The
-  underlying inverter mode is unchanged — only the display label is
-  overridden.
-
-- **SVG crash on corrupted data (React error #31)**: When the snapshot contains
-  non-string/number values due to register corruption, the `EnergyFlowDiagram`
-  SVG text elements now coerce props to safe types before rendering. Prevents
-  the "not a valid string or number" React error that caused a white/blue screen.
-
-- **ErrorBoundary with auto-retry**: Added `ErrorBoundary` around each page
-  route so a component crash on one page doesn't take down the entire app.
-  Shows a friendly error message with a 30-second auto-retry countdown and a
-  manual "Retry now" button. The nav bar and connection indicator stay
-  functional during errors.
-
-## [0.9.24] - 2026-06-02
-
-### Changed
-
-- **Schedule timers support 1-minute resolution**: The minute dropdown on
-  charge/discharge schedule slots now shows all 60 values (00–59) instead of
-  5-minute increments (00, 05, 10, … 55).
-
-## [0.9.23] - 2026-06-01
-
-### Fixed
-
-- **u8 overflow panic in poll loop**: When the dongle returns corrupted data on
-  every poll cycle, the sanitizer re-reads immediately but the
-  `readings_since_connect` counter (u8) still incremented. After 256 consecutive
-  sanitized cycles it overflowed, causing a panic. Changed to `saturating_add(1)`.
-
-- **Suspect auto-discovered serial rejected**: Some dongle firmware versions
-  respond to requests with empty serial (10 spaces) but stop responding entirely
-  once the serial is set. Auto-discovery from a truncated frame (e.g. 19 bytes
-  when 30+ are expected) now marks the serial as suspect — it stays empty for
-  all subsequent requests and is not persisted to settings. A warning is logged
-  suggesting manual serial configuration.
-
-## [0.9.22] - 2026-06-01
-
-### Fixed
-
-- **HTTP Port Save button invisible**: Button used `bg-accent` which doesn't
-  exist in this project's Tailwind theme — the button had no background colour.
-  Changed to `bg-flow-active` to match all other primary action buttons.
-
-- **Log line spacing**: Timestamp and level text had a large gap (`gap-3`)
-  making them appear disconnected. Reduced to `gap-1` and widened columns
-  for a compact, adjacent layout.
-
-- **HTTP Port input white border**: Input border used `border-border-primary`
-  which resolved to white on some themes. Changed to `border-transparent`.
-
-- **TCP timeout increased to 15s**: Diagnostics revealed the dongle
-  consistently takes ~10.3s per read. The previous 10s timeout was being
-  hit by milliseconds on every request, causing constant disconnect loops.
-  Increased to 15s to provide adequate headroom.
-
-## [0.9.21] - 2026-06-01
-
-### Added
-
-- **Dynamic log level control**: Developer console now has a Capture Level
-  selector (ERROR/WARN/INFO/DEBUG/TRACE) that controls what the backend
-  captures via `PUT /api/log-level`. Defaults to INFO; switch to DEBUG to
-  see detailed Modbus frame exchange diagnostics (hex dumps, timing, register
-  ranges) when debugging connect issues.
-
-- **Modbus frame hex dump**: Each request sent to the dongle is now logged
-  at DEBUG level with a hex preview of the first 30 bytes, showing the serial
-  number, slave address, and register range in the request.
-
-- **Per-read diagnostic logging**: Register reads log the slave address,
-  register type, range, serial number being used, and response timing at
-  DEBUG level. Failed requests show the full error message.
-
-### Changed
-
-- **Capture layer now independent of stdout filter**: The developer console
-  log ring buffer uses its own level check (inside `LogCaptureLayer`), no
-  longer tied to the terminal's `RUST_LOG` env filter. This means the console
-  can show DEBUG events while the terminal stays at INFO.
-
-## [0.9.20] - 2026-06-01
-
-### Fixed
-
-- **Ghost battery modules**: Battery probe loop at addresses 0x33-0x37 now
-  validates serial number (printable ASCII, ≥4 chars), module voltage (30-65V),
-  and calibrated capacity (>0 Ah) before accepting a module. Previously only
-  SOC range was checked, which allowed garbage data from non-existent batteries
-  to appear as a third phantom module with rubbish values.
-
-- **Poll error swallowing**: Failed poll reads now log the full error message
-  (timeout, frame decode, Modbus exception, etc.) instead of silently
-  incrementing a failure counter. This makes the developer console actually
-  useful for diagnosing connect-read-disconnect loops.
-
-### Changed
-
-- **TCP timeout increased from 5s to 10s**: The GivEnergy dongle has a slow
-  processor and on some networks (WiFi bridges, VPNs) 5 seconds was marginal
-  for individual frame reads. Both the TCP connect and per-read timeouts are
-  now 10 seconds.
-
-- **TCP keepalive enabled**: Connections now use TCP keepalive (10s idle, 5s
-  interval) so dead connections (dongle power-cycled, network change) are
-  detected promptly instead of hanging until the timeout expires.
-
-### Added
-
-- **Developer console diagnostics**: Warmup reads now log success/failure per
-  read. The first successful poll after connect logs SOC and power values.
-  Per-block read timing (request/response sizes, round-trip ms) is logged at
-  debug level. MBAP header anomalies (wrong transaction/protocol ID, suspicious
-  length) are logged as warnings. TCP read errors include the `io::ErrorKind`.
-
-## [0.9.19] - 2026-06-01
-
-### Fixed
-
-- **CI build failure**: Removed unused `serde_json::Value` import that
-  caused test compilation to fail.
-
-## [0.9.18] - 2026-06-01
-
-### Fixed
-
-- **Bold axis labels**: History chart axis ticks now correctly render bold
-  (Recharts requires `fontWeight` inside a `style` object, not as a direct prop).
-
-## [0.9.17] - 2026-06-01
-
-### Added
-
-- **Chart legends**: Multi-series history charts (Charge/Discharge Power, Grid
-  Power, Energy) now show a colour-coded legend so you can tell which line is
-  which.
-
-### Changed
-
-- **Chart titles**: Bold and brighter for better readability.
-
-## [0.9.16] - 2026-06-01
-
-### Added
-
-- **RPM package in CI builds**: The Linux GitHub Actions build now produces
-  an `.rpm` package (for RHEL/Fedora/openSUSE) alongside the existing `.deb`.
-- **unRAID Docker instructions**: Community-contributed guide for running
-  GivEnergy Local as a Docker container on unRAID, with persistent data
-  and integration into the unRAID Docker UI.
-
-## [0.9.15] - 2026-05-31
-
-### Fixed
-
-- **Slot timers overflow on mobile**: Charge/discharge and Cosy charging
-  time pickers used `flex items-center gap-6` which stays horizontal on
-  narrow screens. Changed to `flex flex-col sm:flex-row gap-4 sm:gap-6`
-  so Start/End fields stack vertically on phones.
-- **Cosy toggle wipes charge slots**: The toggle button sent the cosy
-  slots state before it loaded from the server (race condition). Added a
-  `loaded` gate so toggling is disabled until the fetch completes and
-  slots are populated.
-
-## [0.9.14] - 2026-05-31
-
-### Added
-
-- **Inverter Max Output control**: New slider in Control → Battery Limits for
-  register 50 (active power rate, 0-100%). Controls the inverter's maximum
-  AC output as a percentage of rated capacity.
-- **Charge/discharge rate wattage display**: Shows calculated kW alongside the
-  percentage (e.g. "37% (3.0 kW)"). Uses the GivTCP formula: percentage of
-  battery nominal capacity in watts, capped by the inverter's max rate.
-- **Configurable HTTP port**: New `http_port` setting (default 7337) in
-  Settings → HTTP Port. Required for running multiple instances on the same
-  machine. Frontend dynamically detects the port from `window.location.port`.
-- **Developer Console screenshot** added to README.
-
-### Changed
-
-- **Charge/discharge rate defaults**: No longer show misleading 100% before
-  the first real snapshot arrives. Displays "—" until inverter data is received.
-- **Max battery power per inverter model**: Uses the exact DTC + ARM firmware
-  lookup from givenergy-modbus instead of a coarse per-type mapping. Gen1
-  AC-coupled inverters (DTC 3001) now correctly show 3000W instead of 5000W.
-- **Multi-instance docs**: README now has clear 2-step instructions (separate
-  config dir + separate HTTP port) with examples for desktop, headless, and
-  Docker.
-
-### Fixed
-
-- **Battery mode flicker**: A single corrupt register read could flip the
-  displayed battery mode for one poll cycle. Now requires 2 consecutive
-  identical readings before accepting a mode change.
-- **Charge/discharge rate range**: Register 111/112 accept 0-100% (not 0-50%).
-  The "50% max" in the reference library is a practical recommendation, not
-  a register limit. Slider max reverted to 100%.
-
-## [0.9.13] - 2026-05-31
-
-### Fixed
-
-- **Battery module data disappearing**: When a BMS Modbus read fails or returns
-  fewer modules than the previous poll cycle, the missing module data was
-  completely lost rather than preserved. Added carry-forward logic so the last
-  known-good module data (voltage, SOC, temperature, cell arrays) is kept
-  until a fresh successful read replaces it. Fixes intermittent empty or
-  partial module panels on the Battery page.
-
-## [0.9.12] - 2026-05-31
-
-### Added
-
-- **Battery calibration control** (developer mode): HR(29) register for
-  triggering a BMS calibration cycle (discharge → calibrate → charge →
-  balance → set capacity). Accessible via Control page when developer mode
-  is enabled. Includes confirmation dialog and warning banner.
-- **Inverter reboot** (developer mode): HR(163) register for remotely
-  rebooting the inverter. Red danger-styled button with confirmation.
-
-## [0.9.11] - 2026-05-31
-
-### Added
-
-- **Battery mode label**: Shows current mode (Eco, Timed Discharge, Paused, etc.)
-  below the battery in the energy flow diagram on the Status page
-
-### Changed
-
-- **SOC calculation**: Now trusts the inverter's IR(59) register by default,
-  matching the official GivEnergy app and GivTCP. Only falls back to
-  capacity-weighted BMS aggregate when IR(59) returns 0 (corrupted).
-- **Reserve SOC slider**: Step reduced from 5 to 1 so 4% can be restored
-  after changing (previously stuck at 0, 5, 10...)
-- **Charge/discharge rate**: Validation expanded from 0-50 to 0-100.
-  Some inverters report 100% = 3000W.
-
-### Fixed
-
-- **Slider flicker on save**: Draft value now persists until the snapshot
-  confirms the saved value, preventing a flash of the old reading
-- **Charge/discharge rate not working**: Backend was rejecting values > 50
-  even though many inverters support 0-100% range
-- **Missing @types/node**: Added as dev dependency for tsc builds
-
-## [0.9.10] - 2026-05-31
-
-### Added
-
-- **Multi-instance support**: Set `GIVENERGY_LOCAL_CONFIG_DIR` environment
-  variable to run multiple copies with separate settings and history.
-  Works on Windows (`USERPROFILE`), Linux/macOS (`HOME`), with documented
-  examples in README.
-
-## [0.9.9] - 2026-05-31
-
-### Added
-
-- **Battery voltage sanitization**: Rejects corrupt register readings >60V (LV)
-  or >400V (HV), falling back to previous valid value
-- **ControlPage slider sync**: Sliders now re-sync from the latest snapshot via
-  `useEffect`, fixing stale/junk values after tab switches
-- **Data accuracy warning**: Subtle disclaimer below the energy flow diagram
-  explaining that brief inaccuracies may appear between poll cycles
-
-### Fixed
-
-- **Cold battery warning on startup**: Was showing with default 0°C temperature
-  before real data arrived. Now requires temp > 0.1°C to display
-- **Charge/discharge rate clamped to 50%**: Registers can return corrupted
-  values up to 255; now clamped to the valid 0-50% range
-- **CI: Node.js 20 deprecation**: Opted into Node.js 24 via env variable across
-  all workflow files
-
-## [0.9.8] - 2026-05-31
-
-### Added
-
-- **Cosy charging mode** (developer feature): Local software-based charge scheduler.
-  Inverter stays in Eco mode while the app manages charge timing via ForceCharge
-  commands. Up to 3 charge slots with configurable times and target SOC, stored
-  locally in settings.json (not written to inverter registers). Supports
-  midnight-crossing slots. Toggle auto-saves. Only shown in developer mode when
-  Eco is selected.
-- **WiFi-UART Server mode advice**: FAQ entry and StatusPage waiting message
-  now mention the dongle's WiFi-UART setting must be "Server" not "Client"
-  after a factory reset.
-
-### Changed
-
-- **Schedule slot styling**: Charge and discharge schedule editors now use
-  the same compact card design as Cosy slots (bg-bg-surface, p-3, smaller
-  toggle switch).
-- **Charge Schedule hidden during Cosy**: When Cosy charging is active, the
-  standard inverter charge schedule section is hidden.
-- **Expanded README Quick Start**: Detailed connection instructions with
-  screenshots, network scan tip, and macOS caveats.
-- **GivEnergy mode buttons simplified**: Timed Demand / Timed Export / Export
-  Paused collapsed to just "Timed Discharge" and "Paused".
-
-### Fixed
-
-- **Stale write responses**: Retry now resends the write request after draining
-  each stale frame instead of passively consuming retry attempts.
-- **Charge slot 2 disable**: Decoder treats start=00:00 as disabled regardless
-  of end value, working around unwritable register 32 on some inverters.
-- **Timed mode switching**: Removed decoder override that prevented switching
-  to timed mode before configuring discharge slots.
-- **Aggregate battery SOC**: Multi-battery systems now compute capacity-weighted
-  average across all modules instead of using only the first module.
-- **PV2 daily energy**: Only included if PV2 voltage > 0 (prevents garbage data
-  from phantom second string).
-- **ESLint error**: `set-state-in-effect` — derive effectiveMode instead of
-  calling setState in useEffect.
-- **10 clippy warnings**: derivable_impls, manual_flatten, match_like_matches_macro,
-  field_reassign_with_default, empty_line_after_doc_comments, new_without_default,
-  same_item_push, manual_clamp.
-- **CI native bindings**: Added all platform variants of @rolldown/binding,
-  lightningcss, and @tailwindcss/oxide as optional dependencies so builds work
-  on macOS/Linux when lockfile was generated on Windows.
-
-## [0.9.7] - 2026-05-30
-
-### Added
-
-- **Aggregate battery SOC**: For multi-battery systems, SOC is now calculated
-  as `sum(remaining_capacity_ah) / sum(capacity_ah) × 100` across all modules
-  instead of using only the first module
-- **Linting tooling**: Added `markdownlint-cli`, `.markdownlint.json` config,
-  and `npm run lint:md` script; updated AGENTS.md with full linting rules for
-  Rust (clippy), TypeScript (ESLint), and Markdown
-- **README**: Expanded Quick Start with detailed connection instructions and
-  prominent Getting Started section
-
-### Fixed
-
-- **Stale write responses**: When stale read responses (function codes 0x03/0x04)
-  arrive during a write, the request is now resent after draining each stale frame
-  instead of passively consuming retry attempts
-- **Charge slot 2 disable**: Register 32 (charge slot 2 end time) is unwritable on
-  some inverters. The decoder now treats start=00:00 as disabled regardless of end
-  value, so writing just the start register is sufficient
-- **10 clippy warnings**: empty_line_after_doc_comments, field_reassign_with_default,
-  manual_flatten, match_like_matches_macro, derivable_impls, new_without_default,
-  same_item_push, manual_clamp
-- **ESLint error**: `set-state-in-effect` — derive `effectiveMode` from
-  `requestedMode` and `currentMode` instead of calling `setState` in `useEffect`
-- **Markdown formatting**: blanks around lists and fenced code blocks, multiple
-  consecutive blank lines across all .md files
-
-## [0.9.6] - 2026-05-30
-
-### Added
-
-- **Battery mode selector**: Top-level Eco/Timed toggle with contextual sub-buttons
-- **Mode change feedback**: Shows "Settings are being applied — this may take up to 30 seconds"
-  while waiting for inverter confirmation, with optimistic UI updates
-- **Tooltips on battery mode buttons** explaining what each mode does
-
-### Changed
-
-- **Simplified timed modes**: Collapsed Timed Demand / Timed Export / Export Paused
-  to just **Timed Discharge** and **Paused** — the three-way distinction was confusing
-  and the practical difference was minimal
-- **Schedule slot time pickers**: Start and End now side-by-side on same row with
-  tighter label spacing; minute granularity changed from 15 to 5 minutes
-- **Charge Schedule section** now visible in both Eco and Timed modes
-
-### Fixed
-
-- **Charge slot 2 disable**: Register 32 (charge slot 2 end time) is unwritable on some
-  inverters. A slot is now disabled when start=00:00 regardless of end value, so writing
-  just the start register is sufficient
-- **Timed mode switch failing**: Removed decoder override that reverted TimedDemand→Eco
-  when no discharge slots were configured, which prevented switching to timed mode
-  before setting up a schedule
-
-## [0.9.5] - 2026-05-30
-
-### Changed
-
-- **Schedule slot time pickers**: Start and End times now shown side-by-side
-  on the same row with tighter label spacing and clearer visual separation
-- **Minute granularity**: Changed from 15-minute to 5-minute increments for
-  charge/discharge schedule slots
-
-## [0.9.4] - 2026-05-30
-
-### Added
-
-- **Release download guide**: GitHub release page now shows a table explaining
-  which file to download for each platform (macOS Apple Silicon, macOS Intel,
-  Linux, Windows) with a note about the `/Applications` issue.
-
-## [0.9.3] - 2026-05-30
-
-### Fixed
-
-- **macOS DMG build: hdiutil auto-appends .dmg extension**: `hdiutil create`
-  automatically adds `.dmg` to the output filename, so the `mv` to rename the
-  temp file failed because the actual file was `.tmp.dmg` not `.tmp`.
-
-## [0.9.2] - 2026-05-30
-
-### Fixed
-
-- **macOS DMG build: read-only mount**: The DMG customization step tried to
-  delete the `/Applications` symlink directly on the mounted DMG, which is
-  read-only. Now copies contents to a writable staging directory first, modifies
-  there, then rebuilds the DMG from the staging directory.
-
-## [0.9.1] - 2026-05-30
-
-### Fixed
-
-- **macOS DMG build: unmatched double-quote in shell script**: The `Customize macOS DMG`
-  workflow step had a trailing `"` on the `DMG_PATH=` line, creating an unmatched
-  double-quote that caused bash to scan to EOF looking for its pair. This prevented
-  the DMG from being customized (no README.txt, /Applications symlink not removed)
-  and caused the macOS release builds to fail.
-
-## [0.9.0] - 2026-05-30
-
-Robust data handling release. The GivEnergy data adapter (dongle) frequently
-returns corrupted register values — this release adds multiple defense layers
-to ensure clean data reaches the charts and cost calculations.
-
-### Added
-
-- **Data sanitization framework**: Multi-layer defense against corrupted register
-  values (see AGENTS.md → Data sanitization):
-  - Absolute range checks on every reading (grid voltage 180–280V, frequency
-    45–55 Hz, daily energy 0–200 kWh, power ±10 kW, temperature bounds)
-  - Delta checks with time-based rate limits after 3-reading grace period
-  - Monotonic increase enforcement for cumulative counters
+- **Reserve SOC lower bound**: Consistently enforced at 4% (inverter-safe
+  minimum), not 0%.
+
+## [0.9.x] — June 2026
+
+*Heavy development period — lots of new features and fixes.*
+
+### Major features
+
+- **Solar page**: New navigation tab showing PV1 and PV2 input breakdown
+  with bar chart and detail cards. PV2 only shown when active.
+- **Inverter Details page**: New tab with every available field — model,
+  firmware, serial, battery config, rates, modules, and feature status.
+- **Human-readable model names**: Status page shows "Gen 3 Hybrid 8kW"
+  instead of raw codes. All known GivEnergy models properly identified.
+- **Cosy Charging mode**: Software-based charge scheduler — up to 3 slots
+  with configurable times and target SOC. Now available to all users (no
+  longer hidden behind Developer Mode). Shows "Cosy Charging" badge with
+  pulsing green dot when active. Persists across restarts.
+- **External CT meter data**: App probes for external clamp meters and
+  displays per-phase readings in a new Meters tab.
+- **Model-aware polling**: Gen3/AIO inverters automatically read extended
+  schedule blocks. AC-coupled and three-phase models read their respective
+  config blocks. 10-slot scheduling supported on compatible models.
+- **CSV export**: History charts have a CSV button — downloads data with
+  ISO timestamps, with native Save As dialog in browsers.
+- **Battery calibration** (developer mode): Trigger BMS calibration cycle
+  from the Control page.
+- **Inverter reboot** (developer mode): Remote reboot button.
+- **Multi-instance config**: Set `GIVENERGY_LOCAL_CONFIG_DIR` to run
+  multiple copies with separate settings.
+- **Linux ARM64 builds**: `.deb` for Raspberry Pi and other ARM Linux
+  devices. RPM packages for Fedora/RHEL.
+- **State of Health on Battery page**: Shows each module's health %
+  (calibrated vs design capacity).
+- **Dynamic log level control**: Developer console lets you switch capture
+  level to DEBUG for detailed diagnostics.
+- **Heartbeat handling**: App now responds to dongle heartbeats, preventing
+  automatic disconnection after ~9 minutes.
+- **Time-based energy counter sanitization**: Increase threshold scales
+  with elapsed time (no more false rejections after a gap).
+
+### Improvements
+
+- **Complete rewrite of mode controls**: Simplified from 4 confusing modes
+  (Timed Demand / Timed Export / Export Paused / Eco) to just Eco, Timed
+  Discharge, and Paused.
+- **Battery mode selector**: Eco/Timed toggle with contextual sub-buttons
+  and tooltips explaining what each mode does.
+- **Mode change feedback**: Shows "Applying…" message while waiting for
+  inverter confirmation.
+- **Schedule editors**: 1-minute resolution on time pickers (was 5-min).
+  Start/End times side-by-side. Stack vertically on mobile.
+- **Chart legends**: Multi-series charts now show colour-coded legends.
+  Chart titles are bold and brighter.
+- **TCP timeouts increased**: From 5s → 10s → 15s to handle slow dongle
+  responses on WiFi bridges.
+- **TCP keepalive enabled**: Dead connections detected promptly.
+- **ErrorBoundary**: A crash on one page no longer takes down the whole app.
+  Shows friendly error with auto-retry countdown.
+- **SOC calculation**: Now trusts the inverter's register by default,
+  falling back to capacity-weighted BMS aggregate only when needed.
+
+### Schedule & slot fixes
+
+- **No more force-charge when setting a schedule**: Slot settings no longer
+  trigger immediate grid force-charge.
+- **Slot disable detection fixed**: Uses zero-duration (00:00-00:00) not
+  just start=0. Slots at 00:00-08:00 now correctly show as enabled.
+- **Charging Cosy**: Now properly restores Eco mode between slots. Survives
+  client restarts. Retries failed writes instead of giving up.
+- **Gen3 per-slot target SOC**: Individual SOC targets for each schedule
+  slot (independent of the global target).
+- **Battery power reserve**: New control for minimum discharge power
+  reserve (separate from SOC reserve).
+- **AC-coupled improvements**: Export priority and EPS enable controls.
+  Battery pause mode (HR 318-320). Exception 67 on register 32 handled
+  gracefully.
+- **Switching inverters no longer fails to reconnect**: Fixed race
+  condition in settings version detection.
+- **Toggle schedules no longer loses slot settings**: Only the master
+  enable flag is written, not the slot times.
+- **00:00→00:01 clamping removed**: Now sends 0 for 00:00 matching
+  GivTCP exactly.
+
+### Data integrity
+
+- **Consumption always shows 0.0 kWh fixed**: Was reading the wrong
+  register (AC charge today, not house consumption). Now computed from
+  energy balance: solar + import − export − AC charge. (#30)
+- **Import cost spikes fixed**: Three defense gaps closed — cost no longer
+  jumps from 17p to £1.75 from a single corrupted reading. (#26)
+- **Cost calculation improved**: Midnight rollover detection tightened
+  (requires prev > 50 and raw < 10, not just any decrease).
+- **History DB repair fixed**: Was corrupting midnight rollover values
+  (e.g. 5 kWh → 150 kWh). Now correctly keeps the reset value.
+- **Cumulative counter spike suppression removed**: Was blocking
+  legitimate large increases after data gaps. MAX aggregation + poll
+  sanitizer already handle corruption.
+- **Ghost battery modules gone**: Probes validate serial, voltage, and
+  capacity before accepting a module.
+- **Battery module data disappearing fixed**: Last known-good data
+  preserved until a fresh read replaces it.
+- **Battery voltage sanitization**: Rejects impossible readings (>60V LV
+  or >400V HV).
+- **1-minute resolution on schedule timers** (was 5-minute steps).
+
+### UI polish
+
+- **State of Health on Battery page**: Each module shows health %.
+- **Schedule slot editors**: Compact card design matching Cosy slots.
+- **Schedule hidden during Cosy**: Both charge and discharge schedules
+  hidden when cosy is active.
+- **Mode display shows "Cosy" everywhere**: Status page, Battery page,
+  and mode labels all say "Cosy" when the timer is active.
+- **SVG crash on corrupted data fixed**: No more white/blue screen from
+  React error #31.
+- **ErrorBoundary with auto-retry**: 30-second countdown and "Retry now"
+  button on any page crash.
+- **Bold axis labels**: History chart ticks now correctly bold.
+- **HTTP Port settings fixed**: Save button was invisible (wrong colour
+  class), input had white border — both fixed.
+- **Battery mode flicker fixed**: Requires 2 consecutive identical
+  readings before accepting a mode change.
+- **Slider sync**: Sliders re-sync from snapshot on tab switch (no more
+  stale values).
+- **Cold battery warning**: No longer shows at 0°C before data arrives.
+- **Release download guide**: Table explaining which file to download
+  for each platform.
+- **Configurable HTTP port**: Run multiple instances on different ports.
+- **unRAID Docker instructions**: Community-contributed guide.
+
+### Infrastructure
+
+- **Linux ARM64 builds**: `.deb` for Raspberry Pi, etc.
+- **RPM packages**: For Fedora/RHEL/openSUSE.
+- **macOS DMG build fixes**: Read-only mount, unmatched quote, hdiutil
+  auto-appending .dmg extension — all fixed.
+- **macOS launch.command**: Bypasses Gatekeeper on macOS 26.5+.
+
+## [0.8.x] — May 2026
+
+*Data sanitisation and cost accuracy focus.*
+
+### Major features
+
+- **Peak/off-peak tariff support**: Separate rates for peak and off-peak
+  periods with configurable time windows, for both import and export.
+- **Auto-winter persistence**: Original register values saved to disk
+  before winter mode activates, restored on restart.
+- **History time window alignment**: Charts now align to hour/day
+  boundaries for consistent data windows.
+- **Multi-layer data sanitization framework**:
+  - Absolute range checks on every reading (grid voltage 180-280V,
+    frequency 45-55Hz, daily energy 0-200kWh, power ±10kW)
+  - Time-based delta checks after 3-reading grace period
+  - Monotonic increase enforcement for cumulative daily counters
   - Midnight rollover detection
   - Near-zero previous baseline handling
-- **Connect sequence**: 3 warmup reads (discarded), snapshot reset, 3-reading
-  grace period before delta checks activate
-- **Database repair migration**: On startup, scans `today_*_kwh` columns for
-  corrupted values (decreases or jumps > 2 kWh) and repairs them
-- **MAX aggregation for cumulative counters**: History API uses MAX (not AVG)
-  for `today_*_kwh` fields — preserves actual counter values at bucket boundaries
-- **CI: Customized macOS DMG**: Removes misleading `/Applications` symlink
-  (breaks on macOS 26.5+), adds README.txt with install instructions
+- **Cost graphs now accurate**: Switched from AVG to MAX aggregation for
+  cumulative energy counters. Previously costs were inflated ~1000×.
+- **Database repair migration**: Scans and repairs corrupted `today_*_kwh`
+  values on startup.
+- **Connected clients display**: Settings page shows IPs of all connected
+  WebSocket clients.
+- **FAQ.md**: Common problems guide covering firewall, LAN access, macOS.
+- **launch.command**: Bypasses macOS Gatekeeper on 26.5+.
 
 ### Fixed
 
 - **Cost graphs inflated ~1000×**: AVG aggregation of cumulative counters
-  understated values; deltas between averaged buckets amplified corruption
-- **Screen flashing on inverter disconnect**: `EnergyFlowDiagram`, `BatteryPanel`,
-  `SummaryTiles` wrapped with `React.memo` to prevent SVG animation restarts
-  on connection state changes
-- **Counters stuck at corrupted values**: Dongle returns garbage on first reads
-  after TCP connect (e.g. import=0.6 when real=39.0). Multiple fixes: warmup
-  reads, snapshot reset on reconnect, grace period, absolute range check
-  always active
-- **Missing Disconnected broadcast**: Backend now sends Disconnected state via
-  WebSocket when reconnect fails (was set locally but not broadcast)
-- **Grid voltage/frequency spikes**: 409V and 664V readings from corrupt
-  registers now caught and replaced with previous valid values
+  understated values; deltas amplified corruption. Now uses MAX.
+- **Cumulative counters stuck at corrupted values**: The dongle returns
+  garbage on first reads after connect. Now uses 3 warmup reads, resets
+  snapshot on reconnect, applies grace period, and always runs absolute
+  range checks.
+- **Time-based threshold**: Increase limit scales with elapsed time
+  (e.g. ~41 kWh after 4-hour gap, not just 2 kWh).
+- **Grid voltage/frequency spikes**: 409V and 664V readings caught and
+  replaced.
+- **Screen flash on disconnect**: Components wrapped with `React.memo`.
+- **Missing "Disconnected" broadcast**: Backend now sends Disconnected
+  state via WebSocket.
+- **macOS Gatekeeper**: App blocked when in /Applications on macOS 26.5+.
+  Workaround: move to Desktop. `launch.command` helper provided.
+- **LAN access in dev mode**: Axum server serves frontend from `dist/`.
+- **Network Access shows LAN IP**: Displays actual LAN IP, not 127.0.0.1.
 
-### Changed
+## [0.7.0] — May 2026
 
-- **Workflow restructured**: Replaced `tauri-apps/tauri-action` with manual
-  `cargo tauri build` + `softprops/action-gh-release` to allow DMG customization
-- **Removed cost chart "inaccurate" overlay**: Cost data now accurate with
-  MAX aggregation and proper sanitization
-- **Test count**: 101 tests (was 98)
+- **Connected clients display**: Settings page shows WebSocket client IPs.
+  Local connections labelled "This device".
+- **FAQ.md**: Firewall, LAN access, macOS downloads, network scanning.
+- **LAN access in dev mode**: Axum server serves frontend from `dist/`.
+- **Network Access shows LAN IP**: Real LAN IP instead of 127.0.0.1.
 
-## [0.8.9] - 2026-05-30
+## [0.6.0] — May 2026
 
-### Fixed
+- **Developer Mode toggle**: Reveals a Logs page with scrollable,
+  filterable backend output. Log capture, text/level filtering, auto-scroll.
+- **Network discovery filtering**: Verifies GivEnergy protocol before
+  listing a device (no more false positives from other port 8899 services).
 
-- **Grace period for delta checks after connect**: Even after warmup reads, the
-  dongle returns plausible-but-wrong values (e.g. `today_import_kwh = 0.6` when
-  real is 39.0) that pass the absolute range check. These become the "previous"
-  baseline and cause all subsequent real readings to be rejected. Now the first
-  3 readings after connect only have the absolute range check (0–200 kWh) —
-  delta checks are skipped until the baseline stabilizes.
-- **3 warmup reads instead of 1**: The dongle can return corrupted data for
-  multiple consecutive reads after TCP connect. Three warmup reads with 500ms
-  gaps give the dongle more time to stabilize before we start recording data.
-- **Skip delta when previous is near-zero**: If `prev < 1.0` the delta increase
-  check is skipped — a near-zero previous is unreliable (either clamped from
-  corruption or a genuine start-of-day reading).
+## [0.5.x] — May 2026
 
-## [0.8.8] - 2026-05-30
+- **Live snapshot sanitization**: Physically impossible readings
+  (battery >10kW, SOC=0 with live power, SOC=100 while charging) are now
+  corrected before reaching the frontend, not just filtered from history.
+- **BMS SOC validation**: Garbage BMS values rejected. Falls back to
+  inverter SOC. Multi-battery SOC uses capacity-weighted average.
+- **History recording guards**: Impossible readings no longer written to
+  database. Existing garbage entries purged on upgrade.
+- **Chart rendering**: Missing data shown as gaps (connectNulls), not
+  zero — prevents misleading dips.
+- **Battery mode label**: Shows current mode in the energy flow diagram.
+- **Schedule slot time pickers**: Stack vertically on mobile (no overlap).
+- **Copy URL button**: Works on non-HTTPS LAN contexts.
 
-### Fixed
-
-- **Absolute range check now runs on EVERY reading, including the first after
-  connect**: Previously ALL sanitization was gated behind `if let Some(p) = prev`,
-  meaning the first reading after every restart/reconnect had ZERO validation.
-  Corrupted values like 1010 kWh (`today_charge_kwh`), 275 kWh
-  (`today_consumption_kwh`), and 245 kWh (`today_export_kwh`) sailed through
-  and poisoned the "previous" reference, making the sanitizer reject all
-  subsequent legitimate readings. Now the absolute range check (0–200 kWh)
-  runs unconditionally, and only the delta/decrease checks require a previous
-  reading.
-
-## [0.8.7] - 2026-05-30
-
-### Fixed
-
-- **Cumulative counters stuck at 0 or corrupted values**: The dongle returns
-  garbage register values on the first read after TCP connect (e.g.
-  `today_import_kwh = 0.6` when the real value is 39.0). The sanitizer
-  compared every subsequent reading against this corrupted "previous" value
-  and rejected the real ones as "jumped too fast", permanently locking the
-  counters at the corrupted value. Fixed with three changes:
-  1. **Warmup read**: discard the first register read after connect — the
-     dongle needs one full read cycle to return fresh data
-  2. **Reset snapshot on disconnect/reconnect**: clear `latest_snapshot`
-     so the next connection starts with no stale "previous" reference
-  3. **Time-based increase threshold** (from v0.8.6): scales the allowed
-     jump with elapsed time since last reading
-
-## [0.8.6] - 2026-05-30
-
-### Fixed
-
-- **Time-based energy counter sanitization**: The fixed 2 kWh/poll increase
-  threshold rejected legitimate values after reconnect/restart gaps. The counter
-  can legitimately increase by ~10 kWh/hour, so after a 4-hour disconnect the
-  threshold needs to be ~41 kWh. Now scales with elapsed time:
-  `max_increase = elapsed_hours × 10 kW + 1 kWh margin`.
-- **Grid voltage sanitization**: Rejects values outside 180–280V (UK grid is
-  nominally 230V ±10%). Catches spikes like 409V and 664V from corrupt
-  register reads.
-- **Grid frequency sanitization**: Rejects values outside 45–55 Hz (UK nominal
-  50 Hz ±1%).
-
-## [0.8.5] - 2026-05-30
-
-### Fixed
-
-- **Cumulative counter sanitization rewritten**: The previous sanitizer used a
-  50 kWh jump threshold that missed common register corruption patterns like
-  39.0 → 0.6 → 39.0 (only a 38.4 kWh drop). The new sanitizer enforces three
-  strict rules: (1) value must be 0–1000 kWh, (2) counter must never decrease
-  during the day (register corruption), (3) counter must not increase by more
-  than 2 kWh between polls (implausible rate). Midnight rollover is correctly
-  detected and allowed.
-- **Database repair migration**: On startup, the history database is scanned
-  for corrupted `today_*_kwh` values (decreases or jumps > 2 kWh between
-  consecutive rows) and repaired using windowed analysis. This cleans any
-  corrupted data accumulated before the sanitizer was added.
-
-## [0.8.4] - 2026-05-30
-
-### Fixed
-
-- **Cost graphs now accurate**: Switched history aggregation from `AVG` to `MAX` for
-  cumulative daily energy counters (`today_*_kwh`). Averaging monotonically-increasing
-  counters understated the true value, causing deltas between buckets to inflate costs
-  by ~1000×. `MAX` preserves the actual counter reading at each bucket boundary.
-- **Removed inaccurate overlay**: Cost charts no longer show the "data may be inaccurate"
-  warning banner.
-- **Disconnected state broadcast**: Backend now broadcasts `Disconnected` state via
-  WebSocket when a reconnect attempt fails (previously set locally but not sent to
-  frontend, leaving it stuck on 'reconnecting').
-- **Screen flash on disconnect**: Wrapped `EnergyFlowDiagram`, `BatteryPanel`, and
-  `SummaryTiles` with `React.memo` so they don't re-render when only connection state
-  changes (previously SVG animations restarted on every connection state update).
-
-## [0.8.3] - 2026-05-30
-
-### Fixed
-
-- **macOS Gatekeeper blocking ad-hoc signed app on 26.5+**: When launched via `open`
-  or Finder double-click, Gatekeeper silently blocks the web server from starting
-  (network entitlements rejected at the LaunchServices level). The app process stays
-  alive but never binds to port 7337.
-- **macOS 26.5 blocks ad-hoc signed binaries from /Applications**: Even running
-  the binary directly from terminal fails if the .app is in `/Applications`.
-  Move to Desktop or home folder instead. Updated FAQ and launch.command to
-  prefer Desktop over /Applications.
+## [0.5.0] — May 2026
 
 ### Added
 
-- **`launch.command`** — Convenience script that runs the app binary directly,
-  bypassing LaunchServices Gatekeeper entirely. Drop-in replacement for `open`:
-  `./launch.command` from the project root.
-- **FAQ: macOS 26.5+ Gatekeeper workaround** — Documents the `launch.command`
-  workaround and notes that `spctl --add` is no longer supported.
-
-## [0.8.2] - 2026-05-30
-
-### Fixed
-
-- **Screen flashing on inverter disconnect**: `StatusPage` re-rendered when the
-  connection state changed (Connected → Reconnecting), cascading to children
-  `EnergyFlowDiagram`, `BatteryPanel`, and `SummaryTiles`. SVG `<animate>`
-  elements in the flow diagram restarted their animation on every unnecessary
-  re-render, causing a visible "jump". All three components now wrapped with
-  `React.memo` to only re-render when the `snapshot` prop actually changes.
-- **Missing Disconnected broadcast**: When a reconnect attempt failed, the
-  backend set the connection state to `Disconnected` but never broadcast it
-  via WebSocket, leaving the frontend stuck on 'reconnecting'.
-
-## [0.8.1] - 2026-05-30
+- **History page**: 5 metric tabs (Battery, Solar, Grid, Home, Cost) with
+  time-series charts. SQLite-backed storage. 7 time ranges (1h to 1y).
+  Older/Newer navigation. Configurable import/export electricity tariffs.
+- **Headless server mode**: Run without a window on Linux
+  (`--headless`, `--port`, `--dist`).
+- **98 Rust unit tests**.
 
 ### Fixed
 
-- **Corrupted daily energy counters sanitized**: The six `today_*_kwh` fields (solar,
-  import, export, charge, discharge, consumption) are now sanitized before reaching
-  the frontend or history database. Values outside 0–1000 kWh or jumping by >50 kWh
-  between consecutive polls are replaced with the previous known-good value. This
-  prevents garbage register reads (e.g. IR(35)=32230 → 3223 kWh) from appearing as
-  absurd spikes on the Home Energy chart.
-- **Frontend spike detection for energy fields**: Added spike thresholds (50 kWh) for
-  all six `today_*_kwh` fields in the chart spike-removal logic, so any garbage data
-  that bypasses backend sanitization is still caught before rendering.
-- **Transparent overlay on cost charts**: Cost charts now show a "data may be
-  inaccurate" banner as a known-issue warning until the cost calculation is fixed.
+- **Windows builds**: Frontend now served correctly in installed apps.
 
-## [0.8.0] - 2026-05-30
+## [0.4.0] — May 2026
+
+## [0.3.0] — May 2026
+
+- Non-technical README with download links and quick start guide.
+- DESIGN.md with architecture, protocol, and API reference.
+- App version shown in Settings → About.
+- Energy flow diagram: Home on left, Grid on right.
+
+## [0.2.0] — May 2026
+
+- **Correct Modbus write protocol**: Now uses function code 6 with device
+  address 0x11 (was 0x10 with 0x32). Per GivEnergy reference library.
+- **Immediate write execution**: Control changes applied as soon as queued,
+  not after the next poll cycle.
+- **Write-safe whitelist**: Only known-safe registers can be written.
+- **Stale frame drain**: Prevents corrupted reads after writes.
+- **Faster failure on stubborn registers**: 6 retries with 2s delay
+  (previously exponential backoff could block for minutes).
+- **No more panic on port bind failure**: Logs error and continues.
+- **All CI checks passing**: lint, typecheck, 94 Rust tests.
+
+## [0.1.0] — May 2025
 
 ### Added
 
-- **Peak/off-peak tariff support**: Cost charts on the History page now support
-  separate peak and off-peak electricity rates with configurable time windows.
-  Settings page shows peak rate, off-peak rate, off-peak start time, and off-peak
-  end time for both import and export tariffs.
-- **Auto-winter persistence**: The original `enable_charge_target` and `target_soc`
-  register values are now persisted to disk before winter mode activates. If the
-  app restarts while winter mode is active, the original values are restored from
-  disk so they can be written back when the battery warms up.
-- **History time window alignment**: History queries now align to hour boundaries
-  (1h/6h ranges) or day boundaries (24h+ ranges) instead of using raw wall-clock
-  offsets, ensuring consistent data windows across page navigation.
-
-### Changed
-
-- Window height reduced from 1160 to 1024 for better multi-monitor compatibility.
-- Tariff config now stored as structured objects (`TariffConfig` with peak/off-peak
-  rates and times) rather than a single flat rate, sent via `import_tariff_config`/
-  `export_tariff_config` in the settings API.
-
-## [0.7.0] - 2026-05-30
-
-### Added
-
-- **Connected clients display**: The Network Access section on the Settings page now shows
-  all connected WebSocket clients with their IP addresses. Local connections (127.0.0.1 or
-  the machine's own LAN IP) are labelled "This device".
-- **FAQ.md**: Common problems guide covering firewall settings, LAN access, macOS downloads
-  (use x64.dmg even on Apple Silicon), network scanning, and finding your inverter's IP.
-- **Firewall/connectivity hint**: The "Waiting for data" screen on the Status and Battery pages
-  now shows a secondary message suggesting to restart the app and check firewall settings,
-  with a link to the FAQ.
-
-### Fixed
-
-- **LAN access in dev mode**: The Axum dev server now serves the built frontend from `dist/`,
-  so LAN devices can access the dashboard at `http://<LAN-IP>:7337` instead of getting a 404.
-- **Network Access shows LAN IP**: The Settings page Network Access section now displays the
-  machine's actual LAN IP (e.g. `192.168.1.x:7337`) instead of `127.0.0.1:7337`. The LAN IP
-  is detected from physical network interfaces (excludes Docker, WSL, and virtual adapters).
-
-## [0.6.0] - 2026-05-29
-
-### Added
-
-- **Developer Mode**: New toggle on the Settings page that reveals a Logs page
-  in the navigation bar. Logs show captured stdout/stderr output from the
-  backend in a scrollable, filterable terminal-style view.
-- **Log capture layer**: A `tracing-subscriber` layer captures formatted log
-  events into a 2000-entry ring buffer, exposed via `GET /api/logs`.
-- Log viewer supports text filtering, level filtering (ERROR/WARN/INFO/DEBUG),
-  auto-scroll with manual scroll-to-bottom button, and periodic polling.
-
-### Fixed
-
-- **Network discovery protocol filtering**: The network scanner now sends a
-  minimal GivEnergy Modbus read request to each candidate device and verifies
-  the response contains the GivEnergy magic transaction ID (0x5959). Devices
-  that have port 8899 open but don't speak the GivEnergy Modbus protocol are
-  now filtered out from scan results.
-
-## [0.5.5] - 2026-05-29
-
-### Fixed
-
-- **Live snapshot sanitization**: Garbled register values are now corrected *before*
-  reaching the frontend, not just filtered from history. When a reading is physically
-  impossible (battery power >10kW, SOC=0 with live power, SOC=100 while charging),
-  the previous known-good value is used instead. Warns to the log when corrections happen.
-- Covers: battery power, SOC, grid power, solar power, and home power — all clamped
-  to residential system limits with fallback to the previous snapshot.
-
-## [0.5.4] - 2026-05-29
-
-### Fixed
-
-- **Copy URL button**: Uses `execCommand('copy')` fallback for non-HTTPS (LAN) contexts
-  where the Clipboard API is unavailable. Button now stays within panel bounds with
-  `shrink-0` and URL text truncates with ellipsis on narrow screens.
-- **Removed "QR code coming soon" placeholder** from Settings → Network Access.
-- **History data cleanup**: Purged 8 garbled entries — impossible battery power readings
-  (20kW+), SOC=100 spikes, and zero-power readings during active charging.
-- **BMS SOC validation tightened**: Values outside 1–99 and >30 points from inverter SOC
-  are now rejected before recording to history.
-
-### Changed
-
-- **History guard**: Also rejects entries with `|battery_power| > 10000W` (physically
-  impossible for residential systems).
-
-## [0.5.3] - 2026-05-29
-
-### Fixed
-
-- **Battery SOC spike to 100%**: BMS module SOC (IR 100) can return garbage values including
-  100%. Now validates BMS SOC against inverter SOC (IR 59) — only overrides when within ±30
-  points and the value is 1–99.
-- **Energy flow diagram z-order**: Cyan animated flow lines could render behind gray track
-  lines. Split into two-pass rendering: all gray tracks first, then all animated lines on top.
-- **History guard tightened**: Also rejects SOC=100 readings when battery is actively charging
-  at >500W (physically impossible).
-- **Purged 2 more garbage SOC=100 entries** from history database.
-
-## [0.5.2] - 2026-05-29
-
-### Fixed
-
-- **Battery SOC graph spikes to zero**: IR(59) intermittently returns 0 from the inverter.
-  Now uses the more reliable BMS module SOC (IR 100) when available.
-- **History recording of garbage data**: Snapshots with SOC=0 but live power telemetry
-  are no longer written to the history database.
-- **Chart rendering of missing data**: Frontend now uses `connectNulls` and treats missing
-  data points as gaps instead of zero, preventing visual dips.
-- **Purged 51 bad zero-SOC readings** from existing history database (52% of all records).
-
-## [0.5.1] - 2026-05-29
-
-### Fixed
-
-- Charge/discharge schedule slot editor: Start and End time pickers no longer overlap
-  on narrow screens. Stacked vertically instead of side-by-side grid.
-
-## [0.5.0] - 2026-05-29
-
-### Added
-
-- History page with 5 metric tabs (Battery, Solar, Grid, Home, Cost) and time-series charts
-- SQLite-backed history storage (`~/.givenergy-local/history.db`) — one row per poll cycle
-- Aggregated history API endpoint (`GET /api/history?range=24h&fields=soc,battery_power&offset=0`)
-- 7 time range selectors (1h, 6h, 24h, 7d, 30d, 6m, 1y) with Older/Newer navigation
-- Cost charts using configurable import/export electricity tariffs (£/kWh)
-- Energy tariff settings (import/export rates) on the Settings page
-- Headless server mode for Linux (`--headless`, `--port`, `--dist` CLI flags)
-- 98 Rust unit tests (4 new history tests)
-
-### Fixed
-
-- Windows production builds now serve the frontend correctly from the Axum server
-  using Tauri's resource bundling (`bundle.resources`). Previously the relative
-  `../dist` path resolved to a non-existent directory in installed apps, causing
-  "127.0.0.1 page can't be found" or "Discovery failed — is the backend running?"
-  errors.
-
-## [0.4.0] - 2026-05-29
-
-## [0.3.0] - 2026-05-29
-
-### Added
-
-- Non-technical README with download links and quick start guide
-- DESIGN.md with full architecture, protocol, and API reference
-- App version shown in Settings → About (injected at build time from package.json)
-- GitHub repo description, homepage, and topics (searchable)
-
-### Changed
-
-- README.md rewritten for end users — technical details moved to DESIGN.md
-- AGENTS.md updated to reflect current architecture (write protocol, Notify, enable flag gating)
-- Energy flow diagram: Home on left, Grid on right
-
-## [0.2.0] - 2026-05-29
-
-### Added
-
-- Correct GivEnergy Modbus write protocol: function code 6 (Write Single Register) with
-  device address 0x11, per the givenergy-modbus reference library
-- Immediate write execution: control changes are applied as soon as queued, not after
-  the next poll cycle (using async notification)
-- Write-safe register whitelist aligned with givenergy-modbus reference
-
-### Changed
-
-- Charge/discharge slot clearing now writes 0 (per reference library) instead of
-  sentinel value 60
-- Slot enabled/disabled state is now gated by the global `enable_charge`/`enable_discharge`
-  flags — slots show as disabled when the schedule is turned off, even if individual
-  register writes failed
-- 00:00–00:00 time slots now treated as disabled (matches reference library convention)
-- Energy flow diagram: swapped Home and Grid positions
-
-### Fixed
-
-- Write protocol was using function code 0x10 (Write Multiple) with device address 0x32 —
-  the dongle only reliably supports function code 6 with address 0x11 for writes
-- Stale frame drain before and after writes to prevent poll read failures
-- Fast failure on stubborn registers (6 retries, 2s delay) — previously exponential backoff
-  could block the poll loop for minutes
-- `apiPost` now checks HTTP response status — control errors surface to the user
-  instead of being silently swallowed (code review #4)
-- HTTP server no longer panics on port bind failure — logs error and returns
-  gracefully (code review #6)
-- Response CRC validation is now lenient — logged but not rejected — matching
-  the reference library which notes response CRC algorithm is unknown (code review #3)
-- Frontend ESLint and TypeScript strict-mode compliance
-- All CI checks now pass: lint, typecheck, Rust tests (94 passing)
-
-## [0.1.0] - 2025-05-28
-
-### Added
-
-- Real-time inverter monitoring: solar, battery, grid, home consumption
-- Radial energy flow diagram with live power flows
-- Battery page with per-module breakdown (cell voltages, temperatures, SOC, cycles)
-- Battery mode control: Eco, Timed Demand, Timed Export, Pause
-- Charge/discharge schedule management (time slots + SOC targets)
-- SOC reserve, charge rate, and discharge rate controls
-- Auto-discovery of dongle serial number from response frame header
-- Network scanner for discovering inverters on the local LAN
-- WebSocket real-time data streaming to connected clients
-- Persistent settings (~/.givenergy-local/settings.json)
-- 94 Rust unit tests passing
-
-### Fixed
-
-- Modbus polling resilience: inter-request delay (150ms), stale response retry (4 attempts),
-  transient error tolerance (3 consecutive failures before reconnect)
-- TCP buffer drain after connect to flush stale dongle responses
-- 500ms post-connect delay for slow dongle initialisation
-- Settings partial update: Connect button no longer clobbers refresh interval
-- Settings version tracking: poll loop detects host changes and reconnects immediately
+- Real-time inverter monitoring: solar, battery, grid, home consumption.
+- Radial energy flow diagram with live power flows.
+- Battery page with per-module breakdown (cell voltages, temps, SOC, cycles).
+- Battery mode control: Eco, Timed Demand, Timed Export, Pause.
+- Charge/discharge schedule management with time slots and SOC targets.
+- SOC reserve, charge rate, and discharge rate controls.
+- Auto-discovery of dongle serial from response frame header.
+- Network scanner for finding inverters on the LAN.
+- WebSocket real-time data streaming.
+- Persistent settings (`~/.givenergy-local/settings.json`).
+- 94 Rust unit tests.
+- Modbus polling resilience, stale response retry, TCP buffer drain.

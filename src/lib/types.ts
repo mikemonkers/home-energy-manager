@@ -48,6 +48,7 @@ export interface InverterSnapshot {
   inverter_serial: string;
   firmware_version: string;
   dsp_firmware_version: string;
+  dc_dsp_firmware_version: string;
   device_type: string;
   device_type_display: string;
   device_type_code: string;

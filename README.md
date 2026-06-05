@@ -101,6 +101,45 @@ Home Energy Manager connects directly to your inverter's WiFi or Ethernet data a
 
 ---
 
+## Supported Inverters
+
+Home Energy Manager works with all known GivEnergy inverter models, but some
+have more controls available than others. Here's a quick guide:
+
+### Full control ✅
+
+*Read live data, set charge/discharge schedules, adjust limits, change modes*
+
+| Model | Notes |
+|---|---|
+| **Gen 2 Hybrid** | Standard home hybrid inverter |
+| **Gen 3 Hybrid** (standard, 8kW, 10kW) | Most common. Extended 10-slot schedules on firmware ≥ 303 |
+| **Gen 4 Hybrid** | Latest generation |
+
+### Read + basic controls ✅
+
+*Read live data, change charge/discharge power limits, adjust SOC reserve and modes — but schedules use the simpler single-slot layout*
+
+| Model | Notes |
+|---|---|
+| **Gen 1 Hybrid** | Older generation, 1 charge + 1 discharge slot |
+| **AC Coupled** (standard & Mk2) | Retrofit battery system. Charge/discharge limits are 1-100% (not 0-50%). 1 charge + 1 discharge slot. |
+
+### Read-only 📡
+
+*Read all live data (solar, grid, battery, energy totals) — control and schedule editing not yet implemented*
+
+| Model | Notes |
+|---|---|
+| **Three Phase** (11kW) | Real-time monitoring works. Uses a different register layout for controls — coming in a future update. |
+| **AC Three Phase** | Same as Three Phase |
+| **HV Gen 3** | High-voltage hybrid |
+| **All-in-One** (5kW, 6kW, 8kW, 10kW) | Commercial all-in-one units |
+| **All-in-One Hybrid** | Combined hybrid + AIO |
+
+> **Not sure which model you have?** Open the app, connect to your inverter,
+> and check the Inverter tab — it shows the detected model name and details.
+
 ## How it works
 
 ```
