@@ -1643,6 +1643,17 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     );
                                 }
 
+                                // Once the model is identified, freeze the device type in the
+                                // snapshot to prevent a corrupted ARM firmware register read (HR 21)
+                                // from flipping the displayed model on subsequent polls. The
+                                // dongle occasionally returns garbage for any register.
+                                if let Some(kdt) = known_device_type {
+                                    snapshot.device_type = kdt;
+                                    snapshot.device_type_display = kdt.display_name().to_string();
+                                    snapshot.max_charge_slots = kdt.max_charge_slots();
+                                    snapshot.max_discharge_slots = kdt.max_discharge_slots();
+                                }
+
                                 // --- Battery BMS module reads ---
                                 //
                                 // Per givenergy-modbus reference, LV batteries expose BMS data

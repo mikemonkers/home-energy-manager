@@ -528,7 +528,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
               </linearGradient>
             ))}
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+          <CartesianGrid strokeDasharray="4 4" stroke="var(--color-grid-stroke)" strokeWidth={2} />
           <XAxis
             dataKey="t"
             type="number"

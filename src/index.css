@@ -11,6 +11,7 @@
   --color-flow-active: var(--app-flow-active);
   --color-text-primary: var(--app-text-primary);
   --color-text-secondary: var(--app-text-secondary);
+  --color-grid-stroke: var(--app-grid-stroke);
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
 }
@@ -32,6 +33,7 @@
   --app-scrollbar-thumb-hover: #30363D;
   --app-range-track: #30363D;
   --app-range-thumb-border: #0D1117;
+  --app-grid-stroke: #6E7681;
 }
 
 [data-theme="light"] {
@@ -50,6 +52,7 @@
   --app-scrollbar-thumb-hover: #AFB8C1;
   --app-range-track: #D0D7DE;
   --app-range-thumb-border: #F6F8FA;
+  --app-grid-stroke: #57606A;
 }
 
 body {

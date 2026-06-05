@@ -240,10 +240,18 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // Compute consumption today from energy balance (matching the GE app).
     // IR(35) is AC charge today, NOT house consumption — the reference library
     // confirmed this via sentinel cross-correlation (#174). Single-phase inverters
-    // have no native consumption register, so consumption is derived:
+    // (Gen1/Gen2/Gen3Hybrid) have NO native consumption register, so consumption
+    // is derived from the energy balance formula:
     //   consumption = solar_today + import_today - export_today - ac_charge_today
     // Battery DC charge/discharge throughput nets out and is not a term.
-    if !(snap.device_type.needs_three_phase_input_blocks() && snap.today_consumption_kwh > 0.0) {
+    // Three-phase/HV models expose e_load_today at IR(1396-1397) — when that block
+    // was decoded, the direct register value is preserved instead of computing.
+    // The direct read is detected by checking whether today_ac_charge_kwh and
+    // today_consumption_kwh came from different registers (they are set to the same
+    // IR(35) value in decode_input_0_59, but diverge after decode_input_1360_1413).
+    let has_direct_consumption =
+        snap.today_ac_charge_kwh != snap.today_consumption_kwh && snap.today_consumption_kwh > 0.0;
+    if !has_direct_consumption {
         snap.today_consumption_kwh = snap.today_solar_kwh + snap.today_import_kwh
             - snap.today_export_kwh
             - snap.today_ac_charge_kwh;
@@ -322,14 +330,23 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.inverter_temperature = get_reg(data, 41) as f32 * 0.1; // IR(41): t_inverter_heatsink (/10 °C)
 
     // -- Energy totals (all in /10 kWh) --
-    // Only include PV2's daily energy if PV2 has panels connected (voltage > 0).
-    // IR(19) can return stale or garbage data when no second PV string is present.
-    let pv2_today = if snap.pv2_voltage > 0.0 {
-        get_reg(data, 19) as f32
+    // Prefer e_pv_total at IR(11-12) which is a single uint32 combining both PV
+    // strings — more stable than summing two separate uint16 registers (IR(17)+IR(19))
+    // that can each be independently corrupted by the dongle.
+    // Falls back to the per-string sum when the uint32 register is unavailable (0).
+    let pv_total_u32 = uint32(get_reg(data, 11), get_reg(data, 12)); // IR(11-12): e_pv_total
+    if pv_total_u32 > 0 {
+        snap.today_solar_kwh = pv_total_u32 as f32 * 0.1;
     } else {
-        0.0
-    };
-    snap.today_solar_kwh = (get_reg(data, 17) as f32 + pv2_today) * 0.1; // IR(17)+IR(19): pv1+pv2 day
+        // Fallback: only include PV2's daily energy if PV2 has panels connected.
+        // IR(19) can return stale or garbage data when no second PV string is present.
+        let pv2_today = if snap.pv2_voltage > 0.0 {
+            get_reg(data, 19) as f32
+        } else {
+            0.0
+        };
+        snap.today_solar_kwh = (get_reg(data, 17) as f32 + pv2_today) * 0.1; // IR(17)+IR(19)
+    }
     snap.today_import_kwh = get_reg(data, 26) as f32 * 0.1; // IR(26): e_grid_in_day
     snap.today_export_kwh = get_reg(data, 25) as f32 * 0.1; // IR(25): e_grid_out_day
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
