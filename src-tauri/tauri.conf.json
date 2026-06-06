@@ -20,6 +20,7 @@
         "fullscreen": false
       }
     ],
+    "enableGTKAppId": true,
     "security": {
       "csp": null
     }
@@ -54,7 +55,9 @@
         "provides": ["giv-energy-local"],
         "conflicts": ["giv-energy-local"],
         "replaces": ["giv-energy-local"],
+        "desktopTemplate": "linux/home-energy-manager.desktop.hbs",
         "files": {
+          "/usr/share/applications/com.givenergy.local.desktop": "linux/com.givenergy.local.desktop",
           "/usr/share/applications/givenergy-local.desktop": "linux/givenergy-local.desktop"
         },
         "postInstallScript": "linux/refresh-desktop-cache.sh",
@@ -64,7 +67,9 @@
         "provides": ["GivEnergy-Local"],
         "conflicts": ["GivEnergy-Local"],
         "obsoletes": ["GivEnergy-Local"],
+        "desktopTemplate": "linux/home-energy-manager.desktop.hbs",
         "files": {
+          "/usr/share/applications/com.givenergy.local.desktop": "linux/com.givenergy.local.desktop",
           "/usr/share/applications/givenergy-local.desktop": "linux/givenergy-local.desktop"
         },
         "postInstallScript": "linux/refresh-desktop-cache.sh",

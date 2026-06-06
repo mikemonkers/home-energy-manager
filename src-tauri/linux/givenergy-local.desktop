@@ -1,10 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Home Energy Manager
-Comment=Local monitoring and control for GivEnergy solar/battery inverters
+Name=Home Energy Manager (X11 fallback)
+Comment=
 Exec=givenergy-local
 Icon=givenergy-local
 StartupWMClass=givenergy-local
 Terminal=false
-Categories=Utility;
 NoDisplay=true
