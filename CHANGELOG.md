@@ -9,74 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Changing the refresh rate no longer disconnects from the inverter**:
-  The Settings endpoint was bumping the settings version on every update,
-  which the poll loop interprets as "connection-affecting fields changed —
-  tear down TCP and reconnect". For interval-only changes this was
-  overkill — the poll loop already detects interval changes inside its
-  sleep watcher. The endpoint now compares the previous and new
-  host/port/serial and only bumps the version when one of those actually
-  changed. Interval-only updates still wake the poll loop early so the new
-  rate applies within ~1 second instead of after the current poll cycle.
-- **Debian toolbar/dock icon matching**: The `.deb`/`.rpm` bundles now install
-  an additional hidden `givenergy-local.desktop` alias and refresh the desktop
-  and hicolor icon caches after install/remove. This gives Debian/GNOME-style
-  desktops a stable desktop ID matching the running binary/WM class, avoiding
-  a generic toolbar icon after the user-facing rename to Home Energy Manager.
-- **Tests no longer risk writing real user settings**: `Settings::load()` no
+- **Changing the refresh rate no longer kicks you off the inverter**:
+  Previously, every time you tweaked the polling interval the app would tear
+  down the TCP connection and reconnect — because it treated *any* settings
+  change as a host/port/serial change. Now the app actually checks what
+  changed: if you just adjusted the refresh rate, it keeps the connection
+  alive and picks up the new interval within a second. No more pointless
+  disconnects for a simple tweak.
+- **Debian toolbar icon now matches the app name**: On Debian/GNOME desktops,
+  the dock icon was showing a generic placeholder because the desktop file ID
+  went out of sync after the rename to Home Energy Manager. The app now
+  installs a hidden alias to bridge the gap — your dock icon should actually
+  look right now.
+- **Tests no longer touch your real settings file**: The settings loader no
   longer auto-creates `~/.givenergy-local/settings.json` as a side effect, and
-  tests that exercise real settings persistence now use a shared isolated
-  temporary `GIVENERGY_LOCAL_CONFIG_DIR` helper.
+  tests that need disk I/O now use an isolated temp directory. No more test
+  runs accidentally messing with your live config.
 
 ## [0.13.6] - 2026-06-06
 
 ### Fixed
 
-- **Write-register frames were malformed** ([#8](https://github.com/psylsph/home-energy-manager/issues/8)):
-  Function-code-6 writes (Cosy force-charge entry/exit, charge/discharge slot
-  programming, mode switches, charge limits) were sending a 36-byte frame
-  with a double CRC — the transparent-protocol CRC appended by `encode_frame`
-  plus an extra write-specific CRC the client was prepending into the payload.
-  Real dongles silently ignored these malformed frames, so every write timed
-  out while reads continued working. Fixed by passing only `register + value`
-  as the inner payload and letting `encode_frame` append the single correct
-  CRC over `device_address + function_code + register + value`. New regression
-  test asserts the frame is exactly 34 bytes with MBAP length 28.
-- **Cosy exit was writing the wrong discharge state**: `CosyExit` enabled
-  timed discharge (`HR_ENABLE_DISCHARGE = 1`) on exit, which depending on
-  `HR_BATTERY_POWER_MODE` could land the inverter in Timed Demand or Timed
-  Export instead of Eco. CosyExit now sets `HR_ENABLE_DISCHARGE = 0` and
-  `HR_BATTERY_POWER_MODE = 1`, restoring normal Eco self-consumption.
-- **Cosy stop not visible for slot 2/3**: `snapshot.cosy_active` was being
-  stamped before the cosy state machine ran, so the broadcast carried the
-  pre-transition value for one cycle when a slot ended. The flag is now
-  stamped after the state machine runs, so the UI reflects the exit on the
-  same poll cycle that fires CosyExit. `cosy_active_slot` boundary tests
-  now explicitly cover slot 1, 2, and 3 end-times.
-- **Cosy crash/restart leaves inverter force-charging**: `cosy_active` was
-  in-memory only, so a crash mid-slot followed by a restart after the slot
-  ended would leave the inverter stuck in ForceCharge. The flag is now
-  persisted to `settings.json` as `cosy_active_persisted` on every
-  transition; `AppState::new` seeds the in-memory flag from this persisted
-  value on startup, and the normal cosy state machine fires CosyExit on the
-  first poll if the persisted flag is `true` but the current time is outside
-  any Cosy slot.
-- **Noisy daily-energy warnings**: Tiny one-tick decreases in daily energy
-  counters (e.g. 7.6 → 7.5 kWh) are now treated as read noise rather than
-  register corruption. The previous value is carried forward silently at
-  debug level (no warning logged, no immediate re-poll triggered). Material
-  decreases (≥0.15 kWh) still log a warning and force a re-poll.
+- **Force-charge, schedule slots, and mode switches actually work again**:
+  Every write command sent to the inverter was 36 bytes instead of the
+  correct 34 — a double CRC that the dongle silently ignored. Writes timed
+  out, nothing happened, but reads still worked so the app looked fine. The
+  fix removes the extra CRC, frames are now exactly 34 bytes, and your
+  commands actually go through.
+- **Cosy Exit no longer traps you in the wrong mode**: When a Cosy charge
+  slot finished, the app set `enable_discharge = 1`, which could land your
+  inverter in Timed Demand or Timed Export instead of normal Eco
+  self-consumption. Cosy exit now properly restores Eco mode every time.
+- **Cosy badge now disappears on time**: The "Cosy Charging" badge was
+  lingering for one extra poll cycle after a slot ended because the code
+  recorded the flag before the state machine ran. Now the badge vanishes
+  on the same cycle the slot finishes.
+- **Cosy survives a crash**: Cosy state was only kept in memory, so if the
+  app crashed mid-slot you'd be stuck in ForceCharge. Now the state is saved
+  to disk on every transition. If the app restarts after a crash during a
+  slot that has since ended, it fires CosyExit on the very first poll.
+- **Tiny daily energy dips no longer trigger false alarms**: The dongle
+  sometimes bounces by 0.1 kWh due to 16-bit register precision. The app was
+  treating any decrease as register corruption — logging warnings and
+  forcing re-polls. Fluctuations under 0.15 kWh are now silently carried
+  forward. Material dips still get flagged.
 
 ### Added
 
-- **DEBUG logging for FC6 writes**: Write requests now emit a
-  `Sent write request, awaiting ack` line with `req_len`, `mbap_len`, and a
-  hex preview, so the developer console can confirm whether outgoing writes
-  are correctly shaped (34 bytes / MBAP len 28) versus the previously broken
-  36-byte / MBAP-len-30 form.
-- **Linux uninstall instructions** in the README (`sudo apt purge
-  home-energy-manager`), with a note that `~/.givenergy-local` is preserved
-  and a warning that deleting it also removes `history.db`.
+- **DEBUG logging for write attempts**: The developer console now shows the
+  exact frame the app sends — length, MBAP length, and a hex preview — so
+  you can confirm writes are the correct size. Handy if we ever break writes
+  again.
+- **Linux uninstall instructions in the README**: `sudo apt purge
+  home-energy-manager`. Your settings and history are kept; delete
+  `~/.givenergy-local` separately if you want them gone too.
 
 ## [0.13.5] - 2026-06-06
 
