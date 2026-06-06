@@ -39,19 +39,15 @@ const BATTERY_MODE_LABELS: Record<string, string> = {
 /** force charge or force discharge is active.                         */
 function modeDisplayLabel(
   mode: string, cosyActive: boolean, cosyEnabled: boolean,
-  enableCharge: boolean, enableChargeTarget: boolean, enableDischarge: boolean,
-  deviceTypeCode: string,
+  enableCharge: boolean, enableDischarge: boolean, inChargeWindow: boolean,
 ): string {
   if (cosyActive) return 'Cosy';
   if (cosyEnabled && (mode === 'eco' || mode === 'eco_paused')) return 'Cosy';
-  // Check if force charge is active: single-phase needs both flags,
-  // three-phase uses HR 1123 directly which sets enable_charge alone.
-  const isThreePhase = deviceTypeCode.startsWith('40') || deviceTypeCode.startsWith('41')
-    || deviceTypeCode.startsWith('60') || deviceTypeCode.startsWith('81')
-    || deviceTypeCode.startsWith('82');
-  const forceChargeActive = isThreePhase
-    ? enableCharge
-    : enableCharge && enableChargeTarget;
+  // Force charge is active only when the master charge-enable flag is set
+  // AND the current time falls within an active charge slot window. The
+  // enable_charge register (HR 96 / HR 1123) is a sticky schedule-enable
+  // flag, not an instantaneous "charging now" signal.
+  const forceChargeActive = enableCharge && inChargeWindow;
   const forceDischargeActive = enableDischarge;
   if (forceChargeActive || forceDischargeActive) return 'Override';
   return BATTERY_MODE_LABELS[mode] ?? mode;
@@ -77,6 +73,16 @@ export default function BatteryPage() {
   const s = snapshot;
   const color = socColor(s.soc);
   const storedKwh = (s.soc / 100) * s.battery_capacity_kwh;
+  const chargeSlotActive = (s.charge_slots ?? []).some(slot => {
+    if (!slot.enabled) return false;
+    const now = new Date();
+    const curMin = now.getHours() * 60 + now.getMinutes();
+    const startMin = slot.start_hour * 60 + slot.start_minute;
+    const endMin = slot.end_hour * 60 + slot.end_minute;
+    return startMin < endMin
+      ? curMin >= startMin && curMin < endMin
+      : curMin >= startMin || curMin < endMin;
+  });
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl mx-auto">
@@ -128,7 +134,7 @@ export default function BatteryPage() {
             <span className="text-text-secondary">Temperature</span>
             <span className="text-text-primary font-mono text-right">{formatTemp(s.battery_temperature)}</span>
             <span className="text-text-secondary">Mode</span>
-            <span className="text-text-primary font-mono text-right">{modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_charge_target, s.enable_discharge, s.device_type_code)}</span>
+            <span className="text-text-primary font-mono text-right">{modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive)}</span>
             <span className="text-text-secondary">Reserve</span>
             <span className="text-text-primary font-mono text-right">{formatPercent(s.battery_reserve)}</span>
             <span className="text-text-secondary">Charged Today</span>

@@ -209,7 +209,7 @@ function ScheduleSlotEditor({
                 type="range"
                 min={4}
                 max={100}
-                step={5}
+                step={1}
                 value={local.target_soc}
                 onChange={(e) => setLocal((l) => ({ ...l, target_soc: Number(e.target.value) }))}
                 className="w-full"
@@ -358,7 +358,7 @@ function AutoWinterSection() {
                 type="range"
                 min={4}
                 max={100}
-                step={5}
+                step={1}
                 value={targetSoc}
                 onChange={(e) => setTargetSoc(Number(e.target.value))}
                 className="w-full"
@@ -584,7 +584,7 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
                       type="range"
                       min={4}
                       max={100}
-                      step={5}
+                      step={1}
                       value={slot.target_soc}
                       onChange={(e) => {
                         const next = [...slots];
@@ -1378,16 +1378,48 @@ export default function ControlPage() {
 
   // Derive force charge/discharge state from snapshot registers, with
   // local override so the toggle feels instant (doesn't wait for next poll).
-  // For single-phase: force charge when both enable_charge and enable_charge_target are set.
+  // Force charge is active when enable_charge (master schedule flag) is set
+  // AND the current time falls within an active charge slot window. On
+  // three-phase, enable_charge maps to HR 1123 (dedicated force-charge flag).
+  // On single-phase/AC, it maps to HR 96 (schedule enable). In both cases,
+  // the window gate is the definitive "charging now" signal.
   // For three-phase: enable_charge alone suffices (HR 1123 is the force-charge flag).
-  const snapshotForceCharge = isThreePhaseLimitModel
-    ? (snapshot?.enable_charge ?? false)
-    : (snapshot?.enable_charge && snapshot?.enable_charge_target) ?? false;
+  const inChargeWindow = (snapshot?.charge_slots ?? []).some(slot => {
+    if (!slot.enabled) return false;
+    const now = new Date();
+    const curMin = now.getHours() * 60 + now.getMinutes();
+    const startMin = slot.start_hour * 60 + slot.start_minute;
+    const endMin = slot.end_hour * 60 + slot.end_minute;
+    return startMin < endMin
+      ? curMin >= startMin && curMin < endMin
+      : curMin >= startMin || curMin < endMin;
+  });
+  // Force charge is active only when the master charge-enable flag is set
+  // AND the current time falls within an active charge slot window. Outside
+  // the window the inverter is idle (eco or discharging), not force-charging.
+  // This prevents the button staying highlighted when a charge schedule is
+  // configured but no slot is active — enable_charge (HR 96 / HR 1123) is a
+  // sticky schedule-enable flag, not an instantaneous "charging now" signal.
+  const snapshotForceCharge = (snapshot?.enable_charge ?? false) && inChargeWindow;
   const [localForceChargeOverride, setLocalForceChargeOverride] = useState<boolean | null>(null);
   const forceChargeActive = localForceChargeOverride ?? snapshotForceCharge;
   const [forceChargeLoading, setForceChargeLoading] = useState(false);
-  // Force discharge is active when enable_discharge is set.
-  const snapshotForceDischarge = snapshot?.enable_discharge ?? false;
+  // Force discharge is active only when the schedule is enabled AND the
+  // current time falls within an active discharge slot window. Outside the
+  // window the inverter is idle (eco), not force-discharging. This prevents
+  // the button staying highlighted during Timed Demand/Export when no slot
+  // is active.
+  const inDischargeWindow = (snapshot?.discharge_slots ?? []).some(slot => {
+    if (!slot.enabled) return false;
+    const now = new Date();
+    const curMin = now.getHours() * 60 + now.getMinutes();
+    const startMin = slot.start_hour * 60 + slot.start_minute;
+    const endMin = slot.end_hour * 60 + slot.end_minute;
+    return startMin < endMin
+      ? curMin >= startMin && curMin < endMin
+      : curMin >= startMin || curMin < endMin; // overnight slot
+  });
+  const snapshotForceDischarge = (snapshot?.enable_discharge ?? false) && inDischargeWindow;
   const [localForceDischargeOverride, setLocalForceDischargeOverride] = useState<boolean | null>(null);
   const forceDischargeActive = localForceDischargeOverride ?? snapshotForceDischarge;
   const [forceDischargeLoading, setForceDischargeLoading] = useState(false);
@@ -1424,6 +1456,21 @@ export default function ControlPage() {
     const timeout = setTimeout(() => setRequestedMode(null), 30_000);
     return () => clearTimeout(timeout);
   }, [requestedMode]);
+
+  // Force-discharge local override auto-clear after 10s. Prevents stale
+  // overrides from previous interactions or failed writes from sticking.
+  useEffect(() => {
+    if (localForceDischargeOverride == null) return;
+    const timeout = setTimeout(() => setLocalForceDischargeOverride(null), 10_000);
+    return () => clearTimeout(timeout);
+  }, [localForceDischargeOverride]);
+
+  // Force-charge local override auto-clear after 10s (same pattern).
+  useEffect(() => {
+    if (localForceChargeOverride == null) return;
+    const timeout = setTimeout(() => setLocalForceChargeOverride(null), 10_000);
+    return () => clearTimeout(timeout);
+  }, [localForceChargeOverride]);
 
   // Use requested mode unless the inverter has already caught up
   const effectiveMode = (requestedMode && requestedMode !== currentMode)
@@ -1685,8 +1732,7 @@ export default function ControlPage() {
                       (registers HR 94-95) and vice versa (registers HR 31-32). The
                       underlying schedule data is identical — only the labels differ.
                       If your schedule appears in a different slot than you expected,
-                      this is why. See{' '}
-                      <a href="https://github.com/psylsph/home-energy-manager/issues/41" target="_blank" rel="noreferrer" className="underline">issue #41</a>.
+                      this is why.
                     </div>
                   )}
                   {isLegacyGen3Fw && (
@@ -1717,7 +1763,7 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule — hidden when cosy or agile mode is enabled */}
+      {/* Section 4: Discharge Schedule — only editable in timed mode */}
       {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
@@ -1738,8 +1784,6 @@ export default function ControlPage() {
                         our <strong>Slot 1</strong> is the cloud&apos;s <strong>Slot 2</strong>{' '}
                         (registers HR 56-57) and vice versa (registers HR 44-45). The
                         underlying schedule data is identical — only the labels differ.
-                        See{' '}
-                        <a href="https://github.com/psylsph/home-energy-manager/issues/41" target="_blank" rel="noreferrer" className="underline">issue #41</a>.
                       </div>
                     )}
                     {isLegacyGen3Fw && (
@@ -1863,7 +1907,7 @@ export default function ControlPage() {
                 type="range"
                 min={0}
                 max={100}
-                step={5}
+                step={1}
                 value={activePowerRate ?? 100}
                 onChange={(e) => setDraftActivePower(Number(e.target.value))}
                 className="flex-1"
