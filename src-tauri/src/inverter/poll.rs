@@ -2479,15 +2479,20 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             consecutive_failures += 1;
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                                 tracing::warn!(
-                                    "Poll read failed ({}/{}): — disconnecting",
+                                    "Poll read failed ({}/{}) — skipping this cycle",
                                     consecutive_failures,
                                     MAX_CONSECUTIVE_FAILURES,
                                 );
-                                break; // tear down connection and reconnect
+                                // Skip the poll cycle instead of tearing down TCP.
+                                // GivEnergy dongles can stay busy for several seconds;
+                                // reconnecting triggers a costly warmup + grace period
+                                // that extends the outage. The next interval will retry.
+                                consecutive_failures = 0;
+                                break; // exit inner loop → sleep for interval → retry
                             }
                             // Transient error — retry after a short pause
                             tracing::debug!(
-                                "Poll read failed ({}/{}): — retrying",
+                                "Poll read failed ({}/{}) — retrying",
                                 consecutive_failures,
                                 MAX_CONSECUTIVE_FAILURES,
                             );
