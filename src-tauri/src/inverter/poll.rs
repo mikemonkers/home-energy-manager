@@ -2216,11 +2216,6 @@ mod tests {
         let _rx = state.tx.subscribe();
     }
 
-    use std::sync::Mutex;
-    /// Serializes tests that touch `GIVENERGY_LOCAL_CONFIG_DIR` so they don't
-    /// race on the env var when the full test suite runs in parallel.
-    static COSY_SETTINGS_TEST_MUTEX: Mutex<()> = Mutex::new(());
-
     /// Cosy crash-recovery: when the app restarts, in-memory `cosy_active`
     /// is seeded from `cosy_active_persisted` in settings. If the persisted
     /// flag is `true` (we crashed mid-Cosy), the cosy state machine on the
@@ -2228,51 +2223,30 @@ mod tests {
     /// or fire CosyExit (if the slot ended while we were down).
     #[test]
     fn cosy_active_seeds_from_persisted_flag() {
-        let _guard = COSY_SETTINGS_TEST_MUTEX.lock().unwrap();
-        // Use a temp config dir so we don't touch the user's real settings.
-        let tmp = std::env::temp_dir().join(format!(
-            "givenergy-test-cosy-seed-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::create_dir_all(&tmp);
-        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &tmp);
+        crate::test_util::with_isolated_config_dir(|| {
+            // Persist cosy_active_persisted=true to settings.
+            persist_cosy_active(true);
+            let state = AppState::new();
+            let seeded = *state.cosy_active.blocking_lock();
 
-        // Persist cosy_active_persisted=true to settings.
-        persist_cosy_active(true);
-        let state = AppState::new();
-        let seeded = *state.cosy_active.blocking_lock();
-
-        // Clean up.
-        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
-        let _ = std::fs::remove_dir_all(&tmp);
-
-        assert!(
-            seeded,
-            "AppState::new should seed cosy_active from cosy_active_persisted"
-        );
+            assert!(
+                seeded,
+                "AppState::new should seed cosy_active from cosy_active_persisted"
+            );
+        });
     }
 
     #[test]
     fn cosy_persist_helper_round_trips_through_disk() {
-        let _guard = COSY_SETTINGS_TEST_MUTEX.lock().unwrap();
-        let tmp = std::env::temp_dir().join(format!(
-            "givenergy-test-cosy-persist-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::create_dir_all(&tmp);
-        std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &tmp);
+        crate::test_util::with_isolated_config_dir(|| {
+            persist_cosy_active(true);
+            let after_true = crate::settings::Settings::load();
+            assert!(after_true.cosy_active_persisted);
 
-        persist_cosy_active(true);
-        let after_true = crate::settings::Settings::load();
-        assert!(after_true.cosy_active_persisted);
-
-        persist_cosy_active(false);
-        let after_false = crate::settings::Settings::load();
-        assert!(!after_false.cosy_active_persisted);
-
-        // Clean up.
-        std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
-        let _ = std::fs::remove_dir_all(&tmp);
+            persist_cosy_active(false);
+            let after_false = crate::settings::Settings::load();
+            assert!(!after_false.cosy_active_persisted);
+        });
     }
 
     #[test]

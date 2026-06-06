@@ -318,6 +318,7 @@ first (avoids the /Applications block entirely), then falls back to /Application
 This is useful for headless/terminal use.
 
 **Known good archs**:
+
 - The aarch64 (ARM64) app works correctly from Desktop and from /Applications
   after one-time Gatekeeper approval
 - The x86_64 (Intel) app crashes silently under Rosetta on macOS 26.5+

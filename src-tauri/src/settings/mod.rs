@@ -265,10 +265,12 @@ impl Settings {
             },
             Err(_) => {
                 log::info!("No settings file found, using defaults");
-                let defaults = Self::default();
-                // Try to create the file for next time
-                let _ = defaults.save();
-                defaults
+                // NOTE: do not auto-save defaults here. A `load()` should be
+                // side-effect-free so tests can call it safely without
+                // polluting the user's real `~/.givenergy-local/` directory.
+                // The directory and file are created on the first explicit
+                // save (e.g. when the user configures a host/IP in Settings).
+                Self::default()
             }
         }
     }

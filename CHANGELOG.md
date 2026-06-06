@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.7] - 2026-06-06
+
+### Fixed
+
+- **Changing the refresh rate no longer disconnects from the inverter**:
+  The Settings endpoint was bumping the settings version on every update,
+  which the poll loop interprets as "connection-affecting fields changed —
+  tear down TCP and reconnect". For interval-only changes this was
+  overkill — the poll loop already detects interval changes inside its
+  sleep watcher. The endpoint now compares the previous and new
+  host/port/serial and only bumps the version when one of those actually
+  changed. Interval-only updates still wake the poll loop early so the new
+  rate applies within ~1 second instead of after the current poll cycle.
+- **Debian toolbar/dock icon matching**: The `.deb`/`.rpm` bundles now install
+  an additional hidden `givenergy-local.desktop` alias and refresh the desktop
+  and hicolor icon caches after install/remove. This gives Debian/GNOME-style
+  desktops a stable desktop ID matching the running binary/WM class, avoiding
+  a generic toolbar icon after the user-facing rename to Home Energy Manager.
+- **Tests no longer risk writing real user settings**: `Settings::load()` no
+  longer auto-creates `~/.givenergy-local/settings.json` as a side effect, and
+  tests that exercise real settings persistence now use a shared isolated
+  temporary `GIVENERGY_LOCAL_CONFIG_DIR` helper.
+
 ## [0.13.6] - 2026-06-06
 
 ### Fixed

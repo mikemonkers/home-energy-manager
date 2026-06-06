@@ -3,6 +3,8 @@ pub mod inverter;
 pub mod modbus;
 pub mod server;
 pub mod settings;
+#[cfg(test)]
+mod test_util;
 
 use history::HistoryDb;
 use inverter::poll::{run_poll_loop, AppState};

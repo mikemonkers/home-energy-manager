@@ -166,6 +166,15 @@ pub async fn update_settings(
 
     let mut settings = state.settings.lock().await;
 
+    // Track whether any connection-affecting field actually changed. Only
+    // host/port/serial require a TCP reconnect — interval changes are picked
+    // up by the poll loop's sleep watcher without dropping the connection,
+    // so they should NOT bump the version (which would force a reconnect and
+    // cause the "changing the refresh rate disconnects" symptom).
+    let prev_host = settings.host.clone();
+    let prev_port = settings.port;
+    let prev_serial = settings.serial.clone();
+
     // Always overwrite host/port/serial when provided.
     if !incoming.host.is_empty() {
         settings.host = incoming.host.clone();
@@ -182,6 +191,10 @@ pub async fn update_settings(
     if incoming.interval_secs > 0 {
         settings.interval_secs = incoming.interval_secs;
     }
+
+    let connection_changed = settings.host != prev_host
+        || settings.port != prev_port
+        || settings.serial != prev_serial;
 
     // Update tariffs if provided
     let current_settings = crate::settings::Settings::load();
@@ -208,12 +221,23 @@ pub async fn update_settings(
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
     });
 
-    // Bump version so the poll loop notices the change and reconnects.
-    settings.version = settings.version.wrapping_add(1);
-    // Wake the poll loop immediately so it detects the version change.
-    // The poll loop checks version at the start of each iteration and after
-    // each sleep tick; without this notification it could sleep up to 1s.
-    state.write_notify.notify_one();
+    // Only bump the version (and wake the poll loop for reconnect) when a
+    // connection-affecting field changed. Interval/tariff updates are picked
+    // up by the sleep-loop interval watcher without dropping the TCP session,
+    // so they must NOT bump the version — that would cause an unnecessary
+    // disconnect every time the user changes the refresh rate.
+    if connection_changed {
+        settings.version = settings.version.wrapping_add(1);
+        // Wake the poll loop immediately so it detects the version change.
+        // The poll loop checks version at the start of each iteration and after
+        // each sleep tick; without this notification it could sleep up to 1s.
+        state.write_notify.notify_one();
+    } else if incoming.interval_secs > 0 {
+        // Interval changed but connection didn't — wake the loop so it picks
+        // up the new interval on the next sleep-loop tick instead of waiting
+        // up to 1 second for the in-loop check to fire.
+        state.write_notify.notify_one();
+    }
 
     // Persist to disk
     let mut persist = crate::settings::Settings::load();
@@ -922,6 +946,7 @@ pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> Json<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::with_isolated_config_dir;
 
     #[test]
     fn three_phase_slot_selection_uses_three_phase_register_commands() {
@@ -1012,5 +1037,65 @@ mod tests {
                 end: 2230
             }
         ));
+    }
+
+    /// Changing only the refresh rate must NOT bump the settings version —
+    /// that would force a full TCP reconnect. The poll loop's sleep watcher
+    /// picks up interval changes without dropping the connection.
+    #[tokio::test]
+    async fn interval_change_does_not_bump_version_or_disconnect() {
+        with_isolated_config_dir(|| async {
+            let state = Arc::new(AppState::new());
+
+            // Seed connection-affecting fields so the test isn't dependent on
+            // whether the user has configured anything yet.
+            {
+                let mut s = state.settings.lock().await;
+                s.host = "192.168.1.50".to_string();
+                s.port = 8899;
+                s.serial = "TEST".to_string();
+                s.interval_secs = 60;
+            }
+            let version_before = state.settings.lock().await.version;
+
+            // POST an interval-only update.
+            let body = serde_json::json!({ "interval_secs": 20 });
+            let _ = update_settings(State(state.clone()), Json(body)).await;
+
+            let s = state.settings.lock().await;
+            assert_eq!(s.interval_secs, 20, "interval should be applied");
+            assert_eq!(
+                s.version, version_before,
+                "interval-only change must NOT bump version (would force reconnect)"
+            );
+        }).await;
+    }
+
+    /// Changing host/port/serial must bump the settings version so the poll
+    /// loop tears down the TCP connection and reconnects to the new endpoint.
+    #[tokio::test]
+    async fn host_change_bumps_version_for_reconnect() {
+        with_isolated_config_dir(|| async {
+            let state = Arc::new(AppState::new());
+            {
+                let mut s = state.settings.lock().await;
+                s.host = "192.168.1.50".to_string();
+                s.port = 8899;
+                s.serial = "TEST".to_string();
+                s.interval_secs = 60;
+            }
+            let version_before = state.settings.lock().await.version;
+
+            let body = serde_json::json!({ "host": "192.168.1.99" });
+            let _ = update_settings(State(state.clone()), Json(body)).await;
+
+            let s = state.settings.lock().await;
+            assert_eq!(s.host, "192.168.1.99");
+            assert_eq!(
+                s.version,
+                version_before.wrapping_add(1),
+                "host change must bump version (poll loop should reconnect)"
+            );
+        }).await;
     }
 }
