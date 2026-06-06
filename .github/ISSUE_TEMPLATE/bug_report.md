@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a problem with GivEnergy Local
+about: Report a problem with Home Energy Manager
 title: ''
 labels: bug
 assignees: ''
@@ -13,12 +13,30 @@ Steps to reproduce the behaviour.
 
 **Expected behaviour**
 
+**Device Info**
+Open the **Inverter** tab and paste the device information shown there:
+- Inverter serial:
+- Device type:
+- ARM firmware:
+- DSP firmware:
+- DC DSP firmware:
+- Max charge slots:
+- Max discharge slots:
+
 **Logs**
+1. Go to **Settings** → **Developer Mode** → enable it.
+2. Navigate to the **Logs** tab.
+3. Copy the relevant log output and paste it below:
+
 ```
-Paste relevant log output here
+Paste logs here
 ```
 
+**Screenshots**
+If applicable, add screenshots to help explain the problem.
+
 **Environment**
-- OS:
-- Inverter model:
-- App version:
+- OS (and version):
+- App version (shown in Settings → About):
+- Browser (if using the web interface):
+- Running as desktop app or headless server:
