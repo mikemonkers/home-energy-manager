@@ -161,12 +161,13 @@ export default function InverterPage() {
           <span className={`font-mono text-right ${s.cosy_active ? 'text-battery' : s.cosy_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
             {s.cosy_active ? 'Active' : s.cosy_enabled ? 'Enabled' : 'Disabled'}
           </span>
+          <span className="text-text-secondary">Agile Mode</span>
+          <span className={`font-mono text-right ${s.agile_active ? 'text-battery' : s.agile_enabled ? 'text-amber-400' : 'text-text-secondary'}`}>
+            {s.agile_active ? 'Active' : s.agile_enabled ? 'Enabled' : 'Disabled'}
+          </span>
+
           <span className="text-text-secondary">Battery Calibration</span>
           <span className="text-text-primary font-mono text-right">{s.battery_calibration_stage > 0 ? `Stage ${s.battery_calibration_stage}` : 'Off'}</span>
-          <span className="text-text-secondary">Home Power</span>
-          <span className="text-text-primary font-mono text-right">{formatPower(s.home_power)}</span>
-          <span className="text-text-secondary">Consumption Today</span>
-          <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_consumption_kwh)}</span>
         </div>
       </section>
     </div>

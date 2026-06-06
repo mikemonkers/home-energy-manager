@@ -394,14 +394,19 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::ForceDischarge => {
+                // BATTERY_POWER_MODE = 0 means "max power" — the battery
+                // discharges at full rate and EXPORTS to the grid when output
+                // exceeds local demand (per givenergy-modbus reference:
+                // set_discharge_mode_max_power). Mode 1 (eco / match demand)
+                // only tops up the home load and never exports, so force-
+                // discharge for Agile export MUST use mode 0.
+                //
                 // Clear stale charge registers so a previous force-charge mode
-                // (e.g. left over after app restart) doesn't conflict with the
-                // discharge. Without this, the inverter may keep charging
-                // instead of discharging when both flags are set.
+                // (e.g. left over after app restart) doesn't conflict.
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 1), // eco mode
-                    rw(HR_ENABLE_CHARGE, 0),        // clear any force charge
-                    rw(HR_ENABLE_CHARGE_TARGET, 0), // clear charge target
+                    rw(HR_BATTERY_POWER_MODE, 0),     // max power → export to grid
+                    rw(HR_ENABLE_CHARGE, 0),           // clear any force charge
+                    rw(HR_ENABLE_CHARGE_TARGET, 0),    // clear charge target
                     rw(HR_ENABLE_DISCHARGE, 1),
                     rw(HR_DISCHARGE_SLOT_1_START, 0),  // 00:00
                     rw(HR_DISCHARGE_SLOT_1_END, 2359), // 23:59
@@ -417,8 +422,9 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::ThreePhaseForceDischarge => {
+                // Mode 0 = max power / export to grid (see ForceDischarge).
                 vec![
-                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
+                    rw(HR_BATTERY_POWER_MODE, 0),         // max power → export
                     rw(HR_3PH_FORCE_CHARGE_ENABLE, 0),     // clear stale charge
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 1),
                 ]
@@ -879,7 +885,7 @@ mod tests {
         let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 6);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
-        assert_eq!(writes[0].value, 1); // eco mode
+        assert_eq!(writes[0].value, 0); // max power → export to grid
         assert_eq!(writes[1].address, HR_ENABLE_CHARGE);
         assert_eq!(writes[1].value, 0); // clear stale charge
         assert_eq!(writes[2].address, HR_ENABLE_CHARGE_TARGET);
@@ -949,7 +955,7 @@ mod tests {
         let writes = cmd.encode().unwrap();
         assert_eq!(writes.len(), 3);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
-        assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[0].value, 0); // max power → export
         assert_eq!(writes[1].address, HR_3PH_FORCE_CHARGE_ENABLE);
         assert_eq!(writes[1].value, 0); // clear stale charge
         assert_eq!(writes[2].address, HR_3PH_FORCE_DISCHARGE_ENABLE);

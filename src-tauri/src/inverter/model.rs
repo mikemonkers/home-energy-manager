@@ -600,6 +600,14 @@ pub struct InverterSnapshot {
     /// True when Cosy tariff mode is enabled in settings (may be between slots).
     #[serde(default)]
     pub cosy_enabled: bool,
+    /// True when the Agile Octopus state machine is actively force-charging or
+    /// force-discharging the battery.
+    #[serde(default)]
+    pub agile_active: bool,
+    /// True when Agile Octopus mode is enabled in settings (may be between
+    /// price thresholds).
+    #[serde(default)]
+    pub agile_enabled: bool,
     /// Battery calibration stage (0=off, 5=balance).
     #[serde(default)]
     pub battery_calibration_stage: u8,

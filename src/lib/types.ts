@@ -42,6 +42,8 @@ export interface InverterSnapshot {
   auto_winter_active: boolean;
   cosy_active: boolean;
   cosy_enabled: boolean;
+  agile_active: boolean;
+  agile_enabled: boolean;
   max_charge_slots: number;
   max_discharge_slots: number;
   charge_slots: ScheduleSlot[];

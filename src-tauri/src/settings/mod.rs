@@ -161,6 +161,15 @@ pub struct Settings {
     #[serde(default)]
     pub cosy_active_persisted: bool,
 
+    /// Persisted mirror of the in-memory `agile_state`, recorded whenever the
+    /// Agile Octopus state machine transitions. Stored as a short string
+    /// ("idle"/"charging"/"discharging") so a crash/restart can detect that
+    /// the inverter was left mid-charge/discharge and re-evaluate on the
+    /// first poll (the in-memory state always restarts at Idle, forcing a
+    /// fresh decision + command send).
+    #[serde(default)]
+    pub agile_state_persisted: String,
+
     /// Persisted `enable_charge_target` saved before winter mode activated.
     /// `Some` means winter mode was active when the last state was saved.
     #[serde(default)]
@@ -243,6 +252,7 @@ impl Default for Settings {
             cosy_enabled: false,
             cosy_slots: (0..3).map(|_| CosySlot::default()).collect(),
             cosy_active_persisted: false,
+            agile_state_persisted: String::new(),
         }
     }
 }
@@ -372,6 +382,7 @@ mod tests {
             cosy_enabled: false,
             cosy_slots: vec![],
             cosy_active_persisted: false,
+            agile_state_persisted: "discharging".to_string(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let decoded: Settings = serde_json::from_str(&json).unwrap();
@@ -421,6 +432,7 @@ mod tests {
             cosy_enabled: false,
             cosy_slots: vec![],
             cosy_active_persisted: false,
+            agile_state_persisted: String::new(),
         };
 
         // We can't easily override the settings path for testing,

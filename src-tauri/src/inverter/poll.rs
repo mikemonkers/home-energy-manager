@@ -555,6 +555,28 @@ fn persist_cosy_active(active: bool) {
     }
 }
 
+/// Persist the Agile Octopus runtime state so a crash/restart can detect
+/// that the inverter was left mid-charge/discharge and re-evaluate on the
+/// first poll. The in-memory `agile_state` always restarts at Idle, forcing
+/// a fresh decision (and command send) regardless of the persisted value.
+fn persist_agile_state(ag_state: AgileState) {
+    let label = match ag_state {
+        AgileState::Idle => "idle",
+        AgileState::Charging => "charging",
+        AgileState::Discharging => "discharging",
+    };
+    let mut settings = crate::settings::Settings::load();
+    if settings.agile_state_persisted != label {
+        settings.agile_state_persisted = label.to_string();
+        if let Err(e) = settings.save() {
+            tracing::warn!(
+                state = label,
+                "Failed to persist agile_state: {e}"
+            );
+        }
+    }
+}
+
 /// Returns `true` if any field was sanitized (fallback applied).
 ///
 /// `pending_mode` tracks a mode that differs from the previous reading but
@@ -1661,6 +1683,21 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             );
                         }
                     }
+
+                    // The in-memory `agile_state` always starts at Idle, so the
+                    // Agile state machine will re-evaluate the current price and
+                    // (re)send the appropriate command on the first poll. We log
+                    // the persisted value here so a restart that left the inverter
+                    // mid-charge/discharge is visible in the logs.
+                    if settings.agile_enabled
+                        && settings.agile_state_persisted != "idle"
+                        && !settings.agile_state_persisted.is_empty()
+                    {
+                        tracing::info!(
+                            persisted = %settings.agile_state_persisted,
+                            "Agile: restart detected with active persisted state — will re-evaluate current price and re-send command on first poll"
+                        );
+                    }
                 }
 
                 // ---- Inner poll loop ----
@@ -2103,6 +2140,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // machine runs, so the broadcast reflects the
                                     // post-transition value.)
                                     snapshot.cosy_enabled = crate::settings::Settings::load().cosy_enabled;
+                                    snapshot.agile_enabled = crate::settings::Settings::load().agile_enabled;
 
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved
@@ -2245,11 +2283,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         let price = if current_price.is_some() {
                                             current_price
                                         } else {
-                                            // Cache miss — fetch fresh prices from Octopus API
+                                            // Cache miss — fetch fresh prices from Octopus API.
+                                            // Anchor to the start of TODAY (UTC) so the response always
+                                            // includes the current slot. The Agile endpoint returns
+                                            // results newest-first, so a bare page_size=48 returns
+                                            // tomorrow's slots once they're published (~1pm) and the
+                                            // current slot drops out of the window — which silently
+                                            // leaves the state machine Idle and never discharges.
                                             drop(prices);
                                             let region = &settings.agile_region;
+                                            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
                                             let url = format!(
-                                                "https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?page_size=48"
+                                                "https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
                                             );
                                             let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
                                                 let mut resp = ureq::get(&url)
@@ -2298,6 +2343,14 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let discharge_threshold = settings.agile_discharge_threshold;
 
                                             let ag_state = state.agile_state.lock().await;
+                                            tracing::info!(
+                                                price,
+                                                charge_threshold,
+                                                discharge_threshold,
+                                                state = ?*ag_state,
+                                                inverter_mode = ?snapshot.battery_mode,
+                                                "Agile: evaluating current slot",
+                                            );
 
                                             if price <= charge_threshold {
                                                 if *ag_state != AgileState::Charging {
@@ -2325,6 +2378,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     }
                                                     if all_ok {
                                                         *state.agile_state.lock().await = AgileState::Charging;
+                                                        persist_agile_state(AgileState::Charging);
                                                     }
                                                 }
                                             } else if price >= discharge_threshold {
@@ -2353,6 +2407,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     }
                                                     if all_ok {
                                                         *state.agile_state.lock().await = AgileState::Discharging;
+                                                        persist_agile_state(AgileState::Discharging);
                                                     }
                                                 }
                                             } else {
@@ -2381,16 +2436,27 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                                     }
                                                     if all_ok {
                                                         *state.agile_state.lock().await = AgileState::Idle;
+                                                        persist_agile_state(AgileState::Idle);
                                                     }
                                                 }
                                             }
                                         } else {
                                             // No price data available for current time
                                             // Reset to idle so we don't get stuck in previous state
+                                            let cached_count = state.cached_agile_prices.lock().await.len();
                                             let mut ag_state = state.agile_state.lock().await;
                                             if *ag_state != AgileState::Idle {
                                                 *ag_state = AgileState::Idle;
-                                                tracing::debug!("Agile: no price data for current time, reset to idle");
+                                                persist_agile_state(AgileState::Idle);
+                                                tracing::warn!(
+                                                    cached_slots = cached_count,
+                                                    "Agile: no price data for current time, reset to idle",
+                                                );
+                                            } else {
+                                                tracing::warn!(
+                                                    cached_slots = cached_count,
+                                                    "Agile: no price data for current time (still idle)",
+                                                );
                                             }
                                         }
                                     }
@@ -2403,6 +2469,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // — e.g. showing "Cosy Active" for an extra poll
                                 // after the slot actually ended.
                                 snapshot.cosy_active = *state.cosy_active.lock().await;
+                                snapshot.agile_active = *state.agile_state.lock().await != AgileState::Idle;
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;
