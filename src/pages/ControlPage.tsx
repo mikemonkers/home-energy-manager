@@ -405,8 +405,8 @@ function AutoWinterSection() {
   );
 }
 
-/** Cosy charging section — shown when cosy mode is enabled. */
-function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boolean; cosyActive: boolean; onToggle: (v: boolean) => void }) {
+/** Charging mode section — select between Standard, Cosy, or Agile charging. */
+function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standard' | 'cosy' | 'agile'; cosyActive: boolean; onModeChange: (m: 'standard' | 'cosy' | 'agile') => void }) {
   const [slots, setSlots] = useState<
     { enabled: boolean; start_hour: number; start_minute: number; end_hour: number; end_minute: number; target_soc: number }[]
   >([]);
@@ -414,12 +414,16 @@ function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boole
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
   const [loaded, setLoaded] = useState(false);
 
+  const enabled = mode === 'cosy';
+
   useEffect(() => {
     (async () => {
       try {
         const res = await apiGet<{ ok: boolean; enabled: boolean; slots: typeof slots }>('/api/cosy');
         if (res.ok) {
-          onToggle(res.enabled);
+          if (res.enabled !== (mode === 'cosy')) {
+            onModeChange(res.enabled ? 'cosy' : 'standard');
+          }
           const initial = res.slots.length === 3
             ? res.slots
             : Array.from({ length: 3 }, () => ({
@@ -432,11 +436,11 @@ function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boole
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const toggleCosy = async () => {
-    // Don't toggle until slots have loaded from the server
+  const handleModeChange = async (newMode: 'standard' | 'cosy' | 'agile') => {
+    // Don't switch until slots have loaded
     if (!loaded || slots.length === 0) return;
-    const newEnabled = !enabled;
-    onToggle(newEnabled);
+    const newEnabled = newMode === 'cosy';
+    onModeChange(newMode);
     setSaving(true);
     try {
       await apiPost('/api/cosy', { enabled: newEnabled, slots });
@@ -448,7 +452,7 @@ function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boole
     setTimeout(() => setSaveFeedback(null), 2000);
   };
 
-  const save = async () => {
+  const saveSlots = async () => {
     setSaving(true);
     setSaveFeedback(null);
     try {
@@ -464,20 +468,25 @@ function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boole
   return (
     <section className="space-y-3 border-t border-bg-elevated pt-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-text-primary font-semibold text-lg">Cosy Charging</h2>
-        <button
-          onClick={toggleCosy}
+        <h2 className="text-text-primary font-semibold text-lg">Charging Mode</h2>
+        <select
+          value={mode}
+          onChange={(e) => handleModeChange(e.target.value as 'standard' | 'cosy' | 'agile')}
           disabled={saving}
-          className={`relative w-10 h-5 rounded-full transition ${enabled ? 'bg-battery' : 'bg-bg-surface'}`}
+          className="bg-bg-elevated text-text-primary font-mono text-sm rounded-lg px-3 py-1.5 border border-transparent focus:border-battery outline-none cursor-pointer"
         >
-          <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition ${enabled ? 'left-5.5' : 'left-0.5'}`} />
-        </button>
+          <option value="standard">Standard</option>
+          <option value="cosy">Cosy</option>
+          <option value="agile">Agile</option>
+        </select>
       </div>
-      <p className="text-text-secondary/60 text-xs">
-        Force-charges the battery from the grid during these windows. The inverter is locked to Cosy mode while enabled.
-      </p>
+      {mode === 'cosy' && (
+        <p className="text-text-secondary/60 text-xs mt-3">
+          Force-charges the battery from the grid during these windows. The inverter is locked to Cosy mode while enabled.
+        </p>
+      )}
 
-      {enabled && (
+      {mode === 'cosy' && (
         <div className="space-y-4">
           {slots.map((slot, i) => {
             const now = new Date();
@@ -564,7 +573,7 @@ function CosyChargingSection({ enabled, cosyActive, onToggle }: { enabled: boole
           );
           })}
           <button
-            onClick={save}
+            onClick={saveSlots}
             disabled={saving}
             className="w-full py-2 bg-battery/20 text-battery rounded-lg text-sm font-medium hover:bg-battery/30 transition disabled:opacity-50"
           >
@@ -697,6 +706,12 @@ export default function ControlPage() {
   // until the next poll cycle updates the snapshot from backend settings).
   const cosyEnabled = localCosyOverride ?? snapshotCosyEnabled;
   const setCosyEnabled = (v: boolean) => { setLocalCosyOverride(v); };
+  type ChargeMode = 'standard' | 'cosy' | 'agile';
+  const chargeMode: ChargeMode = cosyEnabled ? 'cosy' : 'standard';
+  const setChargeMode = (m: ChargeMode) => {
+    if (m === 'cosy') setCosyEnabled(true);
+    else setCosyEnabled(false);
+  };
 
   const currentMode = snapshot?.battery_mode ?? 'eco';
   const cosyActive = snapshot?.cosy_active ?? false;
@@ -990,6 +1005,8 @@ export default function ControlPage() {
         )}
       </section>
 
+      {/* Section 5: Charging Mode */}
+      <CosyChargingSection mode={chargeMode} cosyActive={cosyActive} onModeChange={setChargeMode} />
 
       {/* Section 3: Charge Schedule */}
       {!cosyEnabled && schedulesUnsupported && (
@@ -1104,9 +1121,6 @@ export default function ControlPage() {
           </div>
         </section>
       )}
-
-      {/* Section 5: Cosy Charging */}
-      {modeToCategory(effectiveMode) === 'eco' && <CosyChargingSection enabled={cosyEnabled} cosyActive={cosyActive} onToggle={setCosyEnabled} />}
 
       {/* Section 5: Auto Winter Mode */}
       <AutoWinterSection />

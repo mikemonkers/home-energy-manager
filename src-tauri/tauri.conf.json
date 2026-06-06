@@ -20,7 +20,6 @@
         "fullscreen": false
       }
     ],
-    "enableGTKAppId": true,
     "security": {
       "csp": null
     }
@@ -32,12 +31,9 @@
       "../dist": "dist"
     },
     "icon": [
-      "icons/icon.png",
-      "icons/128x128.png",
       "icons/32x32.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
     ],
     "macOS": {
       "signingIdentity": "-",
