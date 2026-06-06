@@ -1961,7 +1961,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             client.drain_stale_frames().await;
                                             tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
                                             drop(cosy_active);
-                                            let cmd = ControlCommand::ForceCharge { target_soc: slot_target_soc as u16 };
+                                            let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                            let cmd = if use_3ph {
+                                                ControlCommand::ThreePhaseForceCharge { target_soc: slot_target_soc as u16 }
+                                            } else {
+                                                ControlCommand::ForceCharge { target_soc: slot_target_soc as u16 }
+                                            };
                                             let mut all_writes_ok = true;
                                             if let Ok(writes) = cmd.encode() {
                                                 for w in &writes {
@@ -1990,7 +1995,12 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             client.drain_stale_frames().await;
                                             tracing::info!("Cosy: exiting slot, restoring Eco mode");
                                             drop(cosy_active);
-                                            let cmd = ControlCommand::CosyExit;
+                                            let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                            let cmd = if use_3ph {
+                                                ControlCommand::ThreePhaseCosyExit
+                                            } else {
+                                                ControlCommand::CosyExit
+                                            };
                                             let mut all_writes_ok = true;
                                             if let Ok(writes) = cmd.encode() {
                                                 for w in &writes {

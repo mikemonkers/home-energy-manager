@@ -636,8 +636,16 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// POST /api/control/force-charge — enable charging with target SOC.
+///
+/// Uses three-phase registers (HR 1123/1111) for three-phase, commercial,
+/// and HV hybrid inverters; single-phase registers (HR 96/116) for all others.
 pub async fn force_charge(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let cmd = ControlCommand::ForceCharge { target_soc: 100 };
+    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let cmd = if is_three_phase {
+        ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
+    } else {
+        ControlCommand::ForceCharge { target_soc: 100 }
+    };
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("ForceCharge encoded: {:?}", writes);
@@ -649,8 +657,16 @@ pub async fn force_charge(State(state): State<Arc<AppState>>) -> Json<Value> {
 }
 
 /// POST /api/control/force-discharge — enable discharge with a full-day slot.
+///
+/// Uses three-phase register (HR 1122) for three-phase, commercial,
+/// and HV hybrid inverters; single-phase register (HR 59 + slots) for all others.
 pub async fn force_discharge(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let cmd = ControlCommand::ForceDischarge;
+    let is_three_phase = is_three_phase_limit_snapshot(&state).await;
+    let cmd = if is_three_phase {
+        ControlCommand::ThreePhaseForceDischarge
+    } else {
+        ControlCommand::ForceDischarge
+    };
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("ForceDischarge encoded: {:?}", writes);

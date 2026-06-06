@@ -18,6 +18,9 @@ use crate::modbus::registers::{
     HR_3PH_DISCHARGE_SLOT_1_START,
     HR_3PH_DISCHARGE_SLOT_2_END,
     HR_3PH_DISCHARGE_SLOT_2_START,
+    HR_3PH_AC_CHARGE_ENABLE,
+    HR_3PH_FORCE_CHARGE_ENABLE,
+    HR_3PH_FORCE_DISCHARGE_ENABLE,
     HR_ACTIVE_POWER_RATE,
     HR_AC_BATTERY_CHARGE_LIMIT,
     HR_AC_BATTERY_DISCHARGE_LIMIT,
@@ -213,6 +216,12 @@ pub enum ControlCommand {
     SetChargeSlotN { slot: u8, start: u16, end: u16 },
     /// Set discharge slot N times (N=3..10, Gen3 extended).
     SetDischargeSlotN { slot: u8, start: u16, end: u16 },
+    /// Three-phase force charge using HR 1123/1111 instead of single-phase HR 96/116.
+    ThreePhaseForceCharge { target_soc: u16 },
+    /// Three-phase force discharge using HR 1122 instead of single-phase HR 59.
+    ThreePhaseForceDischarge,
+    /// Three-phase Cosy exit: clear HR 1123, 1112, 1122 and restore eco mode.
+    ThreePhaseCosyExit,
 }
 
 impl ControlCommand {
@@ -381,6 +390,27 @@ impl ControlCommand {
                     rw(HR_ENABLE_DISCHARGE, 1),
                     rw(HR_DISCHARGE_SLOT_1_START, 0),  // 00:00
                     rw(HR_DISCHARGE_SLOT_1_END, 2359), // 23:59
+                ]
+            }
+            ControlCommand::ThreePhaseForceCharge { target_soc } => {
+                validate_range(*target_soc, 4, 100, "target SOC")?;
+                vec![
+                    rw(HR_BATTERY_POWER_MODE, 1),         // eco mode (common register)
+                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 1),   // three-phase force charge
+                    rw(HR_3PH_CHARGE_TARGET_SOC, *target_soc),
+                ]
+            }
+            ControlCommand::ThreePhaseForceDischarge => {
+                vec![
+                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 1),
+                ]
+            }
+            ControlCommand::ThreePhaseCosyExit => {
+                vec![
+                    rw(HR_3PH_FORCE_CHARGE_ENABLE, 0),    // clear force charge
+                    rw(HR_3PH_AC_CHARGE_ENABLE, 0),       // clear AC charge
+                    rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0), // clear force discharge
+                    rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
                 ]
             }
             ControlCommand::SyncClock => {
@@ -781,6 +811,9 @@ mod tests {
                 start: 1600,
                 end: 1900,
             },
+            ControlCommand::ThreePhaseForceCharge { target_soc: 100 },
+            ControlCommand::ThreePhaseForceDischarge,
+            ControlCommand::ThreePhaseCosyExit,
         ];
         for cmd in &commands {
             match cmd.encode() {
@@ -863,6 +896,43 @@ mod tests {
         assert_eq!(writes[2].value, 0);
         assert_eq!(writes[3].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[3].value, 1); // eco mode
+    }
+
+    #[test]
+    fn three_phase_force_charge_uses_three_phase_registers() {
+        let cmd = ControlCommand::ThreePhaseForceCharge { target_soc: 80 };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[0].value, 1);
+        assert_eq!(writes[1].address, HR_3PH_FORCE_CHARGE_ENABLE);
+        assert_eq!(writes[1].value, 1);
+        assert_eq!(writes[2].address, HR_3PH_CHARGE_TARGET_SOC);
+        assert_eq!(writes[2].value, 80);
+    }
+
+    #[test]
+    fn three_phase_force_discharge_uses_three_phase_registers() {
+        let cmd = ControlCommand::ThreePhaseForceDischarge;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].address, HR_3PH_FORCE_DISCHARGE_ENABLE);
+        assert_eq!(writes[0].value, 1);
+    }
+
+    #[test]
+    fn three_phase_cosy_exit_clears_three_phase_registers() {
+        let cmd = ControlCommand::ThreePhaseCosyExit;
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 4);
+        assert_eq!(writes[0].address, HR_3PH_FORCE_CHARGE_ENABLE);
+        assert_eq!(writes[0].value, 0);
+        assert_eq!(writes[1].address, HR_3PH_AC_CHARGE_ENABLE);
+        assert_eq!(writes[1].value, 0);
+        assert_eq!(writes[2].address, HR_3PH_FORCE_DISCHARGE_ENABLE);
+        assert_eq!(writes[2].value, 0);
+        assert_eq!(writes[3].address, HR_BATTERY_POWER_MODE);
+        assert_eq!(writes[3].value, 1);
     }
 
     #[test]
