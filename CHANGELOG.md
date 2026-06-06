@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-06-06
+
+### Added
+
+- **Lifetime total import/export tracking**: New `total_import_kwh` and
+  `total_export_kwh` fields decoded from inverter registers (IR 32-33/21-22
+  for single-phase, IR 1382-1383/1386-1387 for three-phase). Displayed as
+  "Import Total" / "Export Total" on the Inverter page.
+- **Lifetime energy sanitisation**: Total import/export values are guarded
+  by absolute range checks (capped at 100,000 kWh) and delta checks
+  (monotonic increase, time-based rate limits) to reject corrupted register
+  reads.
+- **Three-phase synthetic meter populated with lifetime totals**: The
+  built-in grid CT meter (address 0x00) on three-phase models now carries
+  the actual lifetime import/export kWh values from the inverter registers.
+- **Per-slot discharge target SOC**: When editing discharge slots on
+  inverters that support the extended schedule block (HR 240-299), the
+  per-slot target SOC is now written to the inverter.
+- **Agile price forecast caching**: Price data is now cached by date and
+  fetched with `period_from` anchored to the start of today, so the display
+  doesn't get wiped out when the Octopus API switches to publishing
+  tomorrow's data (~1-2pm each day).
+- **Rolling 24-hour price window**: The Price Forecast grid now shows a
+  rolling 24-hour window from the current time, smoothly transitioning
+  across the day boundary as slots shift into the past.
+- **Agile auto-refresh**: Prices are re-fetched every 5 minutes, and the
+  rolling window recomputes every 30 seconds to keep the "now" indicator
+  accurate.
+
+### Changed
+
+- **Meters page labels**: "Import Today" / "Export Today" renamed to
+  "Import Total" / "Export Total" to reflect that meter data shows
+  lifetime totals.
+
+### Fixed
+
+- **Note/warning box text readability in light mode**: All note boxes,
+  Beta badges, DEV badges, WARNING, and DANGER callouts on the Control
+  page and Cold Battery Warning component now use `text-text-primary`
+  (resolves to near-black in light mode) instead of light-tinted colours
+  that were invisible on pale backgrounds. The `dark:` media-query variants
+  were removed to prevent OS dark mode from overriding the app's own theme
+  selection.
+- **Active Agile price slot now uses bold red border**: The current
+  half-hour slot in the Price Forecast grid now shows a pulsing red border
+  (`border-2 border-red-500 animate-pulse`) for clear visibility.
+
 ## [0.14.0] - 2026-06-06
 
 ### Added

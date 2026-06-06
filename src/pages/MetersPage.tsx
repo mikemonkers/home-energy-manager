@@ -58,11 +58,11 @@ function MeterCard({ meter }: { meter: MeterData }) {
       {/* Energy */}
       <div className="grid grid-cols-2 gap-2 text-center border-t border-white/5 pt-3">
         <div>
-          <div className="text-xs text-text-secondary">Import Today</div>
+          <div className="text-xs text-text-secondary">Import Total</div>
           <div className="font-mono text-sm text-green-400">{meter.e_import_active_kwh.toFixed(1)} kWh</div>
         </div>
         <div>
-          <div className="text-xs text-text-secondary">Export Today</div>
+          <div className="text-xs text-text-secondary">Export Total</div>
           <div className="font-mono text-sm text-amber-400">{meter.e_export_active_kwh.toFixed(1)} kWh</div>
         </div>
       </div>

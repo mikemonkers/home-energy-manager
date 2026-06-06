@@ -23,6 +23,8 @@ export interface InverterSnapshot {
   today_import_kwh: number;
   today_export_kwh: number;
   today_charge_kwh: number;
+  total_import_kwh: number;
+  total_export_kwh: number;
   today_discharge_kwh: number;
   today_consumption_kwh: number;
   battery_modules: BatteryModule[];

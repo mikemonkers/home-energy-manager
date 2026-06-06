@@ -137,17 +137,17 @@ function ScheduleSlotEditor({
   slot,
   onSave,
   showTargetSoc,
+  apiPath = '/api/control/discharge-slot',
 }: {
   slotIndex: number;
   slot: ScheduleSlot;
   onSave: (index: number, slot: ScheduleSlot, path: string) => void;
   showTargetSoc: boolean;
+  apiPath?: string;
 }) {
   const [local, setLocal] = useState<ScheduleSlot>({ ...slot });
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
-
-  const apiPath = showTargetSoc ? '/api/control/charge-slot' : '/api/control/discharge-slot';
 
   const handleSave = async () => {
     setSaving(true);
@@ -282,7 +282,7 @@ function AutoWinterSection() {
       <h2 className="text-text-primary font-semibold text-lg">Auto Winter Mode</h2>
       <div className="bg-bg-surface rounded-xl p-4 space-y-4">
         {winterActive && (
-          <div className="text-xs bg-blue-900/40 text-blue-200 px-3 py-2 rounded-lg">
+          <div className="text-xs bg-blue-900/40 text-text-primary px-3 py-2 rounded-lg">
             Winter mode active — battery is being charged to {snapshot?.target_soc ?? 80}%
             {batteryTemp != null && ` (${batteryTemp.toFixed(1)}°C)`}
           </div>
@@ -386,12 +386,20 @@ function AutoWinterSection() {
             </div>
 
             {/* Warning */}
-            <div className="text-xs bg-yellow-900/30 text-yellow-300 px-3 py-2 rounded-lg">
+            <div className="text-xs bg-yellow-900/30 text-text-primary px-3 py-2 rounded-lg">
               Winter mode charges the battery using grid power when solar is insufficient.
               Your existing charge schedule will be restored when the battery warms up.
             </div>
           </>
         )}
+
+        {/* App vs cloud note — always visible, even when disabled */}
+        <div className="text-xs bg-blue-900/30 text-text-primary px-3 py-2 rounded-lg">
+          <strong>Note:</strong> This is implemented locally within this app — it monitors
+          battery temperature via Modbus and forces charging when the battery gets cold.
+          It does not use GivEnergy's cloud-based winter mode. The app must stay running
+          for it to work.
+        </div>
 
         <button
           onClick={handleSave}
@@ -484,10 +492,10 @@ function CosyChargingSection({ mode, cosyActive, onModeChange }: { mode: 'standa
       {(mode === 'cosy' || mode === 'agile') && (
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-2.5 space-y-1">
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold text-amber-400 uppercase tracking-wide">Beta</span>
-            <span className="text-[11px] text-amber-300 font-medium">App must be kept running</span>
+            <span className="text-[10px] font-bold text-text-primary uppercase tracking-wide">Beta</span>
+            <span className="text-[11px] text-text-primary font-medium">App must be kept running</span>
           </div>
-          <p className="text-[11px] text-amber-200/70 leading-relaxed">
+          <p className="text-[11px] text-text-secondary leading-relaxed">
             {mode === 'cosy'
               ? 'Cosy mode schedules force-charging based on time slots you define. The app must stay running for slot entry and exit to work — if you close it mid-slot, the inverter stays in force-charge mode until you reopen the app or stop it manually.'
               : 'Agile mode automatically charges and discharges based on live Octopus prices. The app must stay running for price checks and switching to work — if you close it, the inverter stays in whatever mode it was last set to.'
@@ -811,38 +819,88 @@ function AgileControls() {
     validTo: Date;
     pence: number;
   }
-  const [prices, setPrices] = useState<PriceSlot[]>([]);
+
+  // Cache prices keyed by date (YYYY-MM-DD) so the display survives API handovers
+  const pricesCache = useRef<Record<string, PriceSlot[]>>({});
+
+  const [displaySlots, setDisplaySlots] = useState<PriceSlot[]>([]);
   const [pricesLoading, setPricesLoading] = useState(false);
   const [pricesError, setPricesError] = useState<string | null>(null);
 
-  // Fetch prices when region or thresholds change
-  useEffect(() => {
-    (async () => {
-      setPricesLoading(true);
-      setPricesError(null);
-      try {
-        const url = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/?page_size=48`;
-        const res = await fetch(url);
-        if (!res.ok) {
-          setPricesError(`API returned ${res.status}`);
-          setPricesLoading(false);
-          return;
-        }
-        const json = await res.json();
-        const slots: PriceSlot[] = (json.results || []).map((r: { valid_from: string; valid_to: string; value_inc_vat: number }) => ({
-          validFrom: new Date(r.valid_from),
-          validTo: new Date(r.valid_to),
-          pence: r.value_inc_vat,
-        }));
-        // Sort by time ascending
-        slots.sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime());
-        setPrices(slots);
-      } catch (e) {
-        setPricesError((e as Error).message);
+  // Rolling window: return up to 48 upcoming slots from cache
+  const computeRollingWindow = useCallback(() => {
+    const now = new Date();
+    const allCached = Object.values(pricesCache.current)
+      .flat()
+      .sort((a, b) => a.validFrom.getTime() - b.validFrom.getTime());
+    const startIdx = allCached.findIndex(s => s.validTo.getTime() > now.getTime());
+    return startIdx >= 0 ? allCached.slice(startIdx, startIdx + 48) : [];
+  }, []);
+
+  // Fetch prices from Octopus API, covering today onwards
+  const fetchPrices = useCallback(async () => {
+    setPricesLoading(true);
+    setPricesError(null);
+    try {
+      const now = new Date();
+      const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+      const baseUrl = `https://api.octopus.energy/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-${region}/standard-unit-rates/`;
+      const url = `${baseUrl}?period_from=${todayStr}T00:00:00Z&page_size=96`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        setPricesError(`API returned ${res.status}`);
+        setPricesLoading(false);
+        return;
       }
-      setPricesLoading(false);
-    })();
-  }, [region]);
+      const json = await res.json();
+      const slots: PriceSlot[] = (json.results || []).map((r: { valid_from: string; valid_to: string; value_inc_vat: number }) => ({
+        validFrom: new Date(r.valid_from),
+        validTo: new Date(r.valid_to),
+        pence: r.value_inc_vat,
+      }));
+
+      // Update cache by date
+      const newCache = { ...pricesCache.current };
+      for (const slot of slots) {
+        const key = slot.validFrom.toISOString().slice(0, 10);
+        if (!newCache[key]) newCache[key] = [];
+        // Deduplicate by slot start time
+        if (!newCache[key].some(s => s.validFrom.getTime() === slot.validFrom.getTime())) {
+          newCache[key].push(slot);
+        }
+      }
+      // Prune cache: keep only today, yesterday (just fetched), and tomorrow
+      const yesterday = new Date(now.getTime() - 86400000);
+      const keepKeys = [
+        yesterday.toISOString().slice(0, 10),
+        todayStr,
+        new Date(now.getTime() + 86400000).toISOString().slice(0, 10),
+      ];
+      for (const key of Object.keys(newCache)) {
+        if (!keepKeys.includes(key)) delete newCache[key];
+      }
+      pricesCache.current = newCache;
+
+      setDisplaySlots(computeRollingWindow());
+    } catch (e) {
+      setPricesError((e as Error).message);
+    }
+    setPricesLoading(false);
+  }, [region, computeRollingWindow]);
+
+  // Fetch on region change and periodically to pick up new data
+  useEffect(() => {
+    fetchPrices();
+    const interval = setInterval(fetchPrices, 5 * 60 * 1000); // every 5 minutes
+    return () => clearInterval(interval);
+  }, [fetchPrices]);
+
+  // Recompute rolling window every 30 seconds (for the "now" indicator)
+  useEffect(() => {
+    const tick = setInterval(() => setDisplaySlots(computeRollingWindow()), 30000);
+    return () => clearInterval(tick);
+  }, [computeRollingWindow]);
 
   const [saving, setSaving] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
@@ -999,19 +1057,19 @@ function AgileControls() {
           )}
         </div>
 
-        {prices.length === 0 && !pricesLoading && (
+        {displaySlots.length === 0 && !pricesLoading && (
           <p className="text-text-secondary text-xs py-2">No price data available.</p>
         )}
 
-        {prices.length >= 48 && (
+        {displaySlots.length > 0 && (
           <>
             <div className="bg-bg-surface rounded-lg p-2 space-y-0.5">
-              {/* 4 rows × 12 columns = 48 half-hour slots */}
+              {/* 4 rows × 12 columns = up to 48 half-hour slots */}
               {Array.from({ length: 4 }, (_, row) => (
                 <div key={row} className="grid grid-cols-12 gap-0.5">
                   {Array.from({ length: 12 }, (_, col) => {
                     const idx = row * 12 + col;
-                    const slot = prices[idx];
+                    const slot = displaySlots[idx];
                     if (!slot) return <div key={col} />;
                     const decision = decisionForPrice(slot.pence);
                     const now = new Date();
@@ -1027,7 +1085,7 @@ function AgileControls() {
                     return (
                       <div
                         key={col}
-                        className={`flex flex-col items-center rounded-sm py-0.5 ${barColor} ${isNow ? 'ring-1 ring-battery' : ''} ${isPast ? 'opacity-30' : ''}`}
+                        className={`flex flex-col items-center rounded-sm py-0.5 ${barColor} ${isNow ? 'border-2 border-red-500 animate-pulse' : ''} ${isPast ? 'opacity-30' : ''}`}
                         title={`${slot.validFrom.toLocaleTimeString()} - ${slot.validTo.toLocaleTimeString()}: ${slot.pence.toFixed(1)}p — ${isPast ? 'past' : decision}`}
                       >
                         <span className="text-[9px] leading-none font-mono">{slot.pence.toFixed(1)}</span>
@@ -1040,7 +1098,7 @@ function AgileControls() {
             </div>
 
             {/* Summary bar */}
-            <PriceSummary prices={prices} decisionForPrice={decisionForPrice} />
+            <PriceSummary prices={displaySlots} decisionForPrice={decisionForPrice} />
           </>
         )}
 
@@ -1114,12 +1172,12 @@ function BatteryCalibrationSection() {
     <section className="space-y-3 border-t border-bg-elevated pt-4">
       <div className="flex items-center gap-2">
         <h2 className="text-text-primary font-semibold text-lg">Battery Calibration</h2>
-        <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full font-medium">DEV</span>
+        <span className="text-xs bg-amber-500/20 text-text-primary px-2 py-0.5 rounded-full font-medium">DEV</span>
       </div>
 
       <div className="bg-amber-900/20 border border-amber-700/30 rounded-xl p-3 space-y-2">
-        <p className="text-amber-300 text-xs font-medium">⚠️  WARNING</p>
-        <p className="text-amber-200/70 text-xs">
+        <p className="text-text-primary text-xs font-medium">⚠️  WARNING</p>
+        <p className="text-text-secondary text-xs">
           Calibration cycles the battery through: discharge → calibrate lower
           limit → charge → balance → calibrate upper limit. Once started, the
           process cannot be cancelled — it must run to completion.
@@ -1139,7 +1197,7 @@ function BatteryCalibrationSection() {
           <button
             onClick={handleStartCalibration}
             disabled={saving || isActive}
-            className="w-full py-2 bg-amber-500/20 text-amber-400 rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
+            className="w-full py-2 bg-amber-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-amber-500/30 transition disabled:opacity-40 border border-amber-500/30"
           >
             Start Calibration
           </button>
@@ -1154,8 +1212,8 @@ function BatteryCalibrationSection() {
 
       {/* Reboot Inverter */}
       <div className="bg-red-900/20 border border-red-700/30 rounded-xl p-3 space-y-2">
-        <p className="text-red-300 text-xs font-medium">⚠️  DANGER</p>
-        <p className="text-red-200/70 text-xs">
+        <p className="text-text-primary text-xs font-medium">⚠️  DANGER</p>
+        <p className="text-text-secondary text-xs">
           This immediately reboots the inverter. The connection will drop and
           the inverter will be offline for 1-2 minutes while it restarts.
         </p>
@@ -1173,7 +1231,7 @@ function BatteryCalibrationSection() {
             setTimeout(() => setFeedback(null), 3000);
           }}
           disabled={saving}
-          className="w-full py-2 bg-red-500/20 text-red-400 rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
+          className="w-full py-2 bg-red-500/20 text-text-primary rounded-lg text-xs font-medium hover:bg-red-500/30 transition disabled:opacity-40 border border-red-500/30"
         >
           Reboot Inverter
         </button>
@@ -1589,7 +1647,7 @@ export default function ControlPage() {
       {!cosyEnabled && chargeMode !== 'agile' && schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Charge/Discharge Schedules</h2>
-          <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-yellow-200">
+          <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-sm text-text-primary">
             <div className="font-semibold mb-1">Schedules are hidden for this inverter model</div>
             This three-phase/HV inverter uses a different schedule register map
             (HR 1113-1121). Reading real-time data is supported, but schedule
@@ -1607,7 +1665,7 @@ export default function ControlPage() {
               {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
                 <div key="slot-warn-charge" className="space-y-2">
                   {showSlotOrderingWarning && (
-                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
                       <div className="font-semibold mb-1">
                         Slot labels differ from the GivEnergy cloud
                       </div>
@@ -1623,7 +1681,7 @@ export default function ControlPage() {
                     </div>
                   )}
                   {isLegacyGen3Fw && (
-                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                    <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
                       <div className="font-semibold mb-1">
                         Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
                       </div>
@@ -1643,6 +1701,7 @@ export default function ControlPage() {
                 slot={slot}
                 onSave={handleSlotSave}
                 showTargetSoc
+                apiPath="/api/control/charge-slot"
               />
             </>
           ))}
@@ -1660,7 +1719,7 @@ export default function ControlPage() {
                 {i === 1 && (showSlotOrderingWarning || isLegacyGen3Fw) && (
                   <div key="slot-warn-discharge" className="space-y-2">
                     {showSlotOrderingWarning && (
-                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
                         <div className="font-semibold mb-1">
                           Slot labels differ from the GivEnergy cloud
                         </div>
@@ -1675,7 +1734,7 @@ export default function ControlPage() {
                       </div>
                     )}
                     {isLegacyGen3Fw && (
-                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-yellow-200">
+                      <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-3 text-xs text-text-primary">
                         <div className="font-semibold mb-1">
                           Older Gen3 firmware detected (ARM FW {snapshot?.firmware_version})
                         </div>
@@ -1687,11 +1746,12 @@ export default function ControlPage() {
                   </div>
                 )}
                 <ScheduleSlotEditor
-                  key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}`}
+                  key={`discharge-${i}-${slot.enabled}-${slot.start_hour}:${slot.start_minute}-${slot.end_hour}:${slot.end_minute}-${slot.target_soc}`}
                   slotIndex={i}
                   slot={slot}
                   onSave={handleSlotSave}
-                  showTargetSoc={false}
+                  showTargetSoc={true}
+                  apiPath="/api/control/discharge-slot"
                 />
               </>
             ))}

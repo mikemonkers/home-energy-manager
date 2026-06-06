@@ -103,6 +103,10 @@ export default function InverterPage() {
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_import_kwh)}</span>
           <span className="text-text-secondary">Export Today</span>
           <span className="text-text-primary font-mono text-right">{formatEnergy(s.today_export_kwh)}</span>
+          <span className="text-text-secondary">Import Total</span>
+          <span className="text-text-primary font-mono text-right">{formatEnergy(s.total_import_kwh)}</span>
+          <span className="text-text-secondary">Export Total</span>
+          <span className="text-text-primary font-mono text-right">{formatEnergy(s.total_export_kwh)}</span>
         </div>
       </section>
 

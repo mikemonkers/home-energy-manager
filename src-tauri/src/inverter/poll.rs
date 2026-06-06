@@ -836,6 +836,51 @@ fn sanitize_snapshot(
             snap.today_ac_charge_kwh,
             prev.map(|p| p.today_ac_charge_kwh)
         );
+
+        // Lifetime total energy (total_import_kwh / total_export_kwh):
+        // These are cumulative counters that monotonically increase over the
+        // lifetime of the inverter. They can reach tens of thousands of kWh
+        // for a multi-year installation. The same absolute range check
+        // pattern applies, but with a much higher ceiling (100,000 kWh).
+        // Lifetime totals are uint32 with 0.1 scaling, so the native max is
+        // ~430,000 kWh; we cap at 100,000 as a generous residential bound.
+        // Delta checks are even more important here since a single corrupted
+        // uint32 can produce values like 4 billion.
+        let max_lifetime_kwh: f32 = 100_000.0;
+
+        macro_rules! check_total_energy_field {
+            ($name:literal, $value:expr, $prev_val:expr) => {
+                let raw = $value;
+                if raw < 0.0 || raw > max_lifetime_kwh {
+                    let prev_v: Option<f32> = $prev_val;
+                    if let Some(pv) = prev_v {
+                        tracing::warn!(
+                            field = $name, raw, max = max_lifetime_kwh, prev = pv,
+                            "Lifetime total energy out of plausible range — using previous",
+                        );
+                        $value = pv;
+                    } else {
+                        tracing::warn!(
+                            field = $name, raw, max = max_lifetime_kwh,
+                            "Lifetime total energy out of plausible range — no previous, clamping to 0",
+                        );
+                        $value = 0.0;
+                    }
+                    sanitized = true;
+                }
+            };
+        }
+
+        check_total_energy_field!(
+            "total_import_kwh",
+            snap.total_import_kwh,
+            prev.map(|p| p.total_import_kwh)
+        );
+        check_total_energy_field!(
+            "total_export_kwh",
+            snap.total_export_kwh,
+            prev.map(|p| p.total_export_kwh)
+        );
     }
 
     // Delta checks — only when we have a previous reading AND we're past
@@ -956,8 +1001,122 @@ fn sanitize_snapshot(
                 snap.today_ac_charge_kwh,
                 p.today_ac_charge_kwh
             );
+
+            // Lifetime total energy delta check:
+            // Lifetime counters are STRICTLY monotonically increasing — they
+            // NEVER reset (unlike daily counters which reset at midnight).
+            // Any decrease is register corruption. The same elapsed-time
+            // rate limit applies, with a slightly more generous headroom
+            // (15 kW peak circuit capacity instead of 10 kW).
+            let max_lifetime_rate_kw: f32 = 15.0;
+            let max_lifetime_increase_kwh = (elapsed_secs / 3600.0) * max_lifetime_rate_kw + 1.0;
+
+            macro_rules! check_total_energy_delta {
+            ($name:literal, $value:expr, $prev:expr) => {
+                let raw = $value;
+                let prev_val = $prev;
+
+                if prev_val < 1.0 {
+                    // prev is unreliable (near-zero from initial clamp)
+                    if raw > max_lifetime_increase_kwh {
+                        tracing::warn!(
+                            field = $name, raw, prev = prev_val,
+                            elapsed_secs, max = max_lifetime_increase_kwh,
+                            "Lifetime total jumped from near-zero baseline — clamping",
+                        );
+                        $value = prev_val + max_lifetime_increase_kwh;
+                        sanitized = true;
+                    }
+                }
+                // Lifetime counters NEVER reset — any decrease is corruption.
+                // (No midnight rollover check needed.)
+                // Tiny one-tick decreases are normal read noise; carry
+                // previous value forward silently.
+                else if raw < prev_val && raw + decrease_noise_tolerance_kwh >= prev_val {
+                    tracing::debug!(
+                        field = $name, raw, prev = prev_val,
+                        tolerance_kwh = decrease_noise_tolerance_kwh,
+                        "Lifetime total decreased within noise tolerance — carrying forward",
+                    );
+                    $value = prev_val;
+                }
+                // Counter must not decrease materially
+                else if raw < prev_val {
+                    tracing::warn!(
+                        field = $name, raw, prev = prev_val,
+                        "Lifetime total decreased (register corruption) — using previous",
+                    );
+                    $value = prev_val;
+                    sanitized = true;
+                }
+                // Increase must be plausible for elapsed time
+                else if raw > prev_val + max_lifetime_increase_kwh {
+                    tracing::warn!(
+                        field = $name, raw, prev = prev_val,
+                        elapsed_secs, max = max_lifetime_increase_kwh,
+                        "Lifetime total jumped too fast — using previous",
+                    );
+                    $value = prev_val;
+                    sanitized = true;
+                }
+            };
+        }
+
+            check_total_energy_delta!(
+                "total_import_kwh",
+                snap.total_import_kwh,
+                p.total_import_kwh
+            );
+            check_total_energy_delta!(
+                "total_export_kwh",
+                snap.total_export_kwh,
+                p.total_export_kwh
+            );
         }
     } // skip_delta
+
+    // Slot time corruption check: the dongle sometimes returns garbage values
+    // for specific holding register pairs, especially HR(31-32) (charge slot 2).
+    // A slot showing a sub-10-minute window (e.g. 00:01-00:04, raw values 1 and 4)
+    // when the previous poll had a legitimate multi-hour window strongly indicates
+    // register corruption at those addresses. Carry forward the previous times.
+    #[allow(clippy::collapsible_if)]
+    if let Some(p) = prev {
+        for i in 0..snap.charge_slots.len() {
+            let slot = &snap.charge_slots[i];
+            let prev_slot = &p.charge_slots[i];
+            if slot.enabled && slot.start_hour as u16 * 60 + slot.start_minute as u16 <= 10
+                && prev_slot.enabled && prev_slot.start_hour as u16 * 60 + prev_slot.start_minute as u16 > 10
+            {
+                tracing::warn!(
+                    slot = i, raw_start = format!("{:02}:{:02}", slot.start_hour, slot.start_minute),
+                    raw_end = format!("{:02}:{:02}", slot.end_hour, slot.end_minute),
+                    prev_start = format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
+                    prev_end = format!("{:02}:{:02}", prev_slot.end_hour, prev_slot.end_minute),
+                    "Charge slot times suspiciously small — carrying forward previous"
+                );
+                snap.charge_slots[i] = prev_slot.clone();
+                sanitized = true;
+            }
+        }
+        for i in 0..snap.discharge_slots.len() {
+            let slot = &snap.discharge_slots[i];
+            let prev_slot = &p.discharge_slots[i];
+            if slot.enabled && slot.start_hour as u16 * 60 + slot.start_minute as u16 <= 10
+                && prev_slot.enabled && prev_slot.start_hour as u16 * 60 + prev_slot.start_minute as u16 > 10
+            {
+                tracing::warn!(
+                    slot = i, raw_start = format!("{:02}:{:02}", slot.start_hour, slot.start_minute),
+                    raw_end = format!("{:02}:{:02}", slot.end_hour, slot.end_minute),
+                    prev_start = format!("{:02}:{:02}", prev_slot.start_hour, prev_slot.start_minute),
+                    prev_end = format!("{:02}:{:02}", prev_slot.end_hour, prev_slot.end_minute),
+                    "Discharge slot times suspiciously small — carrying forward previous"
+                );
+                snap.discharge_slots[i] = prev_slot.clone();
+                sanitized = true;
+            }
+        }
+    }
 
     // AC-coupled inverters get charge/discharge limits from optional AC config
     // registers HR(313/314). If that optional block is skipped or times out for
@@ -1649,6 +1808,22 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         return (true, true);
                                     }
 
+                                } else if let Some(cached_type) = known_device_type {
+                                    // Lock the device type to prevent dongle register corruption
+                                    // (especially HR(21) arm_firmware_version) from flipping the
+                                    // displayed model on a subsequent poll. Once identified, the
+                                    // snapshot always carries the cached type — the decoder still
+                                    // runs for the raw DTC and firmware string, but the refinement
+                                    // result is ignored in favour of the known-good detection.
+                                    if snapshot.device_type != cached_type {
+                                        tracing::debug!(
+                                            decoded = ?snapshot.device_type,
+                                            cached = ?cached_type,
+                                            "Device type mismatch — locking to cached value"
+                                        );
+                                        snapshot.device_type = cached_type;
+                                        snapshot.device_type_display = cached_type.display_name().to_string();
+                                    }
                                 }
 
                                 if should_probe_external_meters(known_device_type, meter_probe_done)

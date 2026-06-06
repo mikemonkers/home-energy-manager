@@ -472,6 +472,7 @@ pub async fn set_discharge_slot(
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
+    let target_soc = body["target_soc"].as_u64().unwrap_or(0) as u8;
 
     let (start, end) = (
         encode_hhmm(start_hour, start_minute),
@@ -492,6 +493,18 @@ pub async fn set_discharge_slot(
                     (ControlCommand::SetEnableDischarge { enabled: true }).encode()
                 {
                     writes.extend(enable_writes);
+                }
+            }
+            // Write per-slot discharge target SOC (extended registers HR 272+) when the
+            // inverter supports the HR240-299 schedule/target block.
+            if enabled && target_soc > 0 && device_type.uses_extended_schedule_slots() {
+                if let Ok(target_writes) = (ControlCommand::SetDischargeTargetSocSlot {
+                    slot,
+                    soc: target_soc as u16,
+                })
+                .encode()
+                {
+                    writes.extend(target_writes);
                 }
             }
 

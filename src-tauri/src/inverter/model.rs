@@ -556,6 +556,14 @@ pub struct InverterSnapshot {
     pub today_charge_kwh: f32,
     pub today_discharge_kwh: f32,
     pub today_consumption_kwh: f32,
+    /// Lifetime total import from grid (kWh).
+    /// Single-phase: IR(32-33) e_grid_in_total (uint32 /10 kWh)
+    /// Three-phase:  IR(1382-1383) e_import_total (uint32 /10 kWh)
+    pub total_import_kwh: f32,
+    /// Lifetime total export to grid (kWh).
+    /// Single-phase: IR(21-22) e_grid_out_total (uint32 /10 kWh)
+    /// Three-phase:  IR(1386-1387) e_export_total (uint32 /10 kWh)
+    pub total_export_kwh: f32,
     /// AC charge from grid today (kWh). IR(35) — NOT house consumption.
     /// Used in the consumption formula: solar + import - export - ac_charge.
     pub today_ac_charge_kwh: f32,

@@ -38,12 +38,12 @@ export default function ColdBatteryWarning() {
 
   return (
     <div className="bg-blue-900/30 border border-blue-700/40 rounded-xl px-4 py-3 text-sm space-y-1">
-      <p className="text-blue-200 font-medium">
+      <p className="text-text-primary font-medium">
         Cold battery ({tempDisplay})
       </p>
-      <p className="text-blue-300/80 text-xs">
+      <p className="text-text-secondary text-xs">
         Enable{' '}
-        <Link to="/control" className="text-blue-200 underline hover:text-blue-100">
+        <Link to="/control" className="text-text-primary underline hover:text-text-primary">
           Auto Winter Mode
         </Link>{' '}
         on the Control page to automatically charge the battery when cold —

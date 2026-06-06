@@ -237,6 +237,20 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
         snap.home_power = snap.solar_power - snap.battery_power - snap.grid_power;
     }
 
+    // Populate the synthetic built-in grid CT meter (address 0x00) with
+    // import/export energy totals. The three-phase meter decoder sets these
+    // to 0.0 because the power-only registers IR(1079-1082) carry no energy
+    // data — the lifetime totals live in IR(1382-1383)/IR(1386-1387) which
+    // are decoded separately by decode_input_1360_1413. Single-phase does
+    // not create a synthetic meter with address 0x00 (the grid CT is the
+    // inverter itself), so this only affects three-phase/HV models.
+    for meter in &mut snap.meters {
+        if meter.address == 0x00 {
+            meter.e_import_active_kwh = snap.total_import_kwh;
+            meter.e_export_active_kwh = snap.total_export_kwh;
+        }
+    }
+
     // Compute consumption today from energy balance (matching the GE app).
     // IR(35) is AC charge today, NOT house consumption — the reference library
     // confirmed this via sentinel cross-correlation (#174). Single-phase inverters
@@ -353,7 +367,9 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_charge_kwh = get_reg(data, 36) as f32 * 0.1; // IR(36): e_battery_charge_day
     snap.today_discharge_kwh = get_reg(data, 37) as f32 * 0.1; // IR(37): e_battery_discharge_day
     snap.today_consumption_kwh = get_reg(data, 35) as f32 * 0.1; // IR(35): e_ac_charge_today (NOT consumption)
-    snap.today_ac_charge_kwh = snap.today_consumption_kwh; // keep raw IR(35) for energy balance
+    snap.today_ac_charge_kwh = snap.today_consumption_kwh;
+    snap.total_export_kwh = uint32(get_reg(data, 21), get_reg(data, 22)) as f32 * 0.1; // IR(21-22): e_grid_out_total
+    snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1; // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
 }
 
 /// Decode holding registers 0-59 (configuration part 1).
@@ -823,6 +839,8 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_discharge_kwh = uint32(get_reg(data, 28), get_reg(data, 29)) as f32 * 0.1;
     snap.today_consumption_kwh = uint32(get_reg(data, 36), get_reg(data, 37)) as f32 * 0.1;
     snap.today_ac_charge_kwh = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
+    snap.total_import_kwh = uint32(get_reg(data, 22), get_reg(data, 23)) as f32 * 0.1; // IR(1382-1383): e_import_total
+    snap.total_export_kwh = uint32(get_reg(data, 26), get_reg(data, 27)) as f32 * 0.1; // IR(1386-1387): e_export_total
 }
 
 /// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
@@ -994,9 +1012,13 @@ mod tests {
         input_data[18] = 2500; // IR(18): pv1_power = 2500 W
         input_data[19] = 95; // IR(19): pv2_energy_today = 9.5 kWh
         input_data[20] = 1500; // IR(20): pv2_power = 1500 W
+        input_data[21] = 0;
+        input_data[22] = 12345; // IR(21-22): e_grid_out_total = 1234.5 kWh
         input_data[25] = 30; // IR(25): export_today = 3.0 kWh
         input_data[26] = 52; // IR(26): import_today = 5.2 kWh
         input_data[30] = 100; // IR(30): grid_power = +100 W (export)
+        input_data[32] = 0;
+        input_data[33] = 6789; // IR(32-33): e_grid_in_total = 678.9 kWh
         input_data[35] = 120; // IR(35): ac_charge_today = 12.0 kWh
         input_data[36] = 40; // IR(36): charge_today = 4.0 kWh
         input_data[37] = 25; // IR(37): discharge_today = 2.5 kWh
@@ -1096,6 +1118,8 @@ mod tests {
         // consumption = solar(28.0) + import(5.2) - export(3.0) - ac_charge(12.0) = 18.2
         assert!((snap.today_consumption_kwh - 18.2).abs() < 0.1);
         assert!((snap.today_ac_charge_kwh - 12.0).abs() < 0.1);
+        assert!((snap.total_import_kwh - 678.9).abs() < 0.1);
+        assert!((snap.total_export_kwh - 1234.5).abs() < 0.1);
 
         // Config
         assert_eq!(snap.battery_reserve, 4);
@@ -1193,8 +1217,12 @@ mod tests {
         ir1360[1375 - 1360] = 4641; // lifetime PV total 20124.9kWh; not a daily value
         ir1360[1380 - 1360] = 0;
         ir1360[1381 - 1360] = 45; // import today 4.5kWh
+        ir1360[1382 - 1360] = 0;
+        ir1360[1383 - 1360] = 888; // import total 88.8kWh
         ir1360[1384 - 1360] = 0;
         ir1360[1385 - 1360] = 67; // export today 6.7kWh
+        ir1360[1386 - 1360] = 0;
+        ir1360[1387 - 1360] = 999; // export total 99.9kWh
         ir1360[1388 - 1360] = 0;
         ir1360[1389 - 1360] = 89; // discharge today 8.9kWh
         ir1360[1392 - 1360] = 0;
@@ -1228,6 +1256,8 @@ mod tests {
         assert!((snap.today_charge_kwh - 10.1).abs() < 0.1);
         assert!((snap.today_discharge_kwh - 8.9).abs() < 0.1);
         assert!((snap.today_consumption_kwh - 11.1).abs() < 0.1);
+        assert!((snap.total_import_kwh - 88.8).abs() < 0.1);
+        assert!((snap.total_export_kwh - 99.9).abs() < 0.1);
 
         // Verify synthetic built-in CT meter was created
         assert_eq!(
@@ -1241,6 +1271,8 @@ mod tests {
             "Meter total = -grid_power (positive = import)"
         );
         assert!((snap.meters[0].frequency - 50.0).abs() < 0.01);
+        assert!((snap.meters[0].e_import_active_kwh - 88.8).abs() < 0.1, "3-phase meter import = total_import_kwh");
+        assert!((snap.meters[0].e_export_active_kwh - 99.9).abs() < 0.1, "3-phase meter export = total_export_kwh");
     }
 
     #[test]
