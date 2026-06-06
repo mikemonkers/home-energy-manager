@@ -962,7 +962,7 @@ pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> Json<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::with_isolated_config_dir;
+    use crate::test_util::{with_isolated_config_dir, with_isolated_config_dir_async};
 
     #[test]
     fn three_phase_slot_selection_uses_three_phase_register_commands() {
@@ -1060,7 +1060,7 @@ mod tests {
     /// picks up interval changes without dropping the connection.
     #[tokio::test]
     async fn interval_change_does_not_bump_version_or_disconnect() {
-        with_isolated_config_dir(|| async {
+        with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
 
             // Seed connection-affecting fields so the test isn't dependent on
@@ -1091,7 +1091,7 @@ mod tests {
     /// loop tears down the TCP connection and reconnects to the new endpoint.
     #[tokio::test]
     async fn host_change_bumps_version_for_reconnect() {
-        with_isolated_config_dir(|| async {
+        with_isolated_config_dir_async(|| async {
             let state = Arc::new(AppState::new());
             {
                 let mut s = state.settings.lock().await;

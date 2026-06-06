@@ -1,52 +1,62 @@
 //! Shared test utilities.
 //!
-//! Currently only contains [`with_isolated_config_dir`], used by tests in
-//! multiple modules to run against an ephemeral `~/.givenergy-local/`-shaped
-//! config directory without polluting the user's real settings file.
+//! Currently only contains helpers to run tests against an ephemeral
+//! `~/.givenergy-local/`-shaped config directory without polluting the
+//! user's real settings file.
 
 #![cfg(test)]
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-/// Global lock that serializes all tests touching `GIVENERGY_LOCAL_CONFIG_DIR`.
-///
-/// `std::env::set_var` is process-global, so any test that flips the env var
-/// must hold this mutex for the duration of its body — otherwise a parallel
-/// sibling test could read the wrong config dir or have its dir torn down
-/// mid-flight. Each module's local mutex (in `poll::tests`,
-/// `server::api::tests`, etc.) is replaced by this single shared one so that
-/// tests across the crate serialize against each other.
-pub static CONFIG_DIR_MUTEX: Mutex<()> = Mutex::new(());
+/// Global mutex that serializes all tests touching `GIVENERGY_LOCAL_CONFIG_DIR`.
+/// Uses `tokio::sync::Mutex` so async tests can hold the guard across `.await`.
+fn config_dir_mutex() -> &'static tokio::sync::Mutex<()> {
+    static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
-/// Run `body` against an isolated `GIVENERGY_LOCAL_CONFIG_DIR` pointing at a
-/// fresh temp directory. Holds [`CONFIG_DIR_MUTEX`] for the duration, creates
-/// the dir, sets the env var, runs `body`, then removes the env var and
-/// deletes the dir on the way out.
-///
-/// Use this for any test that calls `Settings::load()` or `Settings::save()`
-/// (directly or indirectly through `update_settings`, `AppState::new`,
-/// `persist_cosy_active`, etc.) so it doesn't read or write the user's real
-/// `~/.givenergy-local/settings.json`.
-pub fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
-    let _guard = CONFIG_DIR_MUTEX.lock().unwrap();
-
-    let tmp = std::env::temp_dir().join(format!(
+/// Return a unique temp path for one test invocation.
+fn make_temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
         "givenergy-local-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
-    ));
+    ))
+}
+
+/// Run `body` against an isolated config dir. Holds a global mutex so tests
+/// across modules don't race on the env var.
+///
+/// This is the **sync** flavour — for async tests (tokio), call
+/// [`with_isolated_config_dir_async`] instead so the guard lives across `.await`.
+pub fn with_isolated_config_dir<T>(body: impl FnOnce() -> T) -> T {
+    // block on the tokio mutex for sync test compatibility
+    let _guard = config_dir_mutex().blocking_lock();
+    let tmp = make_temp_dir();
     let _ = std::fs::create_dir_all(&tmp);
-    // SAFETY: tests are single-binary; the mutex serializes all tests that
-    // touch this env var.
     std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &tmp);
-
     let result = body();
-
     std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
     let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
 
+/// Async variant of [`with_isolated_config_dir`]. Keeps the env var alive
+/// until the returned future completes.
+pub async fn with_isolated_config_dir_async<F, Fut>(body: F) -> Fut::Output
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    let _guard = config_dir_mutex().lock().await;
+    let tmp = make_temp_dir();
+    let _ = std::fs::create_dir_all(&tmp);
+    std::env::set_var("GIVENERGY_LOCAL_CONFIG_DIR", &tmp);
+    let result = body().await;
+    std::env::remove_var("GIVENERGY_LOCAL_CONFIG_DIR");
+    let _ = std::fs::remove_dir_all(&tmp);
     result
 }

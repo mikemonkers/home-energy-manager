@@ -368,7 +368,11 @@ impl ControlCommand {
                 ]
             }
             ControlCommand::PauseBattery => {
-                vec![rw(HR_BATTERY_SOC_RESERVE, 100)]
+                vec![
+                    rw(HR_BATTERY_SOC_RESERVE, 100),  // prevent further discharge
+                    rw(HR_ENABLE_CHARGE, 0),           // stop any force charge
+                    rw(HR_ENABLE_CHARGE_TARGET, 0),    // clear charge target
+                ]
             }
             ControlCommand::ForceCharge { target_soc } => {
                 validate_range(*target_soc, 4, 100, "target SOC")?;
@@ -742,8 +746,15 @@ mod tests {
     fn pause_battery() {
         let cmd = ControlCommand::PauseBattery;
         let writes = cmd.encode().unwrap();
+        // Sets SOC reserve to 100% and clears force-charge flags
+        assert_eq!(writes.len(), 3);
+        // Order: reserve, disable charge, disable charge target
         assert_eq!(writes[0].address, HR_BATTERY_SOC_RESERVE);
         assert_eq!(writes[0].value, 100);
+        assert_eq!(writes[1].address, HR_ENABLE_CHARGE);
+        assert_eq!(writes[1].value, 0);
+        assert_eq!(writes[2].address, HR_ENABLE_CHARGE_TARGET);
+        assert_eq!(writes[2].value, 0);
     }
 
     #[test]
