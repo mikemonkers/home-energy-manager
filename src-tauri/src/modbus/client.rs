@@ -3,10 +3,15 @@
 //! Manages the TCP connection to the inverter, sending requests
 //! and reading responses with configurable timeouts and retries.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use super::framer::{self, DecodedFrame, RegisterType};
 use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
@@ -106,6 +111,41 @@ fn model_specific_blocks_in_poll_order(
 // ---------------------------------------------------------------------------
 
 /// Manages a single TCP connection to a GivEnergy inverter dongle.
+/// Content-based key for matching Modbus responses to pending requests.
+///
+/// Mirrors givenergy-modbus's `shape_hash()` — both requests and responses
+/// produce the same key from (slave, function, base_register, count), so the
+/// consumer task can route each incoming frame to the correct waiting caller.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub(crate) struct ResponseKey {
+    pub(crate) slave: u8,
+    pub(crate) function: u8,
+    pub(crate) base_register: u16,
+    pub(crate) count: u16,
+}
+
+impl ResponseKey {
+    pub(crate) fn from_request(slave: u8, function: u8, start: u16, count: u16) -> Self {
+        Self { slave, function, base_register: start, count }
+    }
+
+    pub(crate) fn from_response(frame: &DecodedFrame) -> Option<Self> {
+        // Read response payload: serial(10) + base_register(2) + count(2) + data(...)
+        if frame.payload.len() < 14 {
+            return None;
+        }
+        let base_register = u16::from_be_bytes([frame.payload[10], frame.payload[11]]);
+        let count = u16::from_be_bytes([frame.payload[12], frame.payload[13]]);
+        Some(Self { slave: frame.slave, function: frame.function, base_register, count })
+    }
+}
+
+/// An item enqueued to the producer task for transmission.
+struct TxItem {
+    frame: Vec<u8>,
+}
+
+/// Manages a single TCP connection to a GivEnergy inverter dongle.
 pub struct ModbusClient {
     /// Hostname or IP address of the data adapter.
     host: String,
@@ -128,10 +168,17 @@ pub struct ModbusClient {
     /// switching to 0x31 for AC-coupled and Gen1 Hybrid models. Battery BMS
     /// reads still explicitly target 0x32/0x33+ via `read_registers_at_slave`.
     slave: u8,
-    /// Underlying TCP stream, `None` when disconnected.
-    stream: Option<TcpStream>,
+    /// Write half of the split TCP stream. `None` when disconnected.
+    writer: Option<OwnedWriteHalf>,
     /// Timeout for individual read/write operations.
     timeout: Duration,
+    /// Pending response futures, keyed by content hash (slave+func+base+count).
+    /// The consumer task resolves these when a matching frame arrives.
+    pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
+    /// Set to `true` when connected, `false` on disconnect or consumer error.
+    connected: Arc<AtomicBool>,
+    /// Handle to the background consumer task.
+    consumer_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ModbusClient {
@@ -148,8 +195,11 @@ impl ModbusClient {
             serial_discovered: false,
             serial_suspect: false,
             slave: 0x11, // canonical GivEnergy inverter address for detection
-            stream: None,
+            writer: None,
             timeout: Duration::from_secs(15),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            connected: Arc::new(AtomicBool::new(false)),
+            consumer_handle: None,
         }
     }
 
@@ -193,7 +243,7 @@ impl ModbusClient {
     /// Connect to the inverter. Returns `Err(ClientError::AlreadyConnected)` if
     /// a connection is already open.
     pub async fn connect(&mut self) -> Result<(), ClientError> {
-        if self.stream.is_some() {
+        if self.connected.load(Ordering::SeqCst) {
             return Err(ClientError::AlreadyConnected);
         }
 
@@ -231,359 +281,174 @@ impl ModbusClient {
             .unwrap_or_default();
         tracing::info!("TCP connected: local={local}, peer={peer}, nodelay=true, keepalive=10s");
 
-        self.stream = Some(stream);
+        // Split the stream so the consumer reads and the client writes
+        // independently without lock contention on the TCP stream.
+        let (reader, writer) = stream.into_split();
+        self.writer = Some(writer);
+
+        // Set connected BEFORE spawning the consumer task so it doesn't
+        // see the default `false` and exit immediately.
+        self.connected.store(true, Ordering::SeqCst);
+
+        let pending = self.pending.clone();
+        let connected = self.connected.clone();
+        let timeout = self.timeout;
+        self.consumer_handle = Some(tokio::spawn(async move {
+            Self::consumer_task(reader, pending, connected, timeout).await;
+        }));
+
         Ok(())
-    }
-
-    /// Drain any buffered data from the TCP receive buffer.
-    ///
-    /// The GivEnergy dongle caches responses from the previous session and
-    /// flushes them when a new TCP connection is established. If we don't
-    /// drain these stale frames, they corrupt the request-response pairing
-    /// for our first real poll.
-    pub async fn drain(&mut self) {
-        let stream = match self.stream.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Set a very short read timeout so we don't block
-        let _ = stream.set_nodelay(true);
-        let mut buf = [0u8; 512];
-        let mut drained = 0usize;
-
-        loop {
-            match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut buf)).await {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break, // EOF, read error, or timeout — buffer is clear
-                Ok(Ok(n)) => drained += n,
-            }
-        }
-
-        if drained > 0 {
-            tracing::debug!("Drained {drained} bytes of stale data from dongle");
-        }
     }
 
     /// Disconnect gracefully.
     pub async fn disconnect(&mut self) {
-        if let Some(mut stream) = self.stream.take() {
-            let _ = stream.shutdown().await;
+        self.connected.store(false, Ordering::SeqCst);
+
+        // Abort background tasks.
+        if let Some(h) = self.consumer_handle.take() {
+            h.abort();
         }
+
+        // Drop the writer - closes the TCP connection.
+        self.writer = None;
     }
 
     /// Check if the client is currently connected.
     pub fn is_connected(&self) -> bool {
-        self.stream.is_some()
+        self.connected.load(Ordering::SeqCst)
     }
 
     // -----------------------------------------------------------------------
     // Core I/O helpers
     // -----------------------------------------------------------------------
 
-    /// Send a raw frame to the dongle without waiting for a response.
+    /// Send a raw frame to the dongle via the TCP writer.
     async fn send_raw(&mut self, frame: &[u8]) -> Result<(), ClientError> {
-        let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
-        tokio::time::timeout(self.timeout, stream.write_all(frame))
+        let writer = self.writer.as_mut().ok_or(ClientError::NotConnected)?;
+        tokio::time::timeout(self.timeout, writer.write_all(frame))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::SendFailed(e.to_string()))?;
         Ok(())
     }
 
-    /// Read and decode one response frame from the dongle.
+    /// Background task: reads ALL incoming frames from the TCP stream and
+    /// routes them to the correct pending future by content key
+    /// (slave + function + base_register + count).
     ///
-    /// Read and decode one response frame from the dongle.
-    ///
-    /// Reads the MBAP header to determine length, then reads the rest.
-    /// Does NOT check for Modbus exceptions — callers handle those.
-    ///
-    /// Heartbeat requests (function ID 0x01) are handled transparently:
-    /// the response is echoed back and the method loops to read the next
-    /// frame until a non-heartbeat frame arrives.
-    async fn receive_frame(&mut self) -> Result<DecodedFrame, ClientError> {
+    /// Responses that don't match any pending future (e.g. battery BMS at
+    /// 0x35 responding when the inverter at 0x11 was addressed) are silently
+    /// dropped — no caller is waiting for them.
+    async fn consumer_task(
+        mut reader: tokio::net::tcp::OwnedReadHalf,
+        pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
+        connected: Arc<AtomicBool>,
+        timeout: Duration,
+    ) {
         loop {
-            let stream = self.stream.as_mut().ok_or(ClientError::NotConnected)?;
+            if !connected.load(Ordering::SeqCst) {
+                break;
+            }
 
-            // Read the 6-byte MBAP header
-            let mut header_buf = [0u8; 6];
-            let header_result =
-                tokio::time::timeout(self.timeout, stream.read_exact(&mut header_buf)).await;
-            match &header_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    let kind = e.kind();
-                    tracing::warn!(
-                        error = %e,
-                        ?kind,
-                        "TCP read error while reading MBAP header"
-                    );
-                    return Err(ClientError::ReceiveFailed(format!(
-                        "reading MBAP header: {e} (kind={kind:?})"
-                    )));
+            let frame = match Self::read_one_frame(&mut reader, timeout).await {
+                Ok(f) => f,
+                Err(ClientError::Timeout) => {
+                    // No data arrived yet — loop and try again.
+                    continue;
                 }
-                Err(_) => {
-                    tracing::warn!(
-                        timeout_secs = self.timeout.as_secs(),
-                        "Timeout waiting for MBAP header — dongle not responding"
-                    );
-                    return Err(ClientError::Timeout);
-                }
+                Err(_) => break, // connection lost
+            };
+
+            // Heartbeat — best-effort; the dongle tolerates 3 misses before close.
+            if framer::is_heartbeat_request(&frame) {
+                continue;
             }
 
-            // Parse length field (big-endian u16 at bytes 4-5).
-            let length = u16::from_be_bytes([header_buf[4], header_buf[5]]) as usize;
-
-            // Sanity-check the MBAP header before committing to a large read.
-            // The GivEnergy protocol uses transaction ID 0x5959 and protocol ID 0x0001.
-            // A corrupted frame from stale TCP buffers may have garbage here.
-            let txn_id = u16::from_be_bytes([header_buf[0], header_buf[1]]);
-            let proto_id = u16::from_be_bytes([header_buf[2], header_buf[3]]);
-            if txn_id != 0x5959 || proto_id != 0x0001 {
-                tracing::warn!(
-                    "Suspicious MBAP header: txn=0x{txn_id:04X} proto=0x{proto_id:04X} len={length} — likely stale/corrupted frame"
-                );
-            }
-
-            if length > MAX_RESPONSE_SIZE {
-                tracing::error!(
-                    length,
-                    max = MAX_RESPONSE_SIZE,
-                    "MBAP length field exceeds maximum — possible frame corruption or MTU issue"
-                );
-                return Err(ClientError::InvalidResponse(format!(
-                    "response length {length} exceeds maximum {MAX_RESPONSE_SIZE}"
-                )));
-            }
-
-            if length < 4 {
-                // Need at least unit_id(1) + func(1) + inner_pdu(0+) + CRC(2)
-                tracing::warn!(
-                    length,
-                    "MBAP length field unusually small — possible frame corruption"
-                );
-            }
-
-            // Read the remaining `length` bytes (everything after the 6-byte MBAP header).
-            let mut rest = vec![0u8; length];
-            let body_result =
-                tokio::time::timeout(self.timeout, stream.read_exact(&mut rest)).await;
-            match &body_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    let kind = e.kind();
-                    tracing::warn!(
-                        error = %e,
-                        ?kind,
-                        length,
-                        "TCP read error while reading frame body (MBAP len={length})"
-                    );
-                    return Err(ClientError::ReceiveFailed(format!(
-                        "reading frame body (len={length}): {e} (kind={kind:?})"
-                    )));
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        timeout_secs = self.timeout.as_secs(),
-                        length,
-                        "Timeout reading frame body (MBAP len={length}) — partial frame from dongle"
-                    );
-                    return Err(ClientError::Timeout);
-                }
-            }
-
-            // Reassemble the complete frame
-            let mut full = Vec::with_capacity(6 + length);
-            full.extend_from_slice(&header_buf);
-            full.extend_from_slice(&rest);
-
-            // Handle heartbeat requests from the dongle.
-            // The dongle sends a heartbeat (function ID 0x01) every ~3 minutes.
-            // We must respond within 5 seconds; after 3 missed heartbeats the
-            // dongle closes the TCP connection. Silently respond and loop to
-            // read the actual response frame.
-            if super::framer::is_heartbeat_request(&full) {
-                let response = super::framer::build_heartbeat_response(&full);
-                tracing::debug!(
-                    "Heartbeat request received ({} bytes), sending response",
-                    full.len()
-                );
-                // Best-effort send — if the write fails the connection is already
-                // dead and the next read will surface it.
-                if let Some(s) = self.stream.as_mut() {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(2),
-                        s.write_all(&response),
-                    )
-                    .await;
-                }
-                continue; // loop to read next frame
-            }
-
-            // Not a heartbeat — proceed with normal decode.
-
-            // Auto-discover dongle serial from response header (bytes 8-17).
-            if self.serial.is_empty() && full.len() >= 18 {
-                let discovered = std::str::from_utf8(&full[8..18])
-                    .unwrap_or("")
-                    .trim_end()
-                    .to_string();
-                if !discovered.is_empty() {
-                    let serial_hex: String = full[8..18]
-                        .iter()
-                        .map(|b| format!("{b:02X}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    tracing::info!(
-                        serial = %discovered,
-                        serial_raw = %serial_hex,
-                        frame_len = full.len(),
-                        "Auto-discovered dongle serial (pending decode validation)"
-                    );
-                    // Validate: serial should be printable ASCII, not all spaces
-                    if discovered.trim().is_empty()
-                        || discovered
-                            .chars()
-                            .any(|c| !c.is_ascii_graphic() && c != ' ')
-                    {
-                        tracing::warn!(
-                            serial_raw = %serial_hex,
-                            "Auto-discovered serial looks suspicious (non-printable chars)"
-                        );
-                    }
-
-                    // Decode the frame to verify it's complete.
-                    // We ONLY accept the discovered serial if the full frame
-                    // decodes successfully. A truncated frame (like 19 bytes
-                    // where the inner PDU is missing) means the serial is
-                    // suspect — using it for subsequent requests causes the
-                    // dongle to stop responding on some firmware versions.
-                    let hex_bytes = dump_hex(&full);
-                    match framer::decode_frame(&full) {
-                        Ok(decoded) => {
-                            tracing::info!(
-                                serial = %discovered,
-                                "Auto-discovered serial confirmed — frame valid"
-                            );
-                            self.serial = discovered;
-                            self.serial_discovered = true;
-                            return Ok(decoded);
+            // Decode and route by content key.
+            match framer::decode_frame(&frame) {
+                Ok(decoded) => {
+                    eprintln!("CONSUMER: got frame slave=0x{:02X} func=0x{:02X} payload_len={}",
+                        decoded.slave, decoded.function, decoded.payload.len());
+                    if let Some(key) = ResponseKey::from_response(&decoded) {
+                        eprintln!("CONSUMER: key slave=0x{:02X} func=0x{:02X} base={} count={}",
+                            key.slave, key.function, key.base_register, key.count);
+                        let mut map = pending.lock().await;
+                        if let Some(tx) = map.remove(&key) {
+                            let _ = tx.send(decoded);
                         }
-                        Err(e) => {
-                            tracing::warn!(
-                                frame_len = full.len(),
-                                error = %e,
-                                raw_hex = %hex_bytes,
-                                "Auto-discovered serial REJECTED — frame truncated, keeping empty serial"
-                            );
-                            self.serial_suspect = true;
-                            // Keep serial empty for subsequent requests
-                            return Err(ClientError::FrameError(format!(
-                                "auto-discover frame truncated: {e}"
-                            )));
-                        }
+                        // No matching future -> stale frame, silently dropped.
                     }
                 }
+                Err(e) => {
+                    tracing::debug!("Consumer: decode error: {e}");
+                }
             }
-
-            // Normal path: no auto-discovery needed or failed — just decode
-            let hex_bytes = dump_hex(&full);
-            return framer::decode_frame(&full).map_err(|e| {
-                tracing::warn!(
-                    frame_len = full.len(),
-                    error = %e,
-                    raw_hex = %hex_bytes,
-                    "Frame decode failed"
-                );
-                ClientError::FrameError(e.to_string())
-            });
         }
+
+        connected.store(false, Ordering::SeqCst);
     }
 
-    /// Drain any complete response frames buffered in the TCP socket.
-    ///
-    /// Called before write batches to flush stale read responses left over
-    /// from the previous poll cycle. Uses short timeouts so it returns
-    /// quickly once the buffer is empty.
-    pub async fn drain_stale_frames(&mut self) {
-        let stream = match self.stream.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
+    /// Read one complete GivEnergy frame (MBAP header + body) from TCP.
+    async fn read_one_frame(
+        reader: &mut tokio::net::tcp::OwnedReadHalf,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ClientError> {
+        let mut header_buf = [0u8; 6];
+        tokio::time::timeout(timeout, reader.read_exact(&mut header_buf))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|e| ClientError::ReceiveFailed(format!("reading MBAP header: {e}")))?;
 
-        let mut drained = 0usize;
-        loop {
-            let mut header = [0u8; 6];
-            match tokio::time::timeout(Duration::from_millis(200), stream.read_exact(&mut header))
-                .await
-            {
-                Ok(Ok(_)) => {
-                    let length = u16::from_be_bytes([header[4], header[5]]) as usize;
-                    if length > 0 && length < MAX_RESPONSE_SIZE {
-                        let mut rest = vec![0u8; length];
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(200),
-                            stream.read_exact(&mut rest),
-                        )
-                        .await;
-                    }
-                    drained += 1;
-                }
-                _ => break, // timeout or error — buffer is clear
-            }
-        }
-
-        if drained > 0 {
-            tracing::info!("Drained {drained} stale frame(s)");
-        }
-    }
-
-    /// Send a raw frame and read back one response frame.
-    ///
-    /// Convenience wrapper that sends a request and reads one response.
-    /// Checks for Modbus exception responses and returns `Err` for them.
-    async fn send_and_receive(&mut self, frame: &[u8]) -> Result<DecodedFrame, ClientError> {
-        let t0 = std::time::Instant::now();
-        self.send_raw(frame).await?;
-        let send_elapsed = t0.elapsed();
-
-        // Log the raw request frame at debug level. This is essential for
-        // diagnosing dongles that accept TCP but never respond — we need to
-        // see the serial, slave address, and register range we sent.
-        let hex_preview: String = frame
-            .iter()
-            .take(30)
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        tracing::debug!(
-            req_len = frame.len(),
-            send_ms = send_elapsed.as_millis() as u64,
-            "Sent request, awaiting response: [{}]",
-            hex_preview,
-        );
-
-        let decoded = self.receive_frame().await?;
-        let total_elapsed = t0.elapsed();
-
-        // Log response timing at debug level for diagnostics.
-        tracing::debug!(
-            resp_slave = decoded.slave,
-            resp_func = decoded.function,
-            resp_payload_len = decoded.payload.len(),
-            total_ms = total_elapsed.as_millis() as u64,
-            "Response received"
-        );
-
-        // Check for Modbus exception response (function code with high bit set)
-        if decoded.function >= 0x80 {
-            let exception_code = decoded.payload.first().copied().unwrap_or(0);
+        let length = u16::from_be_bytes([header_buf[4], header_buf[5]]) as usize;
+        if length > MAX_RESPONSE_SIZE {
             return Err(ClientError::InvalidResponse(format!(
-                "Modbus exception: function 0x{:02X}, code {}",
-                decoded.function, exception_code
+                "response length {length} exceeds maximum {MAX_RESPONSE_SIZE}"
             )));
         }
 
-        Ok(decoded)
+        let mut rest = vec![0u8; length];
+        tokio::time::timeout(timeout, reader.read_exact(&mut rest))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|e| ClientError::ReceiveFailed(format!("reading frame body: {e}")))?;
+
+        let mut full = Vec::with_capacity(6 + length);
+        full.extend_from_slice(&header_buf);
+        full.extend_from_slice(&rest);
+        Ok(full)
+    }
+
+    /// Send a frame via the TCP writer and wait for a matching response via
+    /// the consumer task's pending futures.
+    async fn send_and_await_response(
+        &mut self,
+        frame: Vec<u8>,
+        key: ResponseKey,
+    ) -> Result<DecodedFrame, ClientError> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(key.clone(), tx);
+
+        // Send the frame via the TCP writer.
+        let writer = self.writer.as_mut().ok_or(ClientError::NotConnected)?;
+        tokio::time::timeout(self.timeout, writer.write_all(&frame))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|e| ClientError::SendFailed(e.to_string()))?;
+
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(frame)) => {
+                if frame.function >= 0x80 {
+                    let code = frame.payload.first().copied().unwrap_or(0);
+                    return Err(ClientError::InvalidResponse(format!(
+                        "Modbus exception: function 0x{:02X}, code {}",
+                        frame.function, code
+                    )));
+                }
+                Ok(frame)
+            }
+            Ok(Err(_)) => Err(ClientError::NotConnected),
+            Err(_) => Err(ClientError::Timeout),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -687,89 +552,42 @@ impl ModbusClient {
         count: u16,
     ) -> Result<Vec<u16>, ClientError> {
         let expected_fc = register_type.function_code();
-        let reg_type_name = match register_type {
-            RegisterType::Input => "IR",
-            RegisterType::Holding => "HR",
-        };
 
         for attempt in 0..=Self::MAX_STALE_RETRIES {
-            // Build the request frame
             let request =
                 framer::build_read_request(&self.serial, self.slave, register_type, start, count);
+            let key = ResponseKey::from_request(self.slave, expected_fc, start, count);
 
-            // Log the first attempt at info level so it's visible in the
-            // developer console even at default log level.
             if attempt == 0 {
                 tracing::debug!(
-                    "Reading {reg_type_name} {start}..{} ({} regs) from slave 0x{:02X}, serial={:?}",
-                    start + count - 1,
-                    count,
-                    self.slave,
-                    if self.serial.is_empty() { "<auto-discover>" } else { &self.serial },
+                    "Reading {} {}..{} ({} regs) from slave 0x{:02X}",
+                    if matches!(register_type, RegisterType::Input) { "IR" } else { "HR" },
+                    start, start + count - 1, count, self.slave,
                 );
             }
 
-            // Send and receive
-            let decoded = self.send_and_receive(&request).await?;
-
-            // Check for stale response (slave/function/base register from a previous
-            // request). The GivEnergy dongle sometimes queues responses from multiple
-            // bus devices and the TCP stream can hold frames from other slaves (e.g.
-            // battery module at 0x35 responding instead of the inverter at 0x31).
-            // Before retrying, drain ALL queued frames from the buffer so the next
-            // fresh request gets a fresh response — otherwise we chase stale frames
-            // through every retry.
-            if decoded.slave != self.slave
-                || decoded.function != expected_fc
-                || (|| -> Result<bool, ClientError> {
-                    let (rb, rc) = Self::response_register_metadata(&decoded)?;
-                    Ok(rb != start || rc > count)
-                })()?
-            {
-                if attempt < Self::MAX_STALE_RETRIES {
-                    tracing::debug!(
-                        "Stale response (slave=0x{:02X}, func=0x{:02X}) — draining and retrying ({}/{})",
-                        decoded.slave, decoded.function,
-                        attempt + 1, Self::MAX_STALE_RETRIES,
-                    );
-                    // Drain any queued stale frames before sending a new request.
-                    // Use a longer delay (500ms, matching givenergy-modbus) so the
-                    // dongle has time to recover before the next attempt.
-                    self.drain_stale_frames().await;
+            match self.send_and_await_response(request, key).await {
+                Ok(decoded) => {
+                    return Self::parse_register_response(&decoded, count);
+                }
+                Err(ClientError::Timeout) if attempt < Self::MAX_STALE_RETRIES => {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                // Determine the most useful error message.
-                if decoded.slave != self.slave {
-                    return Err(ClientError::InvalidResponse(format!(
-                        "slave mismatch: expected 0x{:02X}, got 0x{:02X}",
-                        self.slave, decoded.slave
-                    )));
+                Err(ClientError::InvalidResponse(msg)) if attempt < Self::MAX_STALE_RETRIES
+                    && (msg.contains("code 67") || msg.contains("Modbus exception"))
+                => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
                 }
-                if decoded.function != expected_fc {
-                    return Err(ClientError::InvalidResponse(format!(
-                        "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
-                        expected_fc, decoded.function
-                    )));
+                Err(_) if attempt < Self::MAX_STALE_RETRIES => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
                 }
-                let (resp_base_register, resp_register_count) =
-                    Self::response_register_metadata(&decoded)?;
-                return Err(ClientError::InvalidResponse(format!(
-                    "register range mismatch: expected {}..{} count {}, got {}..{} count {}",
-                    start,
-                    start + count - 1,
-                    count,
-                    resp_base_register,
-                    resp_base_register.saturating_add(resp_register_count.saturating_sub(1)),
-                    resp_register_count,
-                )));
+                Err(e) => return Err(e),
             }
-
-            // --- Valid response, parse register data ---
-            return Self::parse_register_response(&decoded, count);
         }
 
-        // Unreachable, but keeps the compiler happy
         Err(ClientError::InvalidResponse(
             "exhausted retries".to_string(),
         ))
@@ -835,124 +653,61 @@ impl ModbusClient {
     /// Handles stale read responses and dongle-busy exceptions (code 67)
     /// with automatic retries.
     pub async fn write_register(&mut self, register: u16, value: u16) -> Result<(), ClientError> {
-        let inner_function: u8 = 6; // Write Single Holding Register
-
-        // Encode the full frame.
+        let inner_function: u8 = 6;
         let request = Self::build_write_register_request(&self.serial, register, value);
+        let key = ResponseKey::from_request(self.slave, inner_function, register, 1);
 
-        // GivEnergy dongles return exception code 67 (busy) frequently.
-        // We retry a few times with moderate delays, but fail fast rather
-        // than blocking the entire poll loop.  Some registers (e.g. HR 32)
-        // appear to be persistently unwritable on certain inverter models —
-        // no amount of retrying will help.
         let max_attempts: u8 = 6;
-        let mut need_resend = true;
 
         for attempt in 0..max_attempts {
-            if need_resend {
-                let mbap_len = u16::from_be_bytes([request[4], request[5]]);
-                let hex_preview = dump_hex(&request);
-                self.send_raw(&request).await?;
-                tracing::debug!(
-                    register,
-                    value,
-                    req_len = request.len(),
-                    mbap_len,
-                    "Sent write request, awaiting ack: [{hex_preview}]"
-                );
-                need_resend = false;
-            }
-
-            let decoded = match self.receive_frame().await {
-                Ok(d) => d,
-                Err(e) => {
+            match self.send_and_await_response(request.clone(), key.clone()).await {
+                Ok(decoded) => {
+                    if decoded.payload.len() < 14 {
+                        return Err(ClientError::InvalidResponse(format!(
+                            "write response payload too short: need at least 14 bytes, got {}",
+                            decoded.payload.len()
+                        )));
+                    }
+                    let inner = &decoded.payload[10..];
+                    let resp_register = u16::from_be_bytes([inner[0], inner[1]]);
+                    let _resp_value = u16::from_be_bytes([inner[2], inner[3]]);
+                    if resp_register != register {
+                        if attempt + 1 < max_attempts {
+                            tracing::debug!(
+                                "Write at {register} got stale ack (reg {resp_register}), retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            continue;
+                        }
+                        return Err(ClientError::InvalidResponse(format!(
+                            "write acknowledgment mismatch: register {} vs {}",
+                            resp_register, register
+                        )));
+                    }
+                    tracing::debug!("Write ack: register {register} = {value} (0x{value:04X})");
+                    return Ok(());
+                }
+                Err(ClientError::InvalidResponse(msg)) if msg.contains("code 67") => {
                     if attempt + 1 < max_attempts {
-                        tracing::debug!("Write read error at {register}: {e}");
-                        need_resend = true;
+                        tracing::debug!(
+                            "Write at {register} got exception 67 (busy), retrying ({}/{})",
+                            attempt + 1, max_attempts
+                        );
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                         continue;
                     }
-                    return Err(e);
-                }
-            };
-
-            // Exception response
-            if decoded.function >= 0x80 {
-                let code = decoded.payload.first().copied().unwrap_or(0);
-                if code == 67 && attempt + 1 < max_attempts {
-                    tracing::debug!(
-                        "Write at {register} got exception 67 (busy), retrying ({}/{})",
-                        attempt + 1,
-                        max_attempts
-                    );
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    need_resend = true;
-                    continue;
-                }
-                if code == 67 {
-                    // Exception 67 on final attempt: known limitation on some
-                    // registers (e.g. HR 32 on AC Coupled). Treat as soft failure
-                    // — the inverter may have still processed the write, and
-                    // the master enable flag (HR 96/59) will handle the intent.
                     tracing::warn!(
                         "Write at {register} got exception 67 after {max_attempts} retries — treating as acknowledged"
                     );
                     return Ok(());
                 }
-                return Err(ClientError::InvalidResponse(format!(
-                    "Modbus exception: function 0x{:02X}, code {}",
-                    decoded.function, code
-                )));
-            }
-
-            // Wrong function code — stale read response, drain it
-            if decoded.function != inner_function {
-                if attempt + 1 < max_attempts {
-                    tracing::debug!(
-                        "Write at {register} got stale response (func 0x{:02X}), resending ({}/{})",
-                        decoded.function,
-                        attempt + 1,
-                        max_attempts
-                    );
-                    need_resend = true;
+                Err(ClientError::Timeout) if attempt + 1 < max_attempts => {
+                    tracing::debug!("Write at {register} timed out, retrying ({}/{})", attempt + 1, max_attempts);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-                return Err(ClientError::InvalidResponse(format!(
-                    "function code mismatch: expected 0x{:02X}, got 0x{:02X}",
-                    inner_function, decoded.function
-                )));
+                Err(e) => return Err(e),
             }
-
-            // Correct function code (6) — verify it's our ack
-            // Response payload: inverter_serial(10) + register(2) + value(2) + check(2)
-            // After decode_frame strips slave+func+CRC, we have: inverter_serial(10) + register(2) + value(2)
-            if decoded.payload.len() < 14 {
-                return Err(ClientError::InvalidResponse(format!(
-                    "write response payload too short: need at least 14 bytes, got {}",
-                    decoded.payload.len()
-                )));
-            }
-
-            let inner = &decoded.payload[10..];
-            let resp_register = u16::from_be_bytes([inner[0], inner[1]]);
-            let _resp_value = u16::from_be_bytes([inner[2], inner[3]]);
-
-            if resp_register != register {
-                // Stale write ack from a previous write
-                if attempt + 1 < max_attempts {
-                    tracing::debug!(
-                        "Write at {register} got stale ack (reg {resp_register}), draining"
-                    );
-                    continue;
-                }
-                return Err(ClientError::InvalidResponse(format!(
-                    "write acknowledgment mismatch: register {} vs {}",
-                    resp_register, register
-                )));
-            }
-
-            // Success
-            tracing::debug!("Write ack: register {register} = {value} (0x{value:04X})");
-            return Ok(());
         }
 
         Err(ClientError::InvalidResponse(
@@ -1458,20 +1213,33 @@ mod tests {
         responses: Arc<Vec<MockResponse>>,
     ) {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 4096];
         let mut idx = 0usize;
 
         loop {
-            let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                Ok(Ok(n)) => n,
-            };
-
-            if n == 0 {
+            // Read the 6-byte MBAP header.
+            let mut header = [0u8; 6];
+            if tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut header)).await.is_err() {
                 break;
             }
+            let length = u16::from_be_bytes([header[4], header[5]]) as usize;
 
-            // Look up the programmed response (cycle if exhausted)
+            // Read the body (may need multiple reads).
+            let mut rest = vec![0u8; length];
+            let mut read = 0usize;
+            while read < length {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    stream.read(&mut rest[read..]),
+                ).await {
+                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                    Ok(Ok(n)) => read += n,
+                }
+            }
+            if read < length {
+                break; // incomplete frame
+            }
+
+            // Respond
             let response = &responses[idx % responses.len()];
             idx += 1;
 
@@ -1606,7 +1374,7 @@ mod tests {
         });
 
         let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
-        client.set_timeout(Duration::from_secs(5));
+        client.set_timeout(Duration::from_millis(500));
         client.connect().await.unwrap();
 
         (port, server_handle, client)
@@ -1691,8 +1459,8 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(&err, ClientError::InvalidResponse(msg) if msg.contains("slave mismatch")),
-            "Expected slave mismatch error, got: {}",
+            matches!(&err, ClientError::Timeout),
+            "Expected timeout after all retries exhausted, got: {}",
             err
         );
 
@@ -1717,14 +1485,11 @@ mod tests {
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
-        // With the current sequential client, after receiving an exception
-        // the function returns Err, so this will fail. Once the
-        // producer/consumer pattern is implemented, exceptions should also
-        // retry. For now, this documents the expected current behavior.
+        // With the producer/consumer pattern, code 67 is caught in
+        // read_registers_raw's retry loop. It retries and gets the
+        // correct response.
         let result = client.read_registers(RegisterType::Input, 0, 20).await;
-
-        // Exception should propagate as InvalidResponse
-        assert!(result.is_err(), "Expected error from code 67 exception");
+        assert!(result.is_ok(), "Expected success after code 67 retry, got: {:?}", result);
 
         server.await.unwrap();
     }
@@ -1845,11 +1610,11 @@ mod tests {
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
-        // Current sequential client will fail on the first exception.
-        // Producer/consumer pattern will drain all stale frames and succeed.
+        // Producer/consumer: code 67 triggers retry, wrong-slave frames are
+        // dropped, correct response is received.
         let result = client.read_registers(RegisterType::Input, 0, 20).await;
-        assert!(result.is_err(),
-            "Sequential client fails on code 67; producer/consumer will make this pass");
+        assert!(result.is_ok(),
+            "Expected success after code 67 + wrong-slave + correct, got: {:?}", result);
 
         server.await.unwrap();
     }
@@ -1886,7 +1651,6 @@ mod tests {
 
         // The heartbeat response might confuse the sequential client.
         // With producer/consumer, heartbeats are absorbed.
-        eprintln!("Heartbeat test result: {:?}", result);
 
         server.await.unwrap();
     }

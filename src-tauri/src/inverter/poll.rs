@@ -1563,7 +1563,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // Drain any stale data the dongle buffered from a previous
                 // session — without this, cached responses corrupt the
                 // request-response pairing for the first poll.
-                client.drain().await;
 
                 // Warmup reads: discard the first register reads after connect.
                 // The dongle's internal state can be stale after a TCP reconnect,
@@ -1687,9 +1686,6 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                         std::mem::take(&mut *pw)
                     };
                     if !pending.is_empty() {
-                        // Flush stale read responses from the previous poll cycle
-                        client.drain_stale_frames().await;
-
                         for writes in &pending {
                             for w in writes {
                                 match client.write_register(w.address, w.value).await {
@@ -1718,8 +1714,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                         // Flush any stale frames left over from write responses
                         // before starting the read cycle
-                        client.drain_stale_frames().await;
-                    }
+                        }
 
                     let (poll_ok, sanitized) = async {
                         match client.read_all_with_extras(known_device_type.as_ref()).await {
@@ -2157,8 +2152,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             // Drain stale frames first to avoid function code
                                             // mismatches (stale read responses can be mistaken
                                             // for write acknowledgments).
-                                            client.drain_stale_frames().await;
-                                            tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
+                                                                    tracing::info!("Cosy: entering slot, force-charging to {}%", slot_target_soc);
                                             drop(cosy_active);
                                             let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                             let cmd = if use_3ph {
@@ -2191,8 +2185,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         } else if !in_slot && *cosy_active {
                                             // Exiting a cosy slot — restore normal Eco mode.
                                             // Drain stale frames for the same reason as entry.
-                                            client.drain_stale_frames().await;
-                                            tracing::info!("Cosy: exiting slot, restoring Eco mode");
+                                                                    tracing::info!("Cosy: exiting slot, restoring Eco mode");
                                             drop(cosy_active);
                                             let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                             let cmd = if use_3ph {
@@ -2312,8 +2305,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             if price <= charge_threshold {
                                                 if *ag_state != AgileState::Charging {
                                                     // Enter charge mode
-                                                    client.drain_stale_frames().await;
-                                                    tracing::info!("Agile: price {price}p ≤ {charge_threshold}p — force charging");
+                                                                                    tracing::info!("Agile: price {price}p ≤ {charge_threshold}p — force charging");
                                                     drop(ag_state);
                                                     let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                                     let cmd = if use_3ph {
@@ -2341,8 +2333,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             } else if price >= discharge_threshold {
                                                 if *ag_state != AgileState::Discharging {
                                                     // Enter discharge mode
-                                                    client.drain_stale_frames().await;
-                                                    tracing::info!("Agile: price {price}p ≥ {discharge_threshold}p — force discharging");
+                                                                                    tracing::info!("Agile: price {price}p ≥ {discharge_threshold}p — force discharging");
                                                     drop(ag_state);
                                                     let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                                     let cmd = if use_3ph {
@@ -2370,8 +2361,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             } else {
                                                 // Hold — price between thresholds: revert to Eco mode
                                                 if *ag_state != AgileState::Idle {
-                                                    client.drain_stale_frames().await;
-                                                    tracing::info!("Agile: hold (price {price}p), reverting to Eco");
+                                                                                    tracing::info!("Agile: hold (price {price}p), reverting to Eco");
                                                     drop(ag_state);
                                                     let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
                                                     let cmd = if use_3ph {
