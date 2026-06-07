@@ -43,7 +43,7 @@ function levelColor(level: string): string {
 export default function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [filter, setFilter] = useState<string>('');
-  const [captureLevel, setCaptureLevel] = useState<string>('INFO');
+  const [captureLevel, setCaptureLevel] = useState<string>('WARN');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);

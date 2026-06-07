@@ -45,7 +45,9 @@ impl LogRing {
                 cursor: 0,
                 len: 0,
             }),
-            min_level: AtomicU8::new(2), // default: INFO
+            min_level: AtomicU8::new(1), // default: WARN — INFO floods the
+                                                // ring and the developer console
+                                                // with routine per-poll lines
         }
     }
 
