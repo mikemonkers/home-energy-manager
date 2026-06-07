@@ -101,7 +101,7 @@ pub const IR_TODAY_EXPORT_ENERGY: u16 = 25;
 pub const IR_TODAY_IMPORT_ENERGY: u16 = 26;
 /// Grid power in watts, signed (positive = exporting, negative = importing).
 pub const IR_GRID_POWER: u16 = 30;
-/// Household consumption today in 0.1 kWh units.
+/// AC charge energy today in 0.1 kWh units (e_ac_charge_today, NOT house consumption).
 pub const IR_TODAY_CONSUMPTION: u16 = 35;
 /// Battery charge energy today in 0.1 kWh units.
 pub const IR_TODAY_CHARGE_ENERGY: u16 = 36;
