@@ -147,8 +147,16 @@ pub struct ModbusClient {
     /// switching to 0x31 for AC-coupled and Gen1 Hybrid models. Battery BMS
     /// reads still explicitly target 0x32/0x33+ via `read_registers_at_slave`.
     slave: u8,
-    /// Write half of the split TCP stream. `None` when disconnected.
-    writer: Option<OwnedWriteHalf>,
+    /// Write half of the split TCP stream, shared with the consumer task so
+    /// it can answer dongle heartbeat requests without a writer of its own.
+    /// `None` when disconnected.
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` because writes to a single TCP stream must
+    /// be serialised — the consumer answers heartbeats (~every 3 min) while the
+    /// client issues request frames, and concurrent `write_all` calls would
+    /// interleave. `tokio::sync::Mutex` is used because `write_all` is awaited
+    /// while the lock is held.
+    writer: Option<Arc<Mutex<OwnedWriteHalf>>>,
     /// Timeout for individual read/write operations.
     timeout: Duration,
     /// Pending response futures, keyed by content hash (slave+func+base+count).
@@ -261,9 +269,13 @@ impl ModbusClient {
         tracing::info!("TCP connected: local={local}, peer={peer}, nodelay=true, keepalive=10s");
 
         // Split the stream so the consumer reads and the client writes
-        // independently without lock contention on the TCP stream.
+        // independently without lock contention on the TCP stream. The writer
+        // is shared (via Arc<Mutex>) with the consumer task so it can answer
+        // dongle heartbeat requests — without a response the dongle closes the
+        // socket after 3 missed heartbeats (~9 min).
         let (reader, writer) = stream.into_split();
-        self.writer = Some(writer);
+        let writer = Arc::new(Mutex::new(writer));
+        self.writer = Some(writer.clone());
 
         // Set connected BEFORE spawning the consumer task so it doesn't
         // see the default `false` and exit immediately.
@@ -273,7 +285,7 @@ impl ModbusClient {
         let connected = self.connected.clone();
         let timeout = self.timeout;
         self.consumer_handle = Some(tokio::spawn(async move {
-            Self::consumer_task(reader, pending, connected, timeout).await;
+            Self::consumer_task(reader, writer, pending, connected, timeout).await;
         }));
 
         Ok(())
@@ -283,12 +295,19 @@ impl ModbusClient {
     pub async fn disconnect(&mut self) {
         self.connected.store(false, Ordering::SeqCst);
 
-        // Abort background tasks.
+        // Abort background tasks and await completion so the consumer releases
+        // its shared writer clone before we drop our own — guaranteeing the
+        // write half is closed and the TCP connection tears down promptly.
         if let Some(h) = self.consumer_handle.take() {
             h.abort();
+            // `abort()` cancels the task at its next await point; awaiting the
+            // JoinHandle waits for that cancellation to finish so the task's
+            // locals (including its writer Arc clone) are dropped first.
+            let _ = h.await;
         }
 
-        // Drop the writer - closes the TCP connection.
+        // Drop our writer clone — the last Arc reference now that the consumer
+        // has finished, so the write half closes the TCP connection.
         self.writer = None;
     }
 
@@ -304,7 +323,8 @@ impl ModbusClient {
     /// Send a raw frame to the dongle via the TCP writer.
     #[allow(dead_code)]
     async fn send_raw(&mut self, frame: &[u8]) -> Result<(), ClientError> {
-        let writer = self.writer.as_mut().ok_or(ClientError::NotConnected)?;
+        let writer = self.writer.as_ref().ok_or(ClientError::NotConnected)?;
+        let mut writer = writer.lock().await;
         tokio::time::timeout(self.timeout, writer.write_all(frame))
             .await
             .map_err(|_| ClientError::Timeout)?
@@ -321,6 +341,7 @@ impl ModbusClient {
     /// dropped — no caller is waiting for them.
     async fn consumer_task(
         mut reader: tokio::net::tcp::OwnedReadHalf,
+        writer: Arc<Mutex<OwnedWriteHalf>>,
         pending: Arc<Mutex<HashMap<ResponseKey, oneshot::Sender<DecodedFrame>>>>,
         connected: Arc<AtomicBool>,
         timeout: Duration,
@@ -339,8 +360,18 @@ impl ModbusClient {
                 Err(_) => break, // connection lost
             };
 
-            // Heartbeat — best-effort; the dongle tolerates 3 misses before close.
+            // Heartbeat — the dongle sends one (~every 3 min) and closes the
+            // socket after 3 unanswered ones (~9 min). Echo the request back so
+            // the connection stays alive. Best-effort: a send failure means the
+            // socket is already tearing down, so we exit the consumer.
             if framer::is_heartbeat_request(&frame) {
+                let response = framer::build_heartbeat_response(&frame);
+                let mut w = writer.lock().await;
+                if let Err(e) = w.write_all(&response).await {
+                    tracing::warn!("Failed to send heartbeat response: {e}");
+                    break;
+                }
+                tracing::trace!("Sent heartbeat response ({} bytes)", response.len());
                 continue;
             }
 
@@ -405,11 +436,13 @@ impl ModbusClient {
         self.pending.lock().await.insert(key.clone(), tx);
 
         // Send the frame via the TCP writer.
-        let writer = self.writer.as_mut().ok_or(ClientError::NotConnected)?;
+        let writer = self.writer.as_ref().ok_or(ClientError::NotConnected)?;
+        let mut writer = writer.lock().await;
         tokio::time::timeout(self.timeout, writer.write_all(&frame))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::SendFailed(e.to_string()))?;
+        drop(writer); // release the writer lock before awaiting the response
 
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(frame)) => {
@@ -1597,10 +1630,11 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_is_absorbed_by_consumer() {
-        // The dongle sends a heartbeat before the response. The consumer
-        // should handle it transparently without the caller seeing it.
+        // The dongle sends a heartbeat before the response. The consumer must
+        // answer it (echo) so the connection stays alive, and transparently
+        // route the subsequent read response to the caller.
 
-        // Build a minimal heartbeat frame
+        // Build a minimal heartbeat frame.
         let mut heartbeat = vec![0x59, 0x59, 0x00, 0x01, 0x00, 0x00, 0x01, 0x01];
         let len = 2u16; // minimum: unit(1) + function(1)
         heartbeat[4..6].copy_from_slice(&len.to_be_bytes());
@@ -1608,9 +1642,9 @@ mod tests {
         let correct_data: Vec<u16> = (0..20).collect();
 
         let responses = vec![
-            // Heartbeat request from dongle (should be responded to, not forwarded)
+            // Heartbeat request from dongle — consumer echoes it back.
             MockResponse::Raw(heartbeat.clone()),
-            // Correct read response
+            // Correct read response (sent after the mock reads our echo).
             MockResponse::ReadResponse {
                 slave: 0x11,
                 function: 0x04,
@@ -1625,10 +1659,61 @@ mod tests {
             .read_registers(RegisterType::Input, 0, 20)
             .await;
 
-        // The heartbeat response might confuse the sequential client.
-        // With producer/consumer, heartbeats are absorbed.
+        // The consumer echoed the heartbeat, so the mock advanced to the read
+        // response and the call succeeds. Without the echo, this would time
+        // out (the mock would block waiting for the client's second frame).
+        assert!(result.is_ok(), "heartbeat not answered — read failed: {result:?}");
+        assert_eq!(result.unwrap().len(), 20);
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn consumer_answers_heartbeat_with_echo() {
+        // Regression test for the dropped-heartbeat bug: the consumer must
+        // echo each heartbeat request back to the dongle, otherwise the
+        // socket is torn down after 3 missed heartbeats (~9 min). This uses
+        // a raw server (not the response-driven mock) to capture the exact
+        // bytes the client sends in response to an unsolicited heartbeat.
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Heartbeat request frame the dongle sends (0x5959 MBAP + function 0x01).
+        let mut heartbeat = vec![0x59, 0x59, 0x00, 0x01, 0x00, 0x00, 0x01, 0x01];
+        let len = 2u16; // minimum: unit(1) + function(1)
+        heartbeat[4..6].copy_from_slice(&len.to_be_bytes());
+        let expected_echo = heartbeat.clone();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Dongle sends the heartbeat request.
+            stream.write_all(&heartbeat).await.unwrap();
+            // Read back whatever the client sends in response.
+            let mut echo = vec![0u8; heartbeat.len()];
+            stream.read_exact(&mut echo).await.unwrap();
+            echo
+        });
+
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(500));
+        client.connect().await.unwrap();
+
+        // The consumer runs in the background and should echo the heartbeat.
+        // No read is issued from the client, so the only outbound bytes are the
+        // heartbeat response. Bound the wait so a missing echo fails fast
+        // instead of hanging.
+        let echo = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server timed out — consumer did not echo the heartbeat")
+            .expect("server task panicked");
+        assert_eq!(
+            echo, expected_echo,
+            "consumer must echo the heartbeat back byte-for-byte"
+        );
+
+        client.disconnect().await;
     }
 
     #[tokio::test]
