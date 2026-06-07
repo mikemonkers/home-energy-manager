@@ -1371,7 +1371,7 @@ fn sanitize_snapshot(
         | crate::inverter::model::DeviceType::HybridHvGen3
         | crate::inverter::model::DeviceType::AllInOneHybrid => 400.0,
         crate::inverter::model::DeviceType::ThreePhase
-        | crate::inverter::model::DeviceType::ACThreePhase => 100.0,
+        | crate::inverter::model::DeviceType::ACThreePhase => 600.0,
         _ => 60.0,
     };
     if snap.battery_voltage > max_battery_voltage || snap.battery_voltage < 0.0 {
