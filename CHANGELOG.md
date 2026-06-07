@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.3] - 2026-06-07
+
+### Fixed
+
+- **Frontend now shows detailed API error messages**
+  `parseApiResponse` was checking `res.ok` before parsing the body,
+  so helpful 400-level error messages like "Charge slot 5 not supported
+  on this inverter model" were reduced to "API error: 400". Now extracts
+  the `{error}` field from the body before falling back to the status.
+
+- **History SQLite insert moved off the Tokio worker**
+  `insert_reading` was called while holding the async history mutex,
+  blocking the worker with synchronous I/O every poll. Now clones the
+  `Arc<HistoryDb>`, drops the lock, and uses `spawn_blocking`.
+
+- **Integer truncation prevented in slot validation**
+  A `u64` from the request body was cast directly to `u8` before
+  validation (e.g. `{slot: 258}` → `258u64 as u8 = 2`, writes to slot 2).
+  Now validates the original `u64` against `u8::MAX` before truncating.
+
+- **History loading spinner no longer gets permanently stuck**
+  If deps changed mid-fetch, the `cancelled` flag skipped the decrement,
+  so `loadingKey` grew unboundedly. Moved the decrement into `.finally()`
+  so it always runs regardless of cancellation.
+
 ## [0.17.2] - 2026-06-07
 
 ### Fixed

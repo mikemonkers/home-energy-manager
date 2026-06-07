@@ -807,12 +807,15 @@ export default function HistoryPage() {
             cleaned[field] = removeSpikes(pts, field);
           }
           setData(cleaned);
-          setLoadingKey((k) => Math.max(0, k - 1));
         }
       })
       .catch(() => {
         if (!cancelled) {
           setData({});
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
           setLoadingKey((k) => Math.max(0, k - 1));
         }
       });

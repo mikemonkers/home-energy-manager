@@ -3035,15 +3035,18 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // Broadcast to WebSocket subscribers.
                                 let _ = state.tx.send(PollMessage::Snapshot(Box::new(snapshot.clone())));
 
-                                // Persist to history database.
-                                // The snapshot has already been sanitized, so skip
-                                // only if SOC is still 0 (no previous fallback available).
-                                {
-                                    let h = state.history.lock().await;
-                                    if let Some(ref db) = *h {
-                                        if snapshot.soc > 0 {
-                                            db.insert_reading(&snapshot);
-                                        }
+                                // Persist to history database. Clone the Arc and
+                                // drop the lock so synchronous SQLite I/O doesn't
+                                // block the Tokio worker (same pattern as get_history).
+                                if snapshot.soc > 0 {
+                                    let db_guard = state.history.lock().await;
+                                    let db = db_guard.clone();
+                                    drop(db_guard);
+                                    if let Some(db) = db {
+                                        let snap = snapshot.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            db.insert_reading(&snap);
+                                        });
                                     }
                                 }
 

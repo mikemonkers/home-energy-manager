@@ -33,6 +33,15 @@ async function parseApiResponse<T>(res: Response): Promise<T> {
   }
 
   if (!res.ok) {
+    // Backend returns 400 with {ok:false, error:"..."} — extract the message.
+    if (
+      data != null
+      && typeof data === 'object'
+      && 'error' in data
+      && typeof (data as { error?: unknown }).error === 'string'
+    ) {
+      throw new Error((data as { error: string }).error);
+    }
     throw new Error(`API error: ${res.status}`);
   }
 

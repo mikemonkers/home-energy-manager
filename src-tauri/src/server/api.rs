@@ -371,8 +371,8 @@ pub async fn set_charge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let slot: u8 = match body["slot"].as_u64() {
-        Some(s) => s as u8,
+    let slot_raw = match body["slot"].as_u64() {
+        Some(s) => s,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
     let device_type = state
@@ -384,6 +384,10 @@ pub async fn set_charge_slot(
         .unwrap_or(DeviceType::Gen2Hybrid);
     // AC Coupled and Gen1 Hybrid only support charge slot 1 (HR 94-95).
     let max_slots = device_type.max_charge_slots();
+    if slot_raw > u8::MAX as u64 {
+        return error_response(&format!("Slot must be 1..{max_slots}, got {slot_raw}"));
+    }
+    let slot = slot_raw as u8;
     if slot > max_slots {
         return error_response(&format!(
             "Charge slot {} not supported on this inverter model (max {})",
@@ -472,8 +476,8 @@ pub async fn set_discharge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> (StatusCode, Json<Value>) {
-    let slot: u8 = match body["slot"].as_u64() {
-        Some(s) => s as u8,
+    let slot_raw = match body["slot"].as_u64() {
+        Some(s) => s,
         None => return error_response("Missing 'slot' field (1-2)"),
     };
     let device_type = state
@@ -485,6 +489,10 @@ pub async fn set_discharge_slot(
         .unwrap_or(DeviceType::Gen2Hybrid);
     // Check model support — AC Coupled/Gen1 only have 1 discharge slot.
     let max_slots = device_type.max_discharge_slots();
+    if slot_raw > u8::MAX as u64 {
+        return error_response(&format!("Slot must be 1..{max_slots}, got {slot_raw}"));
+    }
+    let slot = slot_raw as u8;
     if slot > max_slots {
         return error_response(&format!(
             "Discharge slot {} not supported on this inverter model (max {})",
