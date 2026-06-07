@@ -133,6 +133,10 @@ pub const HR_DEVICE_TYPE: u16 = 0;
 pub const HR_SERIAL_NUMBER_START: u16 = 13;
 /// Enable charge target (bool).
 pub const HR_ENABLE_CHARGE_TARGET: u16 = 20;
+/// Battery self-heating enable (bool). Hardware/batch-gated.
+pub const HR_BATTERY_SELF_HEATING: u16 = 104;
+/// Manual battery heater enable (bool). Likely hardware-gated.
+pub const HR_MANUAL_BATTERY_HEATER: u16 = 172;
 /// ARM firmware version.
 pub const HR_ARM_FIRMWARE: u16 = 21;
 /// Battery power mode: 0 = export, 1 = self-consumption (eco).
@@ -430,7 +434,11 @@ pub const HV_BCU_POLL_BLOCK: RegisterBlock = RegisterBlock {
 /// Sourced from the givenergy-modbus reference library's WRITE_SAFE_REGISTERS.
 pub const SAFE_WRITE_REGS: &[u16] = &[
     20, 27, 29, 31, 32, 35, 36, 37, 38, 39, 40, 44, 45, 50, 56, 57, 59, 94, 95, 96, 110, 111, 112,
-    114, 116, 163, 166, // Charge slots 3-10 (Gen3 extended)
+    114, 116, 163, 166,
+    // Battery heater controls (givenergy-modbus #167, confirmed via GE Android app)
+    104, // ENABLE_BATTERY_SELF_HEATING — hardware/batch-gated
+    172, // ENABLE_MANUAL_BATTERY_HEATER — likely hardware-gated like 104
+    // Charge slots 3-10 (Gen3 extended)
     246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264,
     265, 266, 267, 268, 269, // Discharge slots 3-10 (Gen3 extended)
     276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294,
@@ -698,6 +706,8 @@ mod tests {
         assert!(SAFE_WRITE_REGS.contains(&HR_CHARGE_TARGET_SOC)); // 116
         assert!(SAFE_WRITE_REGS.contains(&HR_INVERTER_REBOOT)); // 163
         assert!(SAFE_WRITE_REGS.contains(&HR_ENABLE_RTC)); // 166
+        assert!(SAFE_WRITE_REGS.contains(&HR_BATTERY_SELF_HEATING)); // 104
+        assert!(SAFE_WRITE_REGS.contains(&HR_MANUAL_BATTERY_HEATER)); // 172
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_YEAR)); // 35
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_MONTH)); // 36
         assert!(SAFE_WRITE_REGS.contains(&HR_SYSTEM_TIME_DAY)); // 37

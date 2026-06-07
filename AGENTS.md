@@ -7,7 +7,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Frontend**: React 19 + TypeScript + Vite 9 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
-- **Testing**: Rust unit tests (241) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour (no frontend tests)
+- **Testing**: Rust unit tests (242) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour (no frontend tests)
 - **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are the source of truth for register layout, slot maps, slave addressing, and command encoding
 
 ## Prerequisites
@@ -24,7 +24,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
 | `npm run preview` | `vite preview` |
-| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (241 tests) |
+| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (242 tests) |
 | `cargo clippy` (in `src-tauri/`) | Run Rust linter |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
@@ -99,7 +99,7 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 - **`modbus/`** — GivEnergy Modbus TCP protocol
   - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain, heartbeat handling. A background consumer task owns the read half of the split TCP stream and routes incoming frames to pending futures by content key (slave+function+register range); it also **echoes dongle heartbeat requests** (function 0x01) back to the dongle via the shared `Arc<Mutex<OwnedWriteHalf>>` — without the echo the dongle closes the socket after 3 missed heartbeats (~9 min). Writes (request frames + heartbeat responses) are serialised through the same mutex. **Default slave address is `0x11`** (canonical detection address per givenergy-modbus and GivTCP), not `0x32`. `read_all_with_extras()` takes `device_type` and `arm_fw` to decide which optional blocks (extended schedules, AC config, three-phase config) to poll.
   - `framer.rs` — proprietary frame encode/decode (MBAP header + transparent sub-frame + CRC); response CRC validation is lenient (logged, not rejected)
-  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard poll blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, plus per-battery `IR(60,60)` blocks. Optional model-specific blocks: `EXTENDED_SLOTS_BLOCK` (HR240-299), `AC_CONFIG_BLOCK` (HR300-359), `THREE_PHASE_CONFIG_BLOCK` (HR1080-1124), plus composite constants `AC_AND_THREE_PHASE_BLOCKS`, `EXTENDED_AND_THREE_PHASE_BLOCKS`. HV battery addresses: `HV_BMS_ADDRESS` (0xA0, IR61 = BCU count), `HV_BCU_BASE_ADDRESS` (0x70, cluster read IR 60-119), `HV_BMU_BASE_ADDRESS` (0x50, per-module cell read). `SAFE_WRITE_REGS` is the union of the givenergy-modbus safe-write allowlist and is asserted against key addresses in unit tests.
+  - `registers.rs` — register addresses, poll block definitions, safe-write whitelist, HHMM encode/decode. Standard poll blocks: `IR(0,60)`, `HR(0,60)`, `HR(60,60)`, plus per-battery `IR(60,60)` blocks. Optional model-specific blocks: `EXTENDED_SLOTS_BLOCK` (HR240-299), `AC_CONFIG_BLOCK` (HR300-359), `THREE_PHASE_CONFIG_BLOCK` (HR1080-1124), plus composite constants `AC_AND_THREE_PHASE_BLOCKS`, `EXTENDED_AND_THREE_PHASE_BLOCKS`. HV battery addresses: `HV_BMS_ADDRESS` (0xA0, IR61 = BCU count), `HV_BCU_BASE_ADDRESS` (0x70, cluster read IR 60-119), `HV_BMU_BASE_ADDRESS` (0x50, per-module cell read). `SAFE_WRITE_REGS` is the union of the givenergy-modbus safe-write allowlist and is asserted against key addresses in unit tests. Battery heater registers (`HR_BATTERY_SELF_HEATING` 104, `HR_MANUAL_BATTERY_HEATER` 172) are in the whitelist per givenergy-modbus #167 (confirmed via GE Android app's Direct Control tab) but are hardware/batch-gated — writes may be rejected per-unit. They live in the single-phase register block (HR 0-179); three-phase models use HR 1000+ for config and these addresses are unlikely to respond. Auto-winter mode (force-charge on cold) is the universal battery-warming approach.
 - **`server/`** — Axum HTTP layer
   - `api.rs` — REST endpoints for control commands; queues writes to `AppState::pending_writes` and notifies poll loop
   - `ws.rs` — WebSocket endpoint streaming `PollMessage` (snapshot or connection state)
