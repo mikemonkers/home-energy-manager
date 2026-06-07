@@ -2277,6 +2277,65 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             }
                                         }
                                     }
+
+                                    // --- HV battery: BMU per-module cell reads ---
+                                    //
+                                    // Each BMU (device 0x50+m) exposes one module's
+                                    // cell-level data for the Battery page. The read base
+                                    // shifts by 120*bcu_offset so the returned slice
+                                    // always starts at v_cell_01 (per GivTCP's read
+                                    // convention; givenergy-modbus resolves the same
+                                    // layout via the BMU stride within a BCU).
+                                    let mut module_index: usize = 0;
+                                    for &(offset, num_modules) in &detected_hv_stacks {
+                                        let base = 60u16 + 120u16 * offset as u16;
+                                        for bmu_num in 0..num_modules {
+                                            let bmu_addr = crate::modbus::registers::
+                                                HV_BMU_BASE_ADDRESS.wrapping_add(bmu_num);
+                                            match client
+                                                .read_registers_at_slave(
+                                                    bmu_addr,
+                                                    crate::modbus::framer::RegisterType::Input,
+                                                    base,
+                                                    60,
+                                                )
+                                                .await
+                                            {
+                                                Ok(data)
+                                                    if crate::inverter::decoder::
+                                                        validate_hv_bmu(&data) =>
+                                                {
+                                                    let module = crate::inverter::decoder::
+                                                        decode_hv_bmu_block(&data, module_index);
+                                                    tracing::debug!(
+                                                        bcu_offset = offset,
+                                                        bmu = bmu_num,
+                                                        module = module_index,
+                                                        cells = module.cell_voltages.len(),
+                                                        voltage = module.voltage,
+                                                        "HV BMU read OK"
+                                                    );
+                                                    snapshot.battery_modules.push(module);
+                                                }
+                                                Ok(_) => {
+                                                    tracing::debug!(
+                                                        bcu_offset = offset,
+                                                        bmu = bmu_num,
+                                                        "HV BMU 0x{bmu_addr:02X}: invalid serial — not present"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!(
+                                                        bcu_offset = offset,
+                                                        bmu = bmu_num,
+                                                        "HV BMU 0x{bmu_addr:02X}: no response: {e}"
+                                                    );
+                                                }
+                                            }
+                                            module_index += 1;
+                                            tokio::time::sleep(Duration::from_millis(100)).await;
+                                        }
+                                    }
                                 } else {
                                     // --- LV battery: BMS pack reads ---
                                     //

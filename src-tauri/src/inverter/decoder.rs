@@ -1117,6 +1117,78 @@ pub fn validate_hv_bcu(data: &[u16]) -> bool {
 }
 
 // ===========================================================================
+// HV BMU (Battery Module Unit) per-cell decode
+// ===========================================================================
+//
+// Each BMU (device 0x50+m) exposes one module's cell-level data. Per
+// givenergy-modbus model/hv_bcu.py (Bmu) and GivTCP model/hvbmu.py, the
+// 60-register read (base 60+120*bcu_offset) always lands v_cell_01 at slice
+// offset 0 — the base-register shift aligns it — so decoding is uniform.
+
+/// Number of cells per HV BMU module (all known HV stacks use 24 cells/module).
+pub const HV_CELLS_PER_MODULE: usize = 24;
+
+/// Decode a single HV BMU module block into a [`BatteryModule`].
+///
+/// `data` is the 60-register slice read from device 0x50+m. Layout (slice
+/// offsets, since the read base already aligns v_cell_01 to offset 0):
+///   0..24:   v_cell_01..24 (milli-V → V)
+///   30..54:  t_cell_01..24 (0.1 °C)
+///   54..59:  serial_number (5 regs, Latin-1)
+///
+/// Pack-level voltage/SOC/capacity are NOT exposed per-module on HV stacks —
+/// they come from the BCU cluster. The module's terminal voltage (sum of
+/// cells) and hottest cell temperature are derived here for the Battery page
+/// summary row.
+pub fn decode_hv_bmu_block(data: &[u16], index: usize) -> crate::inverter::model::BatteryModule {
+    // Cell voltages: 24 cells, milli-V → V.
+    let cell_voltages: Vec<f32> = (0..HV_CELLS_PER_MODULE)
+        .map(|i| get_reg(data, i) as f32 * 0.001)
+        .collect();
+    // Cell temperatures: 24 probes, 0.1 °C.
+    let cell_temperatures: Vec<f32> = (0..HV_CELLS_PER_MODULE)
+        .map(|i| get_reg(data, 30 + i) as f32 * 0.1)
+        .collect();
+    // Serial number: 5 registers, Latin-1 (slice offsets 54..59).
+    let serial = decode_serial(data, 54, 5);
+
+    // Module terminal voltage = sum of cell voltages.
+    let voltage = cell_voltages.iter().copied().sum::<f32>();
+    // Hottest cell temperature in this module.
+    let temperature = cell_temperatures
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    crate::inverter::model::BatteryModule {
+        index,
+        soc: 0, // Per-module SOC is not exposed on HV stacks (stack SOC is BCU-level).
+        temperature,
+        voltage,
+        current: 0.0, // Pack-level; comes from the BCU cluster.
+        serial,
+        num_cycles: 0,
+        num_cells: HV_CELLS_PER_MODULE as u16,
+        cell_voltages,
+        cell_temperatures,
+        bms_firmware: 0,
+        capacity_ah: 0.0,    // Pack-level; comes from the BCU cluster.
+        design_capacity_ah: 0.0,
+        remaining_capacity_ah: 0.0,
+    }
+}
+
+/// Whether a raw BMU module block represents a real, present module.
+///
+/// Per givenergy-modbus `Bmu.is_valid()`: the serial number (slice 54..59)
+/// must be non-empty. A non-existent module returns an empty/garbage serial.
+pub fn validate_hv_bmu(data: &[u16]) -> bool {
+    let serial = decode_serial(data, 54, 5);
+    let trimmed = serial.trim();
+    trimmed.len() >= 4 && trimmed.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 
@@ -1915,5 +1987,62 @@ mod tests {
         // 0x0000, 0x0005] → "GA000005".
         let data = [0x4741u16, 0x3030, 0x0000, 0x0005, 0, 0];
         assert_eq!(decode_gateway_version(&data, 0), "GA000005");
+    }
+
+    // --- HV BMU per-module decode ---
+
+    fn hv_bmu_fixture() -> Vec<u16> {
+        // 60-register slice for device 0x50+m read at base 60. v_cell_01 is at
+        // offset 0, t_cell_01 at offset 30, serial at offset 54.
+        let mut d = vec![0u16; 60];
+        // 24 cell voltages, ~3.2V each = 3200 mV. Vary slightly to verify sum.
+        for i in 0..24 {
+            d[i] = (3200 + i as u16) % 3400;
+        }
+        // 24 cell temperatures, ~25-28 °C (0.1 °C).
+        for i in 0..24 {
+            d[30 + i] = 250 + i as u16;
+        }
+        // Serial at offsets 54-58: "BM0000001"-ish (Latin-1, 5 regs).
+        d[54] = 0x4234; // 'B','4'
+        d[55] = 0x3030; // '0','0'
+        d[56] = 0x3030;
+        d[57] = 0x3030;
+        d[58] = 0x3031; // '0','1'
+        d
+    }
+
+    #[test]
+    fn decode_hv_bmu_block_extracts_cells_temps_serial() {
+        let data = hv_bmu_fixture();
+        let m = decode_hv_bmu_block(&data, 2);
+        assert_eq!(m.index, 2);
+        assert_eq!(m.cell_voltages.len(), 24);
+        assert!((m.cell_voltages[0] - 3.2).abs() < 0.001);
+        assert!((m.cell_voltages[23] - 3.223).abs() < 0.001);
+        // Module terminal voltage = sum of cells.
+        let expected_sum: f32 = (0u16..24).map(|i| ((3200 + i) % 3400) as f32 * 0.001).sum();
+        assert!((m.voltage - expected_sum).abs() < 0.01);
+        assert_eq!(m.cell_temperatures.len(), 24);
+        assert!((m.cell_temperatures[0] - 25.0).abs() < 0.001);
+        // Hottest cell temp = 25.0 + 23*0.1 = 27.3 °C.
+        assert!((m.temperature - 27.3).abs() < 0.001);
+        assert_eq!(m.num_cells, 24);
+        assert!(m.serial.contains("B4"));
+        // Pack-level fields are BCU-sourced, not BMU.
+        assert_eq!(m.soc, 0);
+        assert_eq!(m.capacity_ah, 0.0);
+        assert_eq!(m.current, 0.0);
+    }
+
+    #[test]
+    fn validate_hv_bmu_accepts_present_module() {
+        assert!(validate_hv_bmu(&hv_bmu_fixture()));
+    }
+
+    #[test]
+    fn validate_hv_bmu_rejects_empty_block() {
+        // All-zero serial → not a real module.
+        assert!(!validate_hv_bmu(&vec![0u16; 60]));
     }
 }
