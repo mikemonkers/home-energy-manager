@@ -1083,8 +1083,10 @@ pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
 
     let battery_voltage = get_reg(data, 73 - 60) as f32 * 0.1;
     let battery_current = signed(get_reg(data, 76 - 60)) as f32 * 0.1;
-    // IR(79) is /1000 → kW; convert to watts to match the snapshot convention.
-    let battery_power_w = (get_reg(data, 79 - 60) as f32 * 0.001 * 1000.0) as i32;
+    // IR(79) is battery_power in milliwatts (unsigned u16 in reference, but
+    // some firmware versions may use two's complement for discharge). Use
+    // signed() like battery_current for consistency.
+    let battery_power_w = signed(get_reg(data, 79 - 60));
 
     let soc_packed = get_reg(data, 80 - 60);
     let battery_soc_max = ((soc_packed >> 8) & 0xFF) as u8;
