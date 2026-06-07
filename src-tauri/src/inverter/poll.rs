@@ -2418,7 +2418,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 snapshot.cosy_active = *state.cosy_active.lock().await;
                                 let ag = state.agile_state.lock().await;
                                 snapshot.agile_active = *ag != AgileState::Idle;
-                                snapshot.agile_state = format!("{:?}", *ag).to_lowercase();
+                                snapshot.agile_state = format!("{:?}", *ag);
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;

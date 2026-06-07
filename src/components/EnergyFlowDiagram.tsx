@@ -326,7 +326,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {s.agile_active && (
           <text
             x={W / 2}
-            y={412}
+            y={423}
             textAnchor="middle"
             fill="#F59E0B"
             style={{ fontSize: 9, fontFamily: 'sans-serif' }}
