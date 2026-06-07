@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex};
 
 use super::framer::{self, DecodedFrame, RegisterType};
 use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
@@ -22,24 +22,6 @@ use super::registers::{RegisterBlock, STANDARD_POLL_BLOCKS};
 
 /// Maximum response frame size we are willing to accept (bytes).
 const MAX_RESPONSE_SIZE: usize = 4096;
-
-/// Format raw bytes as a compact hex string for diagnostic logging.
-/// Shows up to 64 bytes; truncates with "…" if longer.
-fn dump_hex(data: &[u8]) -> String {
-    use std::fmt::Write;
-    let limit = data.len().min(64);
-    let mut s = String::with_capacity(limit * 3);
-    for (i, b) in data.iter().enumerate().take(limit) {
-        if i > 0 {
-            s.push(' ');
-        }
-        write!(s, "{b:02X}").ok();
-    }
-    if data.len() > 64 {
-        s.push_str(" …");
-    }
-    s
-}
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -138,11 +120,6 @@ impl ResponseKey {
         let count = u16::from_be_bytes([frame.payload[12], frame.payload[13]]);
         Some(Self { slave: frame.slave, function: frame.function, base_register, count })
     }
-}
-
-/// An item enqueued to the producer task for transmission.
-struct TxItem {
-    frame: Vec<u8>,
 }
 
 /// Manages a single TCP connection to a GivEnergy inverter dongle.
@@ -323,6 +300,7 @@ impl ModbusClient {
     // -----------------------------------------------------------------------
 
     /// Send a raw frame to the dongle via the TCP writer.
+    #[allow(dead_code)]
     async fn send_raw(&mut self, frame: &[u8]) -> Result<(), ClientError> {
         let writer = self.writer.as_mut().ok_or(ClientError::NotConnected)?;
         tokio::time::timeout(self.timeout, writer.write_all(frame))

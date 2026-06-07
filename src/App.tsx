@@ -152,7 +152,7 @@ function Layout() {
       <header className="bg-bg-surface/80 backdrop-blur-md border-b border-white/5 px-6 py-3 flex items-center justify-between sticky top-0 z-30">
         <div>
           <h1 className="text-base font-bold text-text-primary tracking-tight">
-            Home Energy Manager
+            Home Energy Manager  <span className="text-text-secondary font-mono text-xs font-normal">v{__APP_VERSION__}</span>
           </h1>
           <p className="hidden sm:block text-xs text-text-secondary">
             For GivEnergy Solar and Battery Systems
