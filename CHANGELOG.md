@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   light up all the time — even when your battery was just sitting there in
   Eco mode. It was looking at the wrong signals. Now it only lights up when
   you're actually inside a charge window.
+- **Status page shows which Agile slot is active**
+  When Agile Octopus mode is running, the energy flow diagram now shows
+  "Agile: charging" or "Agile: discharging" so you can see what the
+  state machine is doing at a glance.
 - **Energy flow diagram and Battery page agree with reality now**
   Same fix as above — they stopped randomly showing "Override" outside
   charge windows.

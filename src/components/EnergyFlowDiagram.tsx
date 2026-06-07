@@ -323,6 +323,17 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         >
           {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive)}
         </text>
+        {s.agile_active && (
+          <text
+            x={W / 2}
+            y={412}
+            textAnchor="middle"
+            fill="#F59E0B"
+            style={{ fontSize: 9, fontFamily: 'sans-serif' }}
+          >
+            Agile: {s.agile_state}
+          </text>
+        )}
         <FlowNode
           {...NODES.inverter}
           hub

@@ -602,8 +602,10 @@ pub struct InverterSnapshot {
     pub cosy_enabled: bool,
     /// True when the Agile Octopus state machine is actively force-charging or
     /// force-discharging the battery.
-    #[serde(default)]
     pub agile_active: bool,
+    /// Current Agile Octopus state: "idle", "charging", or "discharging".
+    #[serde(default)]
+    pub agile_state: String,
     /// True when Agile Octopus mode is enabled in settings (may be between
     /// price thresholds).
     #[serde(default)]

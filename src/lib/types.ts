@@ -43,6 +43,7 @@ export interface InverterSnapshot {
   cosy_active: boolean;
   cosy_enabled: boolean;
   agile_active: boolean;
+  agile_state: 'idle' | 'charging' | 'discharging';
   agile_enabled: boolean;
   max_charge_slots: number;
   max_discharge_slots: number;

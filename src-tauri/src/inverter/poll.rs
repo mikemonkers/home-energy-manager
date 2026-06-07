@@ -2293,7 +2293,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                             let discharge_threshold = settings.agile_discharge_threshold;
 
                                             let ag_state = state.agile_state.lock().await;
-                                            tracing::info!(
+                                            tracing::debug!(
                                                 price,
                                                 charge_threshold,
                                                 discharge_threshold,
@@ -2416,7 +2416,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // — e.g. showing "Cosy Active" for an extra poll
                                 // after the slot actually ended.
                                 snapshot.cosy_active = *state.cosy_active.lock().await;
-                                snapshot.agile_active = *state.agile_state.lock().await != AgileState::Idle;
+                                let ag = state.agile_state.lock().await;
+                                snapshot.agile_active = *ag != AgileState::Idle;
+                                snapshot.agile_state = format!("{:?}", *ag).to_lowercase();
 
                                 {
                                     let mut latest = state.latest_snapshot.lock().await;
