@@ -410,7 +410,6 @@ impl DeviceType {
                 | Self::AllInOne5kW
                 | Self::HybridHvGen3
                 | Self::AllInOneHybrid
-                | Self::Gen4Hybrid
         )
     }
 
@@ -1063,7 +1062,10 @@ mod tests {
         assert!(DeviceType::AllInOne5kW.uses_hv_battery()); // 0x8003
         assert!(DeviceType::HybridHvGen3.uses_hv_battery()); // 0x81xx
         assert!(DeviceType::AllInOneHybrid.uses_hv_battery()); // 0x82xx
-        assert!(DeviceType::Gen4Hybrid.uses_hv_battery()); // 0x83xx (family 8)
+
+        // Gen4Hybrid (0x83xx) is treated by GivTCP as battery-less (same
+        // branch as EMS/GATEWAY) — no BCU probing.
+        assert!(!DeviceType::Gen4Hybrid.uses_hv_battery());
 
         // LV / non-HV models use the 0x32 pack protocol instead.
         assert!(!DeviceType::Gen3Hybrid.uses_hv_battery());
