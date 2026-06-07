@@ -169,6 +169,16 @@ pub async fn update_settings(
         Err(e) => return error_response(&e),
     };
 
+    // Read tariff defaults from disk BEFORE acquiring the in-memory lock,
+    // so the synchronous file I/O doesn't block the Tokio worker thread
+    // while the poll loop contends for the same lock.
+    let disk_settings = crate::settings::Settings::load();
+    let import_tariff_default = disk_settings.import_tariff;
+    let export_tariff_default = disk_settings.export_tariff;
+    let import_tariff_config_default = disk_settings.import_tariff_config.clone();
+    let export_tariff_config_default = disk_settings.export_tariff_config.clone();
+    drop(disk_settings);
+
     let mut settings = state.settings.lock().await;
 
     // Track whether any connection-affecting field actually changed. Only
@@ -201,16 +211,16 @@ pub async fn update_settings(
         || settings.port != prev_port
         || settings.serial != prev_serial;
 
-    // Update tariffs if provided
-    let current_settings = crate::settings::Settings::load();
+    // Update tariffs if provided (use pre-loaded defaults from disk,
+    // not the in-memory copy — PollSettings doesn't carry tariff data).
     let import_tariff = body
         .get("import_tariff")
         .and_then(|v| v.as_f64())
-        .unwrap_or(current_settings.import_tariff);
+        .unwrap_or(import_tariff_default);
     let export_tariff = body
         .get("export_tariff")
         .and_then(|v| v.as_f64())
-        .unwrap_or(current_settings.export_tariff);
+        .unwrap_or(export_tariff_default);
 
     // Update tariff config objects if provided
     let import_tariff_config = body.get("import_tariff_config").and_then(|v| {
@@ -218,13 +228,13 @@ pub async fn update_settings(
             return None;
         }
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
-    });
+    }).or(import_tariff_config_default);
     let export_tariff_config = body.get("export_tariff_config").and_then(|v| {
         if v.is_null() {
             return None;
         }
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
-    });
+    }).or(export_tariff_config_default);
 
     // Only bump the version (and wake the poll loop for reconnect) when a
     // connection-affecting field changed. Interval/tariff updates are picked
@@ -244,12 +254,23 @@ pub async fn update_settings(
         state.write_notify.notify_one();
     }
 
-    // Persist to disk
+    // Persist to disk — capture values from the in-memory copy, then
+    // drop the lock so synchronous file I/O doesn't block the poll loop.
+    let persist_host = settings.host.clone();
+    let persist_port = settings.port;
+    let persist_serial = settings.serial.clone();
+    let persist_interval = settings.interval_secs;
+    drop(settings);
+
+    let msg = format!(
+        "Settings updated: host={persist_host}, port={persist_port}, serial={persist_serial}, interval={persist_interval}s"
+    );
+
     let mut persist = crate::settings::Settings::load();
-    persist.host = settings.host.clone();
-    persist.port = settings.port;
-    persist.serial = settings.serial.clone();
-    persist.poll_interval = settings.interval_secs;
+    persist.host = persist_host;
+    persist.port = persist_port;
+    persist.serial = persist_serial;
+    persist.poll_interval = persist_interval;
     // http_port change requires restart to take effect
     if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
         persist.http_port = hp as u16;
@@ -268,10 +289,6 @@ pub async fn update_settings(
         return error_response(&format!("Failed to save settings: {}", e));
     }
 
-    let msg = format!(
-        "Settings updated: host={}, port={}, serial={}, interval={}s",
-        settings.host, settings.port, settings.serial, settings.interval_secs
-    );
     tracing::info!("{}", msg);
     ok_response(&msg)
 }
