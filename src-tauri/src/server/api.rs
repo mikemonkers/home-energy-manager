@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::Json;
 use chrono::{Datelike, TimeZone};
 use serde::Deserialize;
@@ -18,12 +19,12 @@ use crate::modbus::registers::{encode_hhmm, HR_ENABLE_CHARGE_TARGET};
 // Helper: standard JSON response
 // ---------------------------------------------------------------------------
 
-fn ok_response(message: &str) -> Json<Value> {
-    Json(json!({ "ok": true, "message": message }))
+fn ok_response(message: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::OK, Json(json!({ "ok": true, "message": message })))
 }
 
-fn error_response(error: &str) -> Json<Value> {
-    Json(json!({ "ok": false, "error": error }))
+fn error_response(error: &str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": error })))
 }
 
 /// Return true when the latest snapshot is from an AC-coupled inverter.
@@ -109,16 +110,16 @@ async fn queue_writes(state: &Arc<AppState>, writes: Vec<RegisterWrite>) {
 // ---------------------------------------------------------------------------
 
 /// GET /api/snapshot
-pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let snapshot = state.latest_snapshot.lock().await;
     match snapshot.as_ref() {
-        Some(snap) => Json(json!({ "ok": true, "data": snap })),
-        None => Json(json!({ "ok": false, "error": "No snapshot available yet" })),
+        Some(snap) => (StatusCode::OK, Json(json!({ "ok": true, "data": snap }))),
+        None => (StatusCode::OK, Json(json!({ "ok": false, "error": "No snapshot available yet" }))),
     }
 }
 
 /// GET /api/status — current connection state and LAN IP
-pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let cs = state.connection_state.lock().await.clone();
     let host = state.settings.lock().await.host.clone();
     let lan_ip = crate::inverter::discovery::detect_lan_ip();
@@ -126,20 +127,20 @@ pub async fn get_status(State(state): State<Arc<AppState>>) -> Json<Value> {
     let client_addrs: Vec<String> = clients.list().into_iter().map(|a| a.to_string()).collect();
     let client_count = clients.count();
     drop(clients);
-    Json(json!({
+    (StatusCode::OK, Json(json!({
         "ok": true,
         "connection": cs,
         "host": host,
         "lan_ip": lan_ip,
         "clients": client_addrs,
         "client_count": client_count,
-    }))
+    })))
 }
 
 /// GET /api/settings
-pub async fn get_settings(State(_state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
-    Json(json!({
+    (StatusCode::OK, Json(json!({
         "ok": true,
         "data": {
             "host": settings.host,
@@ -152,7 +153,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> Json<Value> {
             "import_tariff_config": settings.import_tariff_config,
             "export_tariff_config": settings.export_tariff_config,
         }
-    }))
+    })))
 }
 
 /// POST /api/settings
@@ -163,7 +164,7 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> Json<Value> {
 pub async fn update_settings(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let incoming = match parse_settings(&body) {
         Ok(s) => s,
         Err(e) => return error_response(&e),
@@ -332,7 +333,7 @@ fn parse_settings(body: &serde_json::Value) -> Result<PollSettings, String> {
 pub async fn set_mode(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let mode_str = match body["mode"].as_str() {
         Some(m) => m,
         None => return error_response("Missing 'mode' field"),
@@ -371,7 +372,7 @@ pub async fn set_mode(
 pub async fn set_charge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let slot: u8 = match body["slot"].as_u64() {
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
@@ -472,7 +473,7 @@ pub async fn set_charge_slot(
 pub async fn set_discharge_slot(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let slot: u8 = match body["slot"].as_u64() {
         Some(s) => s as u8,
         None => return error_response("Missing 'slot' field (1-2)"),
@@ -547,7 +548,7 @@ pub async fn set_discharge_slot(
 pub async fn set_reserve(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let soc: u16 = match body["soc"].as_u64() {
         Some(s) => s as u16,
         None => return error_response("Missing 'soc' field (4-100)"),
@@ -573,7 +574,7 @@ pub async fn set_reserve(
 pub async fn set_charge_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let limit: u16 = match body["limit"].as_u64() {
         Some(r) => r as u16,
         None => return error_response("Missing 'limit' field (0-50)"),
@@ -609,7 +610,7 @@ pub async fn set_charge_rate(
 pub async fn set_discharge_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let limit: u16 = match body["limit"].as_u64() {
         Some(r) => r as u16,
         None => return error_response("Missing 'limit' field (0-50)"),
@@ -645,7 +646,7 @@ pub async fn set_discharge_rate(
 pub async fn set_active_power_rate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let rate: u16 = match body["rate"].as_u64() {
         Some(r) => r as u16,
         None => return error_response("Missing 'rate' field"),
@@ -666,7 +667,7 @@ pub async fn set_active_power_rate(
 ///
 /// Disables charge and discharge. For three-phase models, also clears
 /// the three-phase force discharge and force charge enable flags.
-pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn pause_battery(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let is_three_phase = is_three_phase_limit_snapshot(&state).await;
     let mut writes = match ControlCommand::PauseBattery.encode() {
         Ok(w) => w,
@@ -697,7 +698,7 @@ pub async fn pause_battery(State(state): State<Arc<AppState>>) -> Json<Value> {
 ///
 /// Uses three-phase registers (HR 1123/1111) for three-phase, commercial,
 /// and HV hybrid inverters; single-phase registers (HR 96/116) for all others.
-pub async fn force_charge(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn force_charge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let is_three_phase = is_three_phase_limit_snapshot(&state).await;
     let cmd = if is_three_phase {
         ControlCommand::ThreePhaseForceCharge { target_soc: 100 }
@@ -718,7 +719,7 @@ pub async fn force_charge(State(state): State<Arc<AppState>>) -> Json<Value> {
 ///
 /// Uses three-phase register (HR 1122) for three-phase, commercial,
 /// and HV hybrid inverters; single-phase register (HR 59 + slots) for all others.
-pub async fn force_discharge(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn force_discharge(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let is_three_phase = is_three_phase_limit_snapshot(&state).await;
     let cmd = if is_three_phase {
         ControlCommand::ThreePhaseForceDischarge
@@ -736,7 +737,7 @@ pub async fn force_discharge(State(state): State<Arc<AppState>>) -> Json<Value> 
 }
 
 /// POST /api/control/sync-clock — sync inverter clock to system time.
-pub async fn sync_clock(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn sync_clock(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let cmd = ControlCommand::SyncClock;
     match cmd.encode() {
         Ok(writes) => {
@@ -769,7 +770,7 @@ pub struct HistoryQuery {
 pub async fn get_history(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HistoryQuery>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let range_str = params.range.as_deref().unwrap_or("24h");
     let fields_str = params.fields.as_deref().unwrap_or("soc");
     let offset = params.offset.unwrap_or(0);
@@ -853,7 +854,7 @@ pub async fn get_history(
             match result {
                 Ok(Ok(data)) => {
                     let map: HashMap<String, Value> = data.into_iter().collect();
-                    Json(json!({ "ok": true, "data": map }))
+                    (StatusCode::OK, Json(json!({ "ok": true, "data": map })))
                 }
                 Ok(Err(e)) => error_response(&e),
                 Err(e) => error_response(&format!("History query join error: {e}")),
@@ -868,16 +869,16 @@ pub async fn get_history(
 // ---------------------------------------------------------------------------
 
 /// GET /api/auto-winter — current config and state.
-pub async fn get_auto_winter(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_auto_winter(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let config = state.auto_winter_config.lock().await.clone();
     let aw_state = state.auto_winter_state.lock().await.clone();
-    Json(json!({
+    (StatusCode::OK, Json(json!({
         "ok": true,
         "data": {
             "config": config,
             "state": aw_state,
         }
-    }))
+    })))
 }
 
 /// POST /api/auto-winter — update auto winter config.
@@ -887,7 +888,7 @@ pub async fn get_auto_winter(State(state): State<Arc<AppState>>) -> Json<Value> 
 pub async fn set_auto_winter(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let mut config = state.auto_winter_config.lock().await;
 
     if let Some(v) = body.get("enabled").and_then(|v| v.as_bool()) {
@@ -928,7 +929,7 @@ pub async fn set_auto_winter(
 // ---------------------------------------------------------------------------
 
 /// GET /api/discover — scan the local network for GivEnergy inverters.
-pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn discover(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     tracing::info!("Network discovery requested");
 
     let subnets = crate::inverter::discovery::detect_lan_subnets();
@@ -936,11 +937,11 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
 
     let inverters = crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
 
-    Json(json!({
+    (StatusCode::OK, Json(json!({
         "ok": true,
         "subnets": subnets,
         "inverters": inverters,
-    }))
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -948,22 +949,22 @@ pub async fn discover(State(_state): State<Arc<AppState>>) -> Json<Value> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/cosy — get cosy charging config.
-pub async fn get_cosy(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_cosy(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
     let active = *state.cosy_active.lock().await;
-    Json(json!({
+    (StatusCode::OK, Json(json!({
         "ok": true,
         "enabled": settings.cosy_enabled,
         "active": active,
         "slots": settings.cosy_slots,
-    }))
+    })))
 }
 
 /// POST /api/cosy — update cosy charging config.
 pub async fn set_cosy(
     State(_state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let enabled = body["enabled"].as_bool().unwrap_or(false);
     let mut app_settings = crate::settings::Settings::load();
     app_settings.cosy_enabled = enabled;
@@ -995,22 +996,22 @@ pub async fn set_cosy(
 // ---------------------------------------------------------------------------
 
 /// GET /api/agile — get Agile Octopus config.
-pub async fn get_agile(State(_state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn get_agile(State(_state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let settings = crate::settings::Settings::load();
-    Json(json!({
+    (StatusCode::OK, Json(json!({
         "ok": true,
         "enabled": settings.agile_enabled,
         "region": settings.agile_region,
         "charge_threshold": settings.agile_charge_threshold,
         "discharge_threshold": settings.agile_discharge_threshold,
-    }))
+    })))
 }
 
 /// POST /api/agile — update Agile Octopus config.
 pub async fn set_agile(
     State(_state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let mut app_settings = crate::settings::Settings::load();
     app_settings.agile_enabled = body["enabled"].as_bool().unwrap_or(false);
     if let Some(r) = body["region"].as_str() {
@@ -1035,7 +1036,7 @@ pub async fn set_agile(
 pub async fn set_calibration(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let stage: u16 = match body["stage"].as_u64() {
         Some(s) => s as u16,
         None => return error_response("Missing 'stage' field"),
@@ -1053,7 +1054,7 @@ pub async fn set_calibration(
 }
 
 /// POST /api/control/reboot — reboot the inverter.
-pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> Json<Value> {
+pub async fn reboot_inverter(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let cmd = ControlCommand::RebootInverter;
     match cmd.encode() {
         Ok(writes) => {
