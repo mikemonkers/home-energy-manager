@@ -180,40 +180,7 @@ pub async fn update_settings(
     let export_tariff_config_default = disk_settings.export_tariff_config.clone();
     drop(disk_settings);
 
-    let mut settings = state.settings.lock().await;
-
-    // Track whether any connection-affecting field actually changed. Only
-    // host/port/serial require a TCP reconnect — interval changes are picked
-    // up by the poll loop's sleep watcher without dropping the connection,
-    // so they should NOT bump the version (which would force a reconnect and
-    // cause the "changing the refresh rate disconnects" symptom).
-    let prev_host = settings.host.clone();
-    let prev_port = settings.port;
-    let prev_serial = settings.serial.clone();
-
-    // Always overwrite host/port/serial when provided.
-    if !incoming.host.is_empty() {
-        settings.host = incoming.host.clone();
-    }
-    settings.port = if incoming.port != 0 {
-        incoming.port
-    } else {
-        settings.port
-    };
-    if !incoming.serial.is_empty() || body.get("serial").is_some() {
-        settings.serial = incoming.serial.clone();
-    }
-    // Only overwrite interval when explicitly provided (> 0).
-    if incoming.interval_secs > 0 {
-        settings.interval_secs = incoming.interval_secs;
-    }
-
-    let connection_changed = settings.host != prev_host
-        || settings.port != prev_port
-        || settings.serial != prev_serial;
-
-    // Update tariffs if provided (use pre-loaded defaults from disk,
-    // not the in-memory copy — PollSettings doesn't carry tariff data).
+    // Update tariffs if provided (use pre-loaded defaults from disk).
     let import_tariff = body
         .get("import_tariff")
         .and_then(|v| v.as_f64())
@@ -237,44 +204,25 @@ pub async fn update_settings(
         serde_json::from_value::<crate::settings::TariffConfig>(v.clone()).ok()
     }).or(export_tariff_config_default);
 
-    // Only bump the version (and wake the poll loop for reconnect) when a
-    // connection-affecting field changed. Interval/tariff updates are picked
-    // up by the sleep-loop interval watcher without dropping the TCP session,
-    // so they must NOT bump the version — that would cause an unnecessary
-    // disconnect every time the user changes the refresh rate.
-    if connection_changed {
-        settings.version = settings.version.wrapping_add(1);
-        // Wake the poll loop immediately so it detects the version change.
-        // The poll loop checks version at the start of each iteration and after
-        // each sleep tick; without this notification it could sleep up to 1s.
-        state.write_notify.notify_one();
-    } else if incoming.interval_secs > 0 {
-        // Interval changed but connection didn't — wake the loop so it picks
-        // up the new interval on the next sleep-loop tick instead of waiting
-        // up to 1 second for the in-loop check to fire.
-        state.write_notify.notify_one();
-    }
-
-    // Persist to disk — capture values from the in-memory copy, then
-    // drop the lock so synchronous file I/O doesn't block the poll loop.
-    let persist_host = settings.host.clone();
-    let persist_port = settings.port;
-    let persist_serial = settings.serial.clone();
-    let persist_interval = settings.interval_secs;
-    drop(settings);
-
-    let msg = format!(
-        "Settings updated: host={persist_host}, port={persist_port}, serial={persist_serial}, interval={persist_interval}s"
-    );
-
+    // Build the disk-persist struct from the request body and current
+    // disk state. Save to disk BEFORE touching the in-memory settings,
+    // so a failed save doesn't leave in-memory state out of sync with disk
+    // (the poll loop would reconnect to a new host that settings.json
+    // doesn't remember on restart).
     let mut persist = crate::settings::Settings::load();
-    persist.host = persist_host;
-    persist.port = persist_port;
-    persist.serial = persist_serial;
-    persist.poll_interval = persist_interval;
-    // http_port change requires restart to take effect
-    if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
-        persist.http_port = hp as u16;
+    if !incoming.host.is_empty() {
+        persist.host = incoming.host.clone();
+    }
+    persist.port = if incoming.port != 0 {
+        incoming.port
+    } else {
+        persist.port
+    };
+    if !incoming.serial.is_empty() || body.get("serial").is_some() {
+        persist.serial = incoming.serial.clone();
+    }
+    if incoming.interval_secs > 0 {
+        persist.poll_interval = incoming.interval_secs;
     }
     persist.auto_connect = true;
     persist.import_tariff = import_tariff;
@@ -285,10 +233,58 @@ pub async fn update_settings(
     if let Some(ref cfg) = export_tariff_config {
         persist.export_tariff_config = Some(cfg.clone());
     }
+    if let Some(hp) = body.get("http_port").and_then(|v| v.as_u64()) {
+        persist.http_port = hp as u16;
+    }
     if let Err(e) = persist.save() {
         tracing::warn!("Failed to persist settings: {}", e);
         return error_response(&format!("Failed to save settings: {}", e));
     }
+    drop(persist);
+
+    // Now that disk is updated, apply changes to the in-memory state.
+    // Lock is held briefly — no file I/O while holding it.
+    let mut settings = state.settings.lock().await;
+
+    let prev_host = settings.host.clone();
+    let prev_port = settings.port;
+    let prev_serial = settings.serial.clone();
+
+    if !incoming.host.is_empty() {
+        settings.host = incoming.host.clone();
+    }
+    settings.port = if incoming.port != 0 {
+        incoming.port
+    } else {
+        settings.port
+    };
+    if !incoming.serial.is_empty() || body.get("serial").is_some() {
+        settings.serial = incoming.serial.clone();
+    }
+    if incoming.interval_secs > 0 {
+        settings.interval_secs = incoming.interval_secs;
+    }
+
+    let connection_changed = settings.host != prev_host
+        || settings.port != prev_port
+        || settings.serial != prev_serial;
+
+    if connection_changed {
+        settings.version = settings.version.wrapping_add(1);
+        state.write_notify.notify_one();
+    } else if incoming.interval_secs > 0 {
+        state.write_notify.notify_one();
+    }
+
+    drop(settings);
+
+    let msg = format!(
+        "Settings updated: host={}, port={}, serial={}, interval={}s",
+        incoming.host,
+        incoming.port,
+        incoming.serial,
+        incoming.interval_secs,
+    );
 
     tracing::info!("{}", msg);
     ok_response(&msg)
