@@ -502,7 +502,7 @@ pub async fn set_discharge_slot(
     let start_minute = body["start_minute"].as_u64().unwrap_or(0) as u8;
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
-    let target_soc = body["target_soc"].as_u64().unwrap_or(0) as u8;
+    let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
     let (start, end) = (
         encode_hhmm(start_hour, start_minute),
