@@ -1633,6 +1633,9 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                             tracing::info!(
                                 "Cosy: restart detected inside slot — force-charge will be re-sent on next poll"
                             );
+                            // Reset the in-memory flag so the entry logic
+                            // re-fires and re-sends the force-charge writes.
+                            *state.cosy_active.lock().await = false;
                         } else {
                             tracing::info!(
                                 "Cosy: restart detected AFTER slot ended — CosyExit will be sent on next poll to restore Eco mode"
@@ -2416,34 +2419,55 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         // Agile mode disabled — if we were actively
                                         // charging/discharging, revert to Eco so the
                                         // inverter doesn't stay force-charging after a
-                                        // switch to Standard or Cosy mode.
+                                        // switch to Standard mode.
+                                        //
+                                        // IMPORTANT: check if cosy is actively in slot
+                                        // before sending CosyExit. The cosy block runs
+                                        // BEFORE the agile block in each poll, so if
+                                        // cosy just entered, we'd undo its force-charge.
+                                        // In that case, just clear the agile flag
+                                        // without sending conflicting writes.
                                         let ag_state = state.agile_state.lock().await;
+                                        let was_state = *ag_state;
                                         if *ag_state != AgileState::Idle {
-                                            tracing::info!("Agile: mode disabled while {:?} — reverting to Eco", *ag_state);
-                                            drop(ag_state);
-                                            let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
-                                            let cmd = if use_3ph {
-                                                ControlCommand::ThreePhaseCosyExit
-                                            } else {
-                                                ControlCommand::CosyExit
-                                            };
-                                            let mut all_ok = true;
-                                            if let Ok(writes) = cmd.encode() {
-                                                for w in &writes {
-                                                    if let Err(e) = client.write_register(w.address, w.value).await {
-                                                        tracing::error!("Agile: write reg {} failed: {e}", w.address);
-                                                        all_ok = false;
-                                                    }
-                                                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                                                }
-                                            } else {
-                                                all_ok = false;
-                                            }
-                                            if all_ok {
+                                            if *state.cosy_active.lock().await {
+                                                // Cosy is in control — just clear the
+                                                // agile flag, don't send CosyExit
+                                                // (which would stop the cosy charge).
+                                                drop(ag_state);
                                                 *state.agile_state.lock().await = AgileState::Idle;
                                                 persist_agile_state(AgileState::Idle);
+                                                tracing::info!(
+                                                    "Agile: disabled while {:?} but cosy is active — cleared flag without reverting",
+                                                    was_state
+                                                );
                                             } else {
-                                                tracing::warn!("Agile: exit writes failed — will retry on next poll");
+                                                tracing::info!("Agile: mode disabled while {:?} — reverting to Eco", was_state);
+                                                drop(ag_state);
+                                                let use_3ph = snapshot.device_type.uses_three_phase_schedule_slots();
+                                                let cmd = if use_3ph {
+                                                    ControlCommand::ThreePhaseCosyExit
+                                                } else {
+                                                    ControlCommand::CosyExit
+                                                };
+                                                let mut all_ok = true;
+                                                if let Ok(writes) = cmd.encode() {
+                                                    for w in &writes {
+                                                        if let Err(e) = client.write_register(w.address, w.value).await {
+                                                            tracing::error!("Agile: write reg {} failed: {e}", w.address);
+                                                            all_ok = false;
+                                                        }
+                                                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                                                    }
+                                                } else {
+                                                    all_ok = false;
+                                                }
+                                                if all_ok {
+                                                    *state.agile_state.lock().await = AgileState::Idle;
+                                                    persist_agile_state(AgileState::Idle);
+                                                } else {
+                                                    tracing::warn!("Agile: exit writes failed — will retry on next poll");
+                                                }
                                             }
                                         }
                                     }

@@ -5,10 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.2] - 2026-06-07
+## [0.16.3] - 2026-06-07
 
 ### Fixed
 
+- **Force-charge re-sent on restart when in a Cosy slot**
+  If the app crashed or was restarted during a Cosy charging window, it
+  logged "will re-send" but never actually sent the writes — so the
+  inverter stayed in Eco mode until the next slot transition. Fixed.
+- **Agile mode cleanup no longer cancels a Cosy charge mid-slot**
+  Switching from Agile to Cosy could send a "stop everything" command
+  in the same poll cycle, undoing the force-charge that Cosy had just
+  started. The cleanup now checks if another mode is actively in control
+  before sending conflicting writes.
 - **Switching away from Cosy or Agile mode no longer leaves the battery stuck charging**
   If you were in Cosy mode mid-slot (or Agile mid-charge) and switched to
   Standard (or to the other mode), the inverter would keep force-charging
