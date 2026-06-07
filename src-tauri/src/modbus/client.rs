@@ -447,7 +447,17 @@ impl ModbusClient {
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(frame)) => {
                 if frame.function >= 0x80 {
-                    let code = frame.payload.first().copied().unwrap_or(0);
+                    // GivEnergy transparent protocol embeds the 10-byte
+                    // inverter serial in ALL inner payloads, including
+                    // exception responses. The real exception code follows
+                    // the serial at byte offset 10. Fall back to byte 0
+                    // for frames that omit the serial (e.g. test mocks).
+                    let code = frame
+                        .payload
+                        .get(10)
+                        .copied()
+                        .or_else(|| frame.payload.first().copied())
+                        .unwrap_or(0);
                     return Err(ClientError::InvalidResponse(format!(
                         "Modbus exception: function 0x{:02X}, code {}",
                         frame.function, code
@@ -1189,8 +1199,12 @@ mod tests {
 
     /// Build a GivEnergy-wrapped Modbus exception response.
     fn build_exception_response(slave: u8, function_with_error: u8, code: u8) -> Vec<u8> {
-        // Exception inner payload is just the exception code (no serial/base/count)
-        let payload = vec![code];
+        // Real GivEnergy dongles embed the 10-byte serial in ALL transparent
+        // responses, including exceptions. The exception code follows the
+        // serial prefix (byte offset 10 in the inner payload).
+        let mut payload = Vec::with_capacity(11);
+        payload.extend_from_slice(b"TEST123456"); // 10-byte serial prefix
+        payload.push(code);
         crate::modbus::framer::encode_frame("TEST123456", slave, function_with_error, &payload)
     }
 
