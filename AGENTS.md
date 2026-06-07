@@ -7,7 +7,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 - **Frontend**: React 19 + TypeScript + Vite 9 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
-- **Testing**: Rust unit tests only (no frontend tests, no integration tests)
+- **Testing**: Rust unit tests (227) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour (no frontend tests)
 - **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are the source of truth for register layout, slot maps, slave addressing, and command encoding
 
 ## Prerequisites
@@ -24,7 +24,7 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `npm run build` | `tsc -b && vite build` (full typecheck + bundle) |
 | `npm run lint` | `eslint .` |
 | `npm run preview` | `vite preview` |
-| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (186 tests) |
+| `cargo test` (in `src-tauri/`) | Run all Rust unit tests (227 tests) |
 | `cargo clippy` (in `src-tauri/`) | Run Rust linter |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
@@ -87,14 +87,14 @@ Frontend talks exclusively to the local Axum server — never directly to the in
 
 ### Backend (`src-tauri/src/`)
 
-- **`lib.rs`** — Tauri app setup + headless CLI entry; spawns Axum server (configurable port, default 7337) + Modbus polling loop
+- **`lib.rs`** — Tauri app setup + headless CLI entry; spawns Axum server (configurable port, default 7337) + Modbus polling loop. Sets up tracing with **two independent layers**: a `fmt` layer to stdout/stderr (default level **WARN**, override with `RUST_LOG`) and a `LogCaptureLayer` into the in-memory `LogRing` for the developer console (default capture level WARN, runtime-adjustable via `PUT /api/log-level`). The two layers filter independently — changing the console default does not affect the developer console and vice versa.
 - **`history/`** — SQLite-backed history storage (`~/.givenergy-local/history.db`)
   - `mod.rs` — `HistoryDb` wrapper, schema migration, `insert_reading()`, aggregated `query_history()` with time-bucket AVG (or MAX for cumulative fields)
 - **`inverter/`** — data model, register decode/encode, discovery, poll loop
   - `model.rs` — `InverterSnapshot`, `ScheduleSlot`, `BatteryMode`, `BatteryState`, plus `DeviceType` enum (Gen1/Gen2/Gen3 hybrids, AC-coupled variants, three-phase/commercial, AIO, HV Gen3, Gen4, EMS) with model-aware helpers: `preferred_read_slave_address()`, `supports_gen3_extended()`, `extra_poll_blocks()`, `max_charge_slots()`, `max_discharge_slots()`, `max_battery_power_for_dtc()`. Gen3 generation is resolved from `arm_fw / 100` (3 → Gen3, 8/9 → Gen2, else Gen1).
   - `decoder.rs` — converts raw register blocks into `InverterSnapshot`; applies global `enable_charge`/`enable_discharge` flags to slot states; per-block decoders for `holding_0_59`, `holding_60_119`, `holding_240_299` (extended 10-slot schedules), `holding_300_359` (AC-coupled config: HR313/314 limits, HR311 export priority, HR317 EPS, HR318-320 pause slot), `holding_1080_1124` (three-phase config: HR1108 discharge limit, HR1109 SOC reserve, HR1110 charge limit, HR1111 target SOC, HR1112/1122/1123 force/AC-charge flags). AC-coupled models skip HR111/112; three-phase models read limits from HR1110/1108 instead.
   - `encoder.rs` — translates `ControlCommand` enum into `RegisterWrite` lists (whitelist-validated). Includes model-specific commands: `SetAcChargeLimit`/`SetAcDischargeLimit` (HR313/314, 1-100%), `SetThreePhaseChargeLimit`/`SetThreePhaseDischargeLimit` (HR1110/1108, 1-100%), `SetThreePhaseBatterySocReserve` (HR1109), `SetThreePhaseChargeTargetSoc` (HR1111). Standard DC hybrid `SetChargeLimit`/`SetDischargeLimit` use HR111/112 (0-50% register, displayed as 0-100%).
-  - `poll.rs` — main polling loop: drain pending writes → read registers → sanitize → broadcast snapshot; uses `Notify` for immediate write execution; warmup reads and grace period after connect. Includes: (a) `is_suspicious()` dongle memory-leak fingerprint detection that flags 60-register blocks matching the known 7-fingerprint corruption pattern (matches givenergy-modbus `>5` threshold); (b) model-aware slave address switching — after first detection, switches to `preferred_read_slave_address()` for operational reads (0x31 for AC/Gen1, 0x11 for all others); (c) immediate re-poll after model detection when slave address changes or extra blocks are needed (`should_repoll_after_model_detection()`); (d) carry-forward for optional blocks (AC config HR300-359, extended slots HR240-299, three-phase config HR1080-1124) — if an optional block is missed on one poll, preserves previous values rather than flashing zeros in the UI; (e) battery BMS read explicitly targets slave 0x32 regardless of inverter slave.
+  - `poll.rs` — main polling loop: drain pending writes → read registers → sanitize → broadcast snapshot; uses `Notify` for immediate write execution; warmup reads and grace period after connect. Includes: (a) `is_suspicious()` dongle memory-leak fingerprint detection that flags 60-register blocks matching the known 7-fingerprint corruption pattern (matches givenergy-modbus `>5` threshold); (b) model-aware slave address switching — after first detection, switches to `preferred_read_slave_address()` for operational reads (0x31 for AC/Gen1, 0x11 for all others); (c) immediate re-poll after model detection when slave address changes or extra blocks are needed (`should_repoll_after_model_detection()`); (d) carry-forward for optional blocks (AC config HR300-359, extended slots HR240-299, three-phase config HR1080-1124) — if an optional block is missed on one poll, preserves previous values rather than flashing zeros in the UI; (e) battery BMS read explicitly targets slave 0x32 regardless of inverter slave; (f) median-of-3 grace-period baseline hardening (`GraceCumulativeSamples`) — the 3 grace-period readings of every cumulative counter are collected and, on the final grace reading, replaced with the per-field median, so a single corrupted-but-in-range grace value can't poison the delta-check baseline for every subsequent reading; (g) `derive_three_phase_battery_fields()` — three-phase/HV/AIO inverters have no battery temperature or capacity in their inverter register blocks (only converter heatsink temps), so this derives `battery_temperature` / `battery_capacity_kwh` / `max_battery_power_w` from the BMS module data after the 0x32 read completes. No-op for single-phase (which gets those values directly from IR(56)/HR(55)). When no BMS data is available, clears any garbage and falls back to the uncapped hardware power limit.
   - `discovery.rs` — network scanning with GivEnergy Modbus protocol verification (sends a read request and validates the 0x5959 magic header in the response)
 - **`modbus/`** — GivEnergy Modbus TCP protocol
   - `client.rs` — `ModbusClient`: connect, read registers, write single register (FC6), stale frame drain. **Default slave address is `0x11`** (canonical detection address per givenergy-modbus and GivTCP), not `0x32`. `read_all_with_extras()` takes `device_type` and `arm_fw` to decide which optional blocks (extended schedules, AC config, three-phase config) to poll.
@@ -149,15 +149,18 @@ Only active after 3 readings post-connect (grace period):
 
 - **Monotonic increase**: `today_*_kwh` must not decrease significantly (except midnight rollover)
 - **Time-based rate limit**: `max_increase = elapsed_hours × 10 kW + 1 kWh`
-- **Jitter tolerance**: decreases < 0.5 kWh accepted as normal dongle register precision noise
+- **Jitter tolerance**: decreases < **0.15 kWh** accepted as normal dongle register precision noise (carried forward silently, no re-poll)
 - **Midnight rollover**: decrease allowed when `raw < 5` and `prev > 5`
-- **Near-zero prev**: delta increase check skipped when `prev < 1.0` (unreliable baseline)
+- **Near-zero prev**: when `prev < 1.0`, the baseline is unreliable — instead of skipping the check entirely, a **tighter time-aware ceiling** (`max_increase_kwh`) is applied to catch plausibly corrupted near-zero values (the old skip-open approach let corrupted values like 42.5 through after prev was clamped to 0)
 
 ### Connect sequence
 
 ```
 Connect → 500ms delay → drain TCP → 3× warmup reads (discarded, 500ms apart)
 → clear latest_snapshot → 3 readings with absolute check only (grace period)
+  └─ cumulative counters from all 3 grace readings collected
+  └─ on 3rd grace reading: replaced with per-field MEDIAN of the 3 samples
+     (so a single corrupted spike can't poison the delta baseline)
 → readings with full absolute + delta checks
 ```
 
@@ -208,13 +211,13 @@ Known limitation: register 32 (charge slot 2 end time) consistently returns exce
 
 ## Rust testing
 
-All tests are `#[cfg(test)]` unit tests inside each module. Run with:
+All Rust tests are `#[cfg(test)]` unit tests or integration tests with a mock TCP server that simulates GivEnergy dongle behaviour. Run with:
 
 ```
 cd src-tauri && cargo test
 ```
 
-No integration tests or test fixtures exist. The Modbus client tests use a mock TCP server.
+(The mock TCP server is in `modbus/client.rs` and is also used by the e2e Playwright test suite for full-stack scenarios.)
 
 ## Build artifacts
 
