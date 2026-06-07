@@ -2561,6 +2561,10 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                         "First poll read after connect — data is flowing"
                                     );
                                 }
+                                // Load settings once per cycle — all subsequent accesses
+                                // use this in-memory copy instead of synchronously reading
+                                // settings.json up to 5 times from the Tokio worker thread.
+                                let poll_settings = crate::settings::Settings::load();
 
                                 // ---- Auto winter mode ----
                                 {
@@ -2570,6 +2574,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     let writes = check_auto_winter(
                                         &snapshot, &config, &mut aw_state, &mut saved,
                                     );
+
                                     // Tag the snapshot so the frontend knows
                                     // whether winter mode was triggered by
                                     // this system vs. manually.
@@ -2580,8 +2585,8 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     // (cosy_active is set later, AFTER the cosy state
                                     // machine runs, so the broadcast reflects the
                                     // post-transition value.)
-                                    snapshot.cosy_enabled = crate::settings::Settings::load().cosy_enabled;
-                                    snapshot.agile_enabled = crate::settings::Settings::load().agile_enabled;
+                                    snapshot.cosy_enabled = poll_settings.cosy_enabled;
+                                    snapshot.agile_enabled = poll_settings.agile_enabled;
 
                                     // Persist saved values to disk so they survive a
                                     // restart. When winter mode deactivates, saved
@@ -2591,7 +2596,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                     drop(aw_state);
                                     drop(saved);
 
-                                    let mut app_settings = crate::settings::Settings::load();
+                                    let mut app_settings = poll_settings.clone();
                                     let changed = app_settings.auto_winter_saved_enable_target
                                         != persist_saved.as_ref().map(|s| s.enable_charge_target)
                                         || app_settings.auto_winter_saved_target_soc
@@ -2625,7 +2630,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                 // ---- Cosy charging mode ----
                                 {
-                                    let settings = crate::settings::Settings::load();
+                                    let settings = &poll_settings;
                                     let now = chrono::Local::now();
                                     let now_minutes = now.hour() as u16 * 60 + now.minute() as u16;
 
@@ -2718,7 +2723,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
 
                                 // ---- Agile Octopus mode ----
                                 {
-                                    let settings = crate::settings::Settings::load();
+                                    let settings = &poll_settings;
                                     if settings.agile_enabled {
                                         // Find current price from cache, or refresh
                                         let now_ts = chrono::Utc::now().timestamp();
