@@ -254,8 +254,11 @@ impl ControlCommand {
             ControlCommand::SetChargeTargetSoc { soc } => {
                 // Reference bounds: [4-100].
                 validate_range(*soc, 4, 100, "target SOC")?;
+                // Per GivTCP reference: 100% means "no limit", so disable the
+                // charge target flag rather than leaving it enabled.
+                let enable: u16 = if *soc >= 100 { 0 } else { 1 };
                 vec![
-                    rw(HR_ENABLE_CHARGE_TARGET, 1),
+                    rw(HR_ENABLE_CHARGE_TARGET, enable),
                     rw(HR_CHARGE_TARGET_SOC, *soc),
                 ]
             }
