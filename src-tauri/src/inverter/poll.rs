@@ -408,6 +408,8 @@ struct GraceCumulativeSamples {
     today_ac_charge_kwh: f32,
     total_import_kwh: f32,
     total_export_kwh: f32,
+    total_charge_kwh: f32,
+    total_discharge_kwh: f32,
 }
 
 impl GraceCumulativeSamples {
@@ -423,6 +425,8 @@ impl GraceCumulativeSamples {
             today_ac_charge_kwh: s.today_ac_charge_kwh,
             total_import_kwh: s.total_import_kwh,
             total_export_kwh: s.total_export_kwh,
+            total_charge_kwh: s.total_charge_kwh,
+            total_discharge_kwh: s.total_discharge_kwh,
         }
     }
 
@@ -437,6 +441,8 @@ impl GraceCumulativeSamples {
         s.today_ac_charge_kwh = self.today_ac_charge_kwh;
         s.total_import_kwh = self.total_import_kwh;
         s.total_export_kwh = self.total_export_kwh;
+        s.total_charge_kwh = self.total_charge_kwh;
+        s.total_discharge_kwh = self.total_discharge_kwh;
     }
 
     /// Compute the per-field median across grace samples.
@@ -464,6 +470,8 @@ impl GraceCumulativeSamples {
             today_ac_charge_kwh: median_field!(today_ac_charge_kwh),
             total_import_kwh: median_field!(total_import_kwh),
             total_export_kwh: median_field!(total_export_kwh),
+            total_charge_kwh: median_field!(total_charge_kwh),
+            total_discharge_kwh: median_field!(total_discharge_kwh),
         }
     }
 }
@@ -728,6 +736,17 @@ fn derive_three_phase_battery_fields(
 /// the normal cosy state machine fires CosyExit on the next poll if the
 /// current time is outside any Cosy slot.
 fn persist_cosy_active(active: bool) {
+    // In tests, run synchronously (no Tokio runtime).
+    // In production, offload file I/O to the blocking thread pool.
+    #[cfg(not(test))]
+    {
+        tokio::task::spawn_blocking(move || persist_cosy_active_sync(active));
+    }
+    #[cfg(test)]
+    persist_cosy_active_sync(active);
+}
+
+fn persist_cosy_active_sync(active: bool) {
     let mut settings = crate::settings::Settings::load();
     if settings.cosy_active_persisted != active {
         settings.cosy_active_persisted = active;
@@ -750,12 +769,22 @@ fn persist_agile_state(ag_state: AgileState) {
         AgileState::Charging => "charging",
         AgileState::Discharging => "discharging",
     };
+    let label_str = label.to_string();
+    #[cfg(not(test))]
+    {
+        tokio::task::spawn_blocking(move || persist_agile_state_sync(label_str));
+    }
+    #[cfg(test)]
+    persist_agile_state_sync(label_str);
+}
+
+fn persist_agile_state_sync(label: String) {
     let mut settings = crate::settings::Settings::load();
     if settings.agile_state_persisted != label {
-        settings.agile_state_persisted = label.to_string();
+        settings.agile_state_persisted = label.clone();
         if let Err(e) = settings.save() {
             tracing::warn!(
-                state = label,
+                state = &label,
                 "Failed to persist agile_state: {e}"
             );
         }
@@ -1088,6 +1117,16 @@ fn sanitize_snapshot(
             snap.total_export_kwh,
             prev.map(|p| p.total_export_kwh)
         );
+        check_total_energy_field!(
+            "total_charge_kwh",
+            snap.total_charge_kwh,
+            prev.map(|p| p.total_charge_kwh)
+        );
+        check_total_energy_field!(
+            "total_discharge_kwh",
+            snap.total_discharge_kwh,
+            prev.map(|p| p.total_discharge_kwh)
+        );
     }
 
     // Delta checks — only when we have a previous reading AND we're past
@@ -1278,6 +1317,16 @@ fn sanitize_snapshot(
                 "total_export_kwh",
                 snap.total_export_kwh,
                 p.total_export_kwh
+            );
+            check_total_energy_delta!(
+                "total_charge_kwh",
+                snap.total_charge_kwh,
+                p.total_charge_kwh
+            );
+            check_total_energy_delta!(
+                "total_discharge_kwh",
+                snap.total_discharge_kwh,
+                p.total_discharge_kwh
             );
         }
     } // skip_delta
@@ -1788,6 +1837,13 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // tear down the connection.
                 let mut consecutive_failures: u8 = 0;
                 const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+                // Track persistent failures ACROSS intervals. consecutive_failures
+                // resets within each interval, so a dead socket loops: 3 failures
+                // → sleep → 3 failures → sleep forever. This counter breaks out to
+                // reconnect after MAX_DEAD_CYCLES consecutive intervals with
+                // zero successful polls.
+                let mut consecutive_dead_cycles: u8 = 0;
+                const MAX_DEAD_CYCLES: u8 = 6;
 
                 // Grace period: for the first few reads after connect, skip
                 // delta sanitization. The dongle can return plausible-but-wrong
@@ -3008,6 +3064,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                     match poll_ok {
                         true => {
                             consecutive_failures = 0;
+                            consecutive_dead_cycles = 0;
 
                             // Sanitization was applied — corrupted register data
                             // detected. Re-poll immediately instead of waiting
@@ -3031,6 +3088,15 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 // reconnecting triggers a costly warmup + grace period
                                 // that extends the outage. The next interval will retry.
                                 consecutive_failures = 0;
+                                consecutive_dead_cycles += 1;
+                                if consecutive_dead_cycles >= MAX_DEAD_CYCLES {
+                                    tracing::warn!(
+                                        dead_cycles = consecutive_dead_cycles,
+                                        max = MAX_DEAD_CYCLES,
+                                        "Persistent read failure — reconnecting"
+                                    );
+                                    break;
+                                }
                                 // Fall through to the sleep-wait section below instead
                                 // of breaking out of the inner loop — staying connected
                                 // avoids the warmup + grace period on the next poll.
