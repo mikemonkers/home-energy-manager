@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.5] - 2026-06-07
+## [0.17.0] - 2026-06-07
+
+### Added
+
+- **HV stackable battery support (GIV-BAT-3.4-HV / GIV-BAT-*-HV)**
+  Three-phase and HV inverters like the GIV-3HY-11 now show real battery
+  readings. These inverters use a completely different battery protocol
+  (BCU/BMU cluster at addresses 0x70/0x50) instead of the LV protocol at
+  0x32, so the app was simply looking in the wrong place — no data ever
+  arrived. The work in this release:
+  - 🔍 **Discovery**: the BMS aggregator at 0xA0 is probed once to find
+    how many battery stacks are present, then each stack's BCU is read for
+    pack-level voltage, current, temperature and capacity.
+  - 🔋 **Per-cell detail**: each module in the stack exposes 24 cell
+    voltages, 24 cell temperatures and its serial number via the BMU at
+    0x50+. The Battery tab now shows this alongside the familiar bar
+    chart with a proper Y-axis scaled to the pack's voltage range.
+  - 💬 **Heartbeat fix**: the dongle pings the app every ~3 minutes and
+    closes the socket after 3 unanswered pings (~9 min). The consumer
+    task now echoes those heartbeat frames back — no more mysterious
+    reconnects every few minutes.
 
 ### Fixed
 
