@@ -439,6 +439,8 @@ impl ControlCommand {
                     rw(HR_ENABLE_DISCHARGE, 1),
                     rw(HR_DISCHARGE_SLOT_1_START, 0),  // 00:00
                     rw(HR_DISCHARGE_SLOT_1_END, 2359), // 23:59
+                    rw(HR_DISCHARGE_SLOT_2_START, 0),  // clear slot 2 as well
+                    rw(HR_DISCHARGE_SLOT_2_END, 0),
                 ]
             }
             ControlCommand::ThreePhaseForceCharge { target_soc } => {
@@ -940,7 +942,7 @@ mod tests {
     fn force_discharge_encodes() {
         let cmd = ControlCommand::ForceDischarge;
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 6);
+        assert_eq!(writes.len(), 8);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 0); // max power → export to grid
         assert_eq!(writes[1].address, HR_ENABLE_CHARGE);
@@ -953,6 +955,10 @@ mod tests {
         assert_eq!(writes[4].value, 0);
         assert_eq!(writes[5].address, HR_DISCHARGE_SLOT_1_END);
         assert_eq!(writes[5].value, 2359);
+        assert_eq!(writes[6].address, HR_DISCHARGE_SLOT_2_START);
+        assert_eq!(writes[6].value, 0);
+        assert_eq!(writes[7].address, HR_DISCHARGE_SLOT_2_END);
+        assert_eq!(writes[7].value, 0);
     }
 
     #[test]

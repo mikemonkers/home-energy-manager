@@ -48,7 +48,7 @@ const FALLBACK_SUBNETS: &[&str] = &[
 /// Uses the provided gateway IP to infer the /24 subnet, then probes
 /// each address on MODBUS_PORT (8899) concurrently.
 pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
-    log::info!("Starting subnet scan on {}.x:{}", subnet_base, MODBUS_PORT);
+    tracing::info!("Starting subnet scan on {}.x:{}", subnet_base, MODBUS_PORT);
 
     let mut tasks = Vec::new();
     for host in 1..255u8 {
@@ -62,7 +62,7 @@ pub async fn scan_subnet(subnet_base: &str) -> Vec<DiscoveredInverter> {
         found.push(inverter);
     }
 
-    log::info!(
+    tracing::info!(
         "Subnet scan on {}.x found {} inverter(s): {}",
         subnet_base,
         found.len(),
@@ -116,13 +116,17 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
         let mut buf = [0u8; 64];
         match stream.read(&mut buf) {
             Ok(n) if n >= 6 => {
-                // Check transaction ID = 0x5959 (GivEnergy magic)
+                // Check transaction ID = 0x5959 (GivEnergy magic).
+                // This only confirms the response echoes the request header;
+                // a more robust check would validate the full frame structure
+                // (function ID 0x02, serial, CRC). If false positives are
+                // reported, add decode_frame() validation here.
                 let txn_id = u16::from_be_bytes([buf[0], buf[1]]);
                 if txn_id == 0x5959 {
                     return Some(());
                 }
                 // Not a GivEnergy device
-                log::debug!(
+                tracing::debug!(
                     "Non-GivEnergy response from {}:{} (txn=0x{:04X})",
                     ip_for_closure,
                     MODBUS_PORT,
@@ -138,7 +142,7 @@ async fn probe_host(ip: String) -> Option<DiscoveredInverter> {
 
     match result {
         Ok(Some(_)) => {
-            log::debug!(
+            tracing::debug!(
                 "Found GivEnergy device at {}:{}",
                 ip_for_result,
                 MODBUS_PORT
@@ -166,7 +170,7 @@ pub fn detect_lan_subnets() -> Vec<String> {
 
     // Strategy 2: no physical LAN interface found (WSL2, Docker-only, etc.)
     // Fall back to probing common home-router subnets.
-    log::info!("No 10.x or 192.168.x interfaces found — trying common home subnets");
+    tracing::info!("No 10.x or 192.168.x interfaces found — trying common home subnets");
     FALLBACK_SUBNETS.iter().map(|s| (*s).to_string()).collect()
 }
 

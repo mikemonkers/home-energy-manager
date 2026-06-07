@@ -202,6 +202,9 @@ pub struct AppState {
     /// Ring buffer of recent log lines for the developer console.
     pub log_ring: Arc<LogRing>,
     /// Connected WebSocket clients (for Network Access display).
+    /// Uses parking_lot::Mutex (not tokio::sync::Mutex) because all
+    /// operations are synchronous (lock/unlock within a single .await),
+    /// and parking_lot avoids the async Mutex's fairness overhead.
     pub connected_clients: Arc<parking_lot::Mutex<ConnectedClients>>,
     /// Auto winter mode configuration (volatile, can be synced to settings).
     pub auto_winter_config: Arc<Mutex<AutoWinterConfig>>,

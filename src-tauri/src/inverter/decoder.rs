@@ -390,14 +390,24 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1; // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
 }
 
-/// IR 180-239: Alternative battery energy counters.
+/// IR 180-239: Alternative battery energy counters (unverified range).
 ///
 /// Per givenergy-modbus reference, IR(180)/IR(181) carry alternative total
 /// battery discharge/charge energy (deci-kWh). IR(182)/IR(183) carry
-/// alternative today counters; IR(184-239) are currently unused.
+/// alternative today counters. IR(184-239) are not in the authoritative
+/// givenergy-modbus register map and are decoded as 0 — values from this
+/// block should be treated as unverified/experimental.
 fn decode_input_180_239(data: &[u16], snap: &mut InverterSnapshot) {
+    // IR(180)/IR(181) are confirmed by givenergy-modbus as alternative
+    // battery total energy counters (deci-kWh).
     snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
     snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
+    // IR(182-239) are NOT in the authoritative givenergy-modbus register
+    // map for any model — decoded as 0. These offsets are deliberately
+    // left unread to avoid silently shipping values from an unverified
+    // address range. If new registers are discovered here in the future,
+    // add explicit decoders and a note about which firmware/hardware
+    // revision they were confirmed on.
 }
 
 /// Decode holding registers 0-59 (configuration part 1).

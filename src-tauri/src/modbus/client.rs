@@ -660,6 +660,8 @@ impl ModbusClient {
     /// The dongle has a very slow processor and limited frame buffer.
     /// The givenergy-modbus reference library uses 250ms; we use 150ms
     /// as a compromise between reliability and poll speed.
+    /// If timeouts or exceptions on standard poll blocks occur, increase
+    /// this to 250ms (the reference value).
     const INTER_REQUEST_DELAY: Duration = Duration::from_millis(150);
 
     /// Read a block of registers (input or holding).
@@ -1379,6 +1381,9 @@ mod tests {
         // Real GivEnergy dongles embed the 10-byte serial in ALL transparent
         // responses, including exceptions. The exception code follows the
         // serial prefix (byte offset 10 in the inner payload).
+        // Note: real exception frames omit base_register and register_count,
+        // so from_response() returns None for these — the consumer task
+        // has a fallback scan by (slave, function & 0x7F).
         let mut payload = Vec::with_capacity(11);
         payload.extend_from_slice(b"TEST123456"); // 10-byte serial prefix
         payload.push(code);

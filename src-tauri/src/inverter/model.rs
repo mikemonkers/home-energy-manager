@@ -185,6 +185,9 @@ impl DeviceType {
             // Stackable HV batteries (GIV-BAT-3.4-HV modules) use 76.8V per
             // module; the capacity formula multiplies by module count. The AIO
             // and Gen4 hybrids are fixed single-unit batteries at 307.0V.
+            // Note: GivTCP uses 317V for AIO family "8"; 307V matches
+            // givenergy-modbus. The 3.2% difference is ~0.6 kWh on a 19.6 kWh
+            // pack — negligible for displayed capacity.
             Self::HybridHvGen3 => 76.8,
             Self::AllInOneHybrid | Self::Gen4Hybrid => 307.0,
             _ => 51.2,

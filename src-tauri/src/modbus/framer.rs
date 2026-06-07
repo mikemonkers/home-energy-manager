@@ -250,7 +250,8 @@ pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, FramerError> {
     }
 
     let unit_id = data[6];
-    if unit_id != UNIT_ID {
+    // Reference framer accepts both 0x00 (Android/iOS app) and 0x01.
+    if unit_id != 0x00 && unit_id != UNIT_ID {
         return Err(FramerError::InvalidUnitId(unit_id));
     }
 

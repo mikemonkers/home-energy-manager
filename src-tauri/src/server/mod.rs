@@ -10,13 +10,21 @@ pub mod ws;
 use std::sync::Arc;
 
 use axum::routing::{get, post};
+use axum::response::Json;
 use axum::Router;
+use axum::http::StatusCode;
+use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
 use crate::inverter::poll::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
+    use axum::response::IntoResponse;
+
+    async fn not_found_404() -> impl IntoResponse {
+        (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "Not found" })))
+    }
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -69,6 +77,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws::ws_handler))
         .layer(cors)
         .with_state(state)
+        // Unknown /api/* paths should return 404, not serve index.html.
+        .route("/api/{*rest}", get(not_found_404).post(not_found_404))
 }
 
 /// Build the Axum router with API routes + frontend static file serving.

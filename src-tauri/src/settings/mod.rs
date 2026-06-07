@@ -300,16 +300,16 @@ impl Settings {
         match fs::read_to_string(&path) {
             Ok(content) => match serde_json::from_str(&content) {
                 Ok(settings) => {
-                    log::debug!("Loaded settings from {}", path.display());
+                    tracing::debug!("Loaded settings from {}", path.display());
                     settings
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse settings: {}, using defaults", e);
+                    tracing::warn!("Failed to parse settings: {}, using defaults", e);
                     Self::default()
                 }
             },
             Err(_) => {
-                log::info!("No settings file found, using defaults");
+                tracing::info!("No settings file found, using defaults");
                 // NOTE: do not auto-save defaults here. A `load()` should be
                 // side-effect-free so tests can call it safely without
                 // polluting the user's real `~/.givenergy-local/` directory.
@@ -341,19 +341,15 @@ impl Settings {
         // Write to a temp file first so a crash mid-write never corrupts
         // the real file. `rename()` is atomic on POSIX — readers either see
         // the old complete file or the new complete file.
-        let tmp_path = path.with_extension(format!(
-            "json.tmp.{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
+        let tmp_path = path.with_extension("json.tmp");
+        // Clean up any orphaned temp file from a previous crash.
+        let _ = std::fs::remove_file(&tmp_path);
         fs::write(&tmp_path, &json)
             .map_err(|e| format!("Failed to write temp settings: {}", e))?;
         fs::rename(&tmp_path, &path)
             .map_err(|e| format!("Failed to rename settings file: {}", e))?;
 
-        log::debug!("Settings saved to {}", path.display());
+        tracing::debug!("Settings saved to {}", path.display());
         Ok(())
     }
 }

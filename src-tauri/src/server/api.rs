@@ -129,7 +129,9 @@ pub async fn get_snapshot(State(state): State<Arc<AppState>>) -> (StatusCode, Js
 pub async fn get_status(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let cs = state.connection_state.lock().await.clone();
     let host = state.settings.lock().await.host.clone();
-    let lan_ip = crate::inverter::discovery::detect_lan_ip();
+    let lan_ip = tokio::task::spawn_blocking(crate::inverter::discovery::detect_lan_ip)
+        .await
+        .unwrap_or(None);
     let clients = state.connected_clients.lock();
     let client_addrs: Vec<String> = clients.list().into_iter().map(|a| a.to_string()).collect();
     let client_count = clients.count();
@@ -414,6 +416,13 @@ pub async fn set_charge_slot(
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
     let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
 
+    if start_hour > 23 || end_hour > 23 {
+        return error_response("Hour must be 0-23");
+    }
+    if start_minute > 59 || end_minute > 59 {
+        return error_response("Minute must be 0-59");
+    }
+
     let (start, end) = (
         encode_hhmm(start_hour, start_minute),
         encode_hhmm(end_hour, end_minute),
@@ -518,6 +527,13 @@ pub async fn set_discharge_slot(
     let end_hour = body["end_hour"].as_u64().unwrap_or(0) as u8;
     let end_minute = body["end_minute"].as_u64().unwrap_or(0) as u8;
     let target_soc = body["target_soc"].as_u64().unwrap_or(100) as u8;
+
+    if start_hour > 23 || end_hour > 23 {
+        return error_response("Hour must be 0-23");
+    }
+    if start_minute > 59 || end_minute > 59 {
+        return error_response("Minute must be 0-59");
+    }
 
     let (start, end) = (
         encode_hhmm(start_hour, start_minute),
