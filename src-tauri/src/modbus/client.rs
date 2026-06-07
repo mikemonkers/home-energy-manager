@@ -1226,7 +1226,7 @@ mod tests {
 
     #[test]
     fn standard_poll_blocks_are_accessible() {
-        assert_eq!(STANDARD_POLL_BLOCKS.len(), 3);
+        assert_eq!(STANDARD_POLL_BLOCKS.len(), 4);
         assert_eq!(STANDARD_POLL_BLOCKS[0].name, "input_0_59");
     }
 
@@ -1965,12 +1965,31 @@ mod tests {
                 base: 100,
                 data: (240..260).collect(),
             },
+            // input_180_239, chunks 180..199, 200..219, 220..239
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 180,
+                data: (500..520).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 200,
+                data: (520..540).collect(),
+            },
+            MockResponse::ReadResponse {
+                slave: 0x11,
+                function: 0x04,
+                base: 220,
+                data: (540..560).collect(),
+            },
         ];
 
         let (_port, server, mut client) = setup_client_with_server(responses).await;
 
         let blocks = client.read_blocks(STANDARD_POLL_BLOCKS).await.unwrap();
-        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks.len(), 4);
         assert_eq!(blocks[0].block.name, "input_0_59");
         assert_eq!(blocks[0].data.len(), 60);
         assert_eq!(blocks[0].data[0], 0);

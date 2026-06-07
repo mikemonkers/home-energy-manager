@@ -58,6 +58,12 @@ pub const STANDARD_POLL_BLOCKS: &[RegisterBlock] = &[
         register_type: RegisterType::Holding,
         name: "holding_60_119",
     },
+    RegisterBlock {
+        start: 180,
+        count: 60,
+        register_type: RegisterType::Input,
+        name: "input_180_239",
+    },
 ];
 
 // ===========================================================================
@@ -634,7 +640,7 @@ mod tests {
 
     #[test]
     fn poll_blocks_cover_needed_ranges() {
-        assert_eq!(STANDARD_POLL_BLOCKS.len(), 3);
+        assert_eq!(STANDARD_POLL_BLOCKS.len(), 4);
         // Input 0-59 covers all telemetry (IR 0-59)
         assert_eq!(STANDARD_POLL_BLOCKS[0].start, 0);
         assert_eq!(STANDARD_POLL_BLOCKS[0].count, 60);

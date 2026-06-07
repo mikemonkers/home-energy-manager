@@ -169,6 +169,7 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Input, 1240) => "input_1240_1299",
         (RegisterType::Input, 1300) => "input_1300_1359",
         (RegisterType::Input, 1360) => "input_1360_1413",
+        (RegisterType::Input, 180) => "input_180_239",
         _ => "unknown",
     }
 }
@@ -218,6 +219,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "input_1240_1299" => decode_input_1240_1299(data, &mut snap),
             "input_1300_1359" => decode_input_1300_1359(data, &mut snap),
             "input_1360_1413" => decode_input_1360_1413(data, &mut snap),
+            "input_180_239" => decode_input_180_239(data, &mut snap),
             _ => {
                 log::warn!("Unknown block '{}' in decode_snapshot", key);
             }
@@ -373,6 +375,16 @@ fn decode_input_0_59(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_ac_charge_kwh = snap.today_consumption_kwh;
     snap.total_export_kwh = uint32(get_reg(data, 21), get_reg(data, 22)) as f32 * 0.1; // IR(21-22): e_grid_out_total
     snap.total_import_kwh = uint32(get_reg(data, 32), get_reg(data, 33)) as f32 * 0.1; // IR(32-33): e_grid_in_total // keep raw IR(35) for energy balance
+}
+
+/// IR 180-239: Alternative battery energy counters.
+///
+/// Per givenergy-modbus reference, IR(180)/IR(181) carry alternative total
+/// battery discharge/charge energy (deci-kWh). IR(182)/IR(183) carry
+/// alternative today counters; IR(184-239) are currently unused.
+fn decode_input_180_239(data: &[u16], snap: &mut InverterSnapshot) {
+    snap.total_discharge_kwh = get_reg(data, 0) as f32 * 0.1; // IR(180): e_battery_discharge_total_alt1
+    snap.total_charge_kwh = get_reg(data, 1) as f32 * 0.1; // IR(181): e_battery_charge_total_alt1
 }
 
 /// Decode holding registers 0-59 (configuration part 1).
@@ -844,6 +856,8 @@ fn decode_input_1360_1413(data: &[u16], snap: &mut InverterSnapshot) {
     snap.today_ac_charge_kwh = uint32(get_reg(data, 16), get_reg(data, 17)) as f32 * 0.1;
     snap.total_import_kwh = uint32(get_reg(data, 22), get_reg(data, 23)) as f32 * 0.1; // IR(1382-1383): e_import_total
     snap.total_export_kwh = uint32(get_reg(data, 26), get_reg(data, 27)) as f32 * 0.1; // IR(1386-1387): e_export_total
+    snap.total_charge_kwh = uint32(get_reg(data, 34), get_reg(data, 35)) as f32 * 0.1; // IR(1394-1395): e_battery_charge_total
+    snap.total_discharge_kwh = uint32(get_reg(data, 30), get_reg(data, 31)) as f32 * 0.1; // IR(1390-1391): e_battery_discharge_total
 }
 
 /// Decode meter data from raw register values (IR 60-89) into a MeterData struct.
