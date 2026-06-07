@@ -346,12 +346,16 @@ impl ModbusClient {
         connected: Arc<AtomicBool>,
         timeout: Duration,
     ) {
+        // Read buffer that persists across frames so a stray byte or
+        // mis-sized frame doesn't permanently desync the stream.
+        let mut read_buf = Vec::new();
+
         loop {
             if !connected.load(Ordering::SeqCst) {
                 break;
             }
 
-            let frame = match Self::read_one_frame(&mut reader, timeout).await {
+            let frame = match Self::read_one_frame(&mut reader, &mut read_buf, timeout).await {
                 Ok(f) => f,
                 Err(ClientError::Timeout) => {
                     // No data arrived yet — loop and try again.
@@ -396,33 +400,158 @@ impl ModbusClient {
     }
 
     /// Read one complete GivEnergy frame (MBAP header + body) from TCP.
+    ///
+    /// Uses a persistent read buffer (`buf`) so stray bytes or mis-sized
+    /// frames don't permanently desync the stream. Scans for the start marker
+    /// `0x59590001`, discards leading garbage, validates the length field,
+    /// and detects implausibly-close next-frame markers (a sign the current
+    /// candidate frame is corrupt/invalid). Mirrors givenergy-modbus's framer
+    /// resync logic.
     async fn read_one_frame(
         reader: &mut tokio::net::tcp::OwnedReadHalf,
+        buf: &mut Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, ClientError> {
-        let mut header_buf = [0u8; 6];
-        tokio::time::timeout(timeout, reader.read_exact(&mut header_buf))
-            .await
-            .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::ReceiveFailed(format!("reading MBAP header: {e}")))?;
+        /// Start-of-frame marker: bytes 0-3 of every GivEnergy frame.
+        const HEADER_START: [u8; 4] = [0x59, 0x59, 0x00, 0x01];
+        /// Minimum plausible frame size (heartbeat: 6-byte header + 2-byte body).
+        const MIN_FRAME_LEN: usize = 8;
 
-        let length = u16::from_be_bytes([header_buf[4], header_buf[5]]) as usize;
-        if length > MAX_RESPONSE_SIZE {
-            return Err(ClientError::InvalidResponse(format!(
-                "response length {length} exceeds maximum {MAX_RESPONSE_SIZE}"
-            )));
+        loop {
+            // --- Scan buffer for the start marker ---
+            if let Some(pos) = buf.windows(4).position(|w| w == HEADER_START) {
+                if pos > 0 {
+                    // Garbage before the marker — discard it.
+                    tracing::debug!(
+                        "Discarding {} bytes of leading garbage before frame header",
+                        pos
+                    );
+                    buf.drain(..pos);
+                }
+                // marker at buf[0] (or after drain) — good, proceed
+            } else {
+                    // No marker found. Keep only HEADER_START.len()-1 bytes so a
+                    // split marker across reads can be recovered (the framer's
+                    // sliding-window approach). Discard the rest.
+                    let keep = HEADER_START.len() - 1;
+                    if buf.len() > keep {
+                        let discarded = buf.len() - keep;
+                        if discarded > 100 {
+                            tracing::warn!(
+                                "No frame header in {} byte buffer, discarding {} bytes",
+                                buf.len(),
+                                discarded
+                            );
+                        } else {
+                            tracing::debug!(
+                                "No frame header in {} byte buffer, discarding {} bytes",
+                                buf.len(),
+                                discarded
+                            );
+                        }
+                        buf.drain(..buf.len() - keep);
+                    }
+                    // Read more data from the stream.
+                    Self::fill_read_buf(reader, buf, timeout).await?;
+                    continue;
+                }
+
+            // --- We have the marker at buf[0..4]. Enough for the header? ---
+            if buf.len() < 6 {
+                Self::fill_read_buf(reader, buf, timeout).await?;
+                continue;
+            }
+
+            // Read the length from bytes 4-5 and validate.
+            let length = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+            let total_frame_len = 6 + length;
+
+            if !(2..=MAX_RESPONSE_SIZE).contains(&length) {
+                // Bogus length — the current marker is probably a false
+                // positive (stray 0x59590001 bytes in garbage). Discard the
+                // first byte and re-scan.
+                tracing::debug!(
+                    "Implausible frame length {length} (max {MAX_RESPONSE_SIZE}) — advancing past false marker"
+                );
+                buf.drain(..1);
+                continue;
+            }
+
+            // --- Implausibly-close next-frame check (corruption guard) ---
+            // If there's another marker within < total_frame_len (and < 18
+            // bytes from the first), the current frame is almost certainly
+            // corrupt. Skip forward to the next marker.
+            if let Some(next) = buf[1..].windows(4).position(|w| w == HEADER_START) {
+                let next_offset = next + 1;
+                if next_offset < total_frame_len && next_offset < MIN_FRAME_LEN.max(18) {
+                    tracing::warn!(
+                        "Next frame marker only {} bytes in — current frame likely corrupt, skipping ahead",
+                        next_offset
+                    );
+                    buf.drain(..next_offset);
+                    continue;
+                }
+            }
+
+            // --- Do we have the complete frame? ---
+            if buf.len() < total_frame_len {
+                Self::fill_read_buf_demand(reader, buf, total_frame_len, timeout).await?;
+                continue;
+            }
+
+            // --- Extract the frame ---
+            let frame = buf[..total_frame_len].to_vec();
+            buf.drain(..total_frame_len);
+            return Ok(frame);
         }
+    }
 
-        let mut rest = vec![0u8; length];
-        tokio::time::timeout(timeout, reader.read_exact(&mut rest))
+    /// Fill the read buffer with up to 4 KiB of new data from the TCP stream.
+    async fn fill_read_buf(
+        reader: &mut tokio::net::tcp::OwnedReadHalf,
+        buf: &mut Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(), ClientError> {
+        let start = buf.len();
+        let chunk = 4096;
+        buf.resize(start + chunk, 0);
+        let n = tokio::time::timeout(timeout, reader.read(&mut buf[start..]))
             .await
             .map_err(|_| ClientError::Timeout)?
-            .map_err(|e| ClientError::ReceiveFailed(format!("reading frame body: {e}")))?;
+            .map_err(|e| ClientError::ReceiveFailed(format!("TCP read: {e}")))?;
+        if n == 0 {
+            return Err(ClientError::NotConnected);
+        }
+        buf.truncate(start + n);
+        Ok(())
+    }
 
-        let mut full = Vec::with_capacity(6 + length);
-        full.extend_from_slice(&header_buf);
-        full.extend_from_slice(&rest);
-        Ok(full)
+    /// Fill the read buffer until it contains at least `needed` bytes.
+    async fn fill_read_buf_demand(
+        reader: &mut tokio::net::tcp::OwnedReadHalf,
+        buf: &mut Vec<u8>,
+        needed: usize,
+        timeout: Duration,
+    ) -> Result<(), ClientError> {
+        let start = buf.len();
+        if start >= needed {
+            return Ok(());
+        }
+        let missing = needed - start;
+        buf.resize(needed, 0);
+        let mut read = 0usize;
+        while read < missing {
+            let n = tokio::time::timeout(timeout, reader.read(&mut buf[start + read..]))
+                .await
+                .map_err(|_| ClientError::Timeout)?
+                .map_err(|e| ClientError::ReceiveFailed(format!("TCP read: {e}")))?;
+            if n == 0 {
+                return Err(ClientError::NotConnected);
+            }
+            read += n;
+        }
+        buf.truncate(start + read);
+        Ok(())
     }
 
     /// Send a frame via the TCP writer and wait for a matching response via
