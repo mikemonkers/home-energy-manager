@@ -444,6 +444,7 @@ impl ControlCommand {
                 vec![
                     rw(HR_BATTERY_POWER_MODE, 1),          // eco mode (common register)
                     rw(HR_3PH_FORCE_DISCHARGE_ENABLE, 0),  // clear stale discharge
+                    rw(HR_3PH_AC_CHARGE_ENABLE, 1),        // enable AC charge (GivTCP sets both)
                     rw(HR_3PH_FORCE_CHARGE_ENABLE, 1),    // three-phase force charge
                     rw(HR_3PH_CHARGE_TARGET_SOC, *target_soc),
                 ]
@@ -990,15 +991,17 @@ mod tests {
     fn three_phase_force_charge_uses_three_phase_registers() {
         let cmd = ControlCommand::ThreePhaseForceCharge { target_soc: 80 };
         let writes = cmd.encode().unwrap();
-        assert_eq!(writes.len(), 4);
+        assert_eq!(writes.len(), 5);
         assert_eq!(writes[0].address, HR_BATTERY_POWER_MODE);
         assert_eq!(writes[0].value, 1);
         assert_eq!(writes[1].address, HR_3PH_FORCE_DISCHARGE_ENABLE);
         assert_eq!(writes[1].value, 0); // clear stale discharge
-        assert_eq!(writes[2].address, HR_3PH_FORCE_CHARGE_ENABLE);
+        assert_eq!(writes[2].address, HR_3PH_AC_CHARGE_ENABLE);
         assert_eq!(writes[2].value, 1);
-        assert_eq!(writes[3].address, HR_3PH_CHARGE_TARGET_SOC);
-        assert_eq!(writes[3].value, 80);
+        assert_eq!(writes[3].address, HR_3PH_FORCE_CHARGE_ENABLE);
+        assert_eq!(writes[3].value, 1);
+        assert_eq!(writes[4].address, HR_3PH_CHARGE_TARGET_SOC);
+        assert_eq!(writes[4].value, 80);
     }
 
     #[test]
