@@ -51,7 +51,14 @@ export default function SettingsPage() {
   const [discoverError, setDiscoverError] = useState('');
 
   // Refresh interval
-  const [intervalSecs, setIntervalSecs] = useState(60);
+  const [intervalSecs, setIntervalSecs] = useState(20);
+
+  // Snap a poll interval to the nearest valid value (5, 10, 15, or 20).
+  // Used on load so the UI always shows one of the 4 buttons as active.
+  const VALID_INTERVALS = [5, 10, 15, 20];
+  const clampInterval = (v: number) => VALID_INTERVALS.reduce((a, b) =>
+    Math.abs(b - v) < Math.abs(a - v) ? b : a
+  );
 
   // HTTP server port
   const [httpPort, setHttpPort] = useState(7337);
@@ -85,7 +92,7 @@ export default function SettingsPage() {
         setHost(s.host ?? '');
         setPort(s.port ?? 8899);
         setSerial(s.serial ?? '');
-        setIntervalSecs(s.interval_secs ?? 60);
+        setIntervalSecs(clampInterval( s.interval_secs ?? 20));
         setHttpPort(s.http_port ?? 7337);
         if (s.import_tariff_config) {
           setImportTariffCfg(s.import_tariff_config);
@@ -378,22 +385,20 @@ export default function SettingsPage() {
       <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-3">
         <h2 className="text-text-primary text-lg font-semibold font-sans">Refresh Interval</h2>
 
-        <div className="flex items-center gap-4">
-          <input
-            type="range"
-            min={5}
-            max={60}
-            step={1}
-            value={intervalSecs}
-            onChange={(e) => handleIntervalChange(Number(e.target.value))}
-            className="flex-1"
-          />
-          <span className="text-text-primary text-sm font-mono w-12 text-right">{intervalSecs}s</span>
-        </div>
-
-        <div className="flex justify-between text-text-secondary text-xs font-sans">
-          <span>5s</span>
-          <span>60s</span>
+        <div className="flex gap-2">
+          {VALID_INTERVALS.map((s) => (
+            <button
+              key={s}
+              onClick={() => handleIntervalChange(s)}
+              className={`flex-1 py-2 rounded-lg text-sm font-mono transition ${
+                intervalSecs === s
+                  ? 'bg-flow-active text-white font-semibold'
+                  : 'bg-bg-elevated text-text-primary hover:bg-bg-elevated/80'
+              }`}
+            >
+              {s}s
+            </button>
+          ))}
         </div>
       </section>
 
