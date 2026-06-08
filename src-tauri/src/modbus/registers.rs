@@ -545,6 +545,16 @@ pub const THREE_PHASE_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
     name: "holding_1080_1124",
 };
 
+/// Three-phase high configuration block — HR 1000-1079 covers real-time control
+/// (HR 1005), battery reserve (HR 1078) and other settings in the 1000-1079
+/// range that the main config block (1080-1124) doesn't reach.
+pub const THREE_PHASE_HIGH_CONFIG_BLOCK: RegisterBlock = RegisterBlock {
+    start: 1000,
+    count: 80,
+    register_type: RegisterType::Holding,
+    name: "holding_1000_1079",
+};
+
 /// Three-phase input register measurement blocks.
 /// Per givenergy-modbus reference library, three-phase inverters expose their
 /// real-time measurements (PV, AC grid, battery, energy totals) in the
@@ -610,7 +620,7 @@ pub const AC_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
 
 /// Extra blocks for HV/three-phase models that also use extended schedules.
 pub const EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] =
-    &[EXTENDED_SLOTS_BLOCK, THREE_PHASE_CONFIG_BLOCK];
+    &[EXTENDED_SLOTS_BLOCK, THREE_PHASE_HIGH_CONFIG_BLOCK, THREE_PHASE_CONFIG_BLOCK];
 
 /// Extra blocks for AC three-phase models: AC config plus full three-phase schedule/config.
 pub const AC_EXTENDED_AND_THREE_PHASE_BLOCKS: &[RegisterBlock] = &[

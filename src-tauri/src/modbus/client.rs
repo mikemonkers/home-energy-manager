@@ -778,6 +778,13 @@ impl ModbusClient {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
+                err @ Err(ClientError::NotConnected) | err @ Err(ClientError::SendFailed(_)) => {
+                    // Dead connection — fail fast instead of retrying 4× with 500ms delays.
+                    return Err(match err {
+                        Err(e) => e,
+                        _ => unreachable!(),
+                    });
+                }
                 Err(_) if attempt < Self::MAX_STALE_RETRIES => {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;

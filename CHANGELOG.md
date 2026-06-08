@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.8] - 2026-06-07
+
+### Fixed
+
+- **Read-path now fails fast on NotConnected/SendFailed**
+  The catch-all retry arm retried ALL errors including dead connections,
+  wasting ~2s (4×500ms) before surfacing the failure. NotConnected and
+  SendFailed now return immediately.
+
+- **Three-phase config block extended to cover HR 1000-1079**
+  Previously only read HR 1080-1124, missing the high config range
+  (HR 1005 REAL_TIME_CONTROL, HR 1078 BATTERY_RESERVE_PERCENT).
+  Added THREE_PHASE_HIGH_CONFIG_BLOCK to the poll cycle.
+
 ## [0.17.7] - 2026-06-07
 
 ### Fixed

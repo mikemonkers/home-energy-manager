@@ -160,6 +160,7 @@ fn block_key(block: &crate::modbus::registers::RegisterBlock) -> &'static str {
         (RegisterType::Holding, 60) => "holding_60_119",
         (RegisterType::Holding, 240) => "holding_240_299",
         (RegisterType::Holding, 300) => "holding_300_359",
+        (RegisterType::Holding, 1000) => "holding_1000_1079",
         (RegisterType::Holding, 1080) => "holding_1080_1124",
         (RegisterType::Input, 60) => "battery_input_60_119",
         (RegisterType::Input, 1000) => "input_1000_1059",
@@ -211,6 +212,7 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
             "holding_60_119" => decode_holding_60_119(data, &mut snap, &mut raw),
             "holding_240_299" => decode_holding_240_299(data, &mut snap),
             "holding_300_359" => decode_holding_300_359(data, &mut snap),
+            "holding_1000_1079" => decode_holding_1000_1079(data, &mut snap, &mut raw),
             "holding_1080_1124" => decode_holding_1080_1124(data, &mut snap, &mut raw),
             "input_1000_1059" => decode_input_1000_1059(data, &mut snap),
             "input_1060_1119" => decode_input_1060_1119(data, &mut snap),
@@ -661,6 +663,19 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
 ///   HR 1112 = ac_charge_enable
 ///   HR 1122 = force_discharge_enable
 ///   HR 1123 = force_charge_enable
+///
+/// HR 1000-1079: Three-phase high configuration block.
+///
+/// Covers registers HR 1005 (REAL_TIME_CONTROL) and HR 1078
+/// (BATTERY_RESERVE_PERCENT) that the lower config block (1080-1124)
+/// doesn't reach. Additional registers are decoded by the three-phase
+/// register getter (inverter_threephase.py).
+fn decode_holding_1000_1079(_data: &[u16], _snap: &mut InverterSnapshot, _raw: &mut RawConfig) {
+    // Currently a no-op — this block is read to prevent "Unknown block"
+    // warnings. HR 1005 and 1078 are in SAFE_WRITE_REGS but not yet
+    // displayed on the dashboard.
+}
+
 fn decode_holding_1080_1124(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawConfig) {
     snap.discharge_rate = get_reg(data, 1108 - 1080) as u8;
     snap.battery_reserve = get_reg(data, 1109 - 1080) as u8;
