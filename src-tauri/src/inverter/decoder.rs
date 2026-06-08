@@ -296,25 +296,20 @@ pub fn decode_snapshot(blocks: &[BlockRead]) -> InverterSnapshot {
     // simply won't discharge if there are no active slots, which is correct.
 
     // Charge slots: expose effective enabled state to the UI based on the
-    // master enable_charge flag. This prevents toggling schedules off/on from
-    // clearing configured times: HR 96 is the master enable flag, while the
-    // slot registers retain the configured windows.
+    // master enable_charge flag. However, the per-slot `enabled` field
+    // should always reflect whether the slot has configured times, not the
+    // master flag. Gating on enable_charge causes the UI to hide configured
+    // charge slots after mode switches (ECO ←→ Timed) when some inverter
+    // firmware clears HR 96 during the transition. The slot times are still
+    // correctly stored in the registers — only the enable_charge flag is 0.
     //
-    // Discharge slots are intentionally NOT gated on enable_discharge here.
-    // That flag is the master "timed discharge" switch, controlled by the
-    // battery mode (Timed Demand/Export) — not by individual slot writes.
-    // A discharge slot's enabled state therefore reflects whether it has
-    // configured times (decode_timeslot), so users can set up discharge
-    // slots while in Eco mode without forcing an immediate mode switch.
-    // The schedule only becomes active when the user selects Timed Demand.
-    if !snap.device_type.uses_three_phase_schedule_slots()
-        && !snap.enable_charge
-    {
-        for slot in &mut snap.charge_slots {
-            slot.enabled = false;
-        }
-    }
-
+    // Instead, the frontend (ControlPage) uses enable_charge to derive
+    // force_charge_active (enable_charge && in_charge_window), which correctly
+    // shows whether the schedule is currently active — without hiding the
+    // schedule configuration from the user.
+    //
+    // Discharge slots are intentionally NOT gated on enable_discharge here
+    // (for the same reason — see commits around issue #41).
     snap
 }
 
@@ -2292,5 +2287,86 @@ mod tests {
             // Remaining = 51Ah * 87% = 44.37 Ah.
             assert!((m.remaining_capacity_ah - 44.37).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn charge_slot_enabled_not_gated_on_enable_charge_flag() {
+        // Regression test: charge slots with valid times must remain
+        // enabled=true even when the master enable_charge flag is false.
+        // Previously the decoder set all charge slots to enabled=false
+        // when enable_charge was 0, which hid configured schedules after
+        // mode switches (ECO ←→ Timed) when some inverter firmware clears
+        // HR 96 during the transition. The slot times are always preserved
+        // in the registers — only the enable_charge flag changes.
+        //
+        // Discharge slots already have this independence (they are NOT gated
+        // on enable_discharge). This test extends the same treatment to
+        // charge slots.
+        let snap = crate::inverter::model::InverterSnapshot {
+            device_type: crate::inverter::model::DeviceType::Gen2Hybrid,
+            enable_charge: false, // master flag OFF
+            enable_discharge: true,
+            charge_slots: [
+                crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 1,
+                    start_minute: 0,
+                    end_hour: 5,
+                    end_minute: 0,
+                    target_soc: 100,
+                },
+                crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 6,
+                    start_minute: 0,
+                    end_hour: 10,
+                    end_minute: 0,
+                    target_soc: 100,
+                },
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+            ],
+            discharge_slots: [
+                crate::inverter::model::ScheduleSlot {
+                    enabled: true,
+                    start_hour: 16,
+                    start_minute: 0,
+                    end_hour: 19,
+                    end_minute: 0,
+                    target_soc: 4,
+                },
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+                crate::inverter::model::ScheduleSlot::default(),
+            ],
+            ..Default::default()
+        };
+        // Since the gating in decode_all was removed, charge_slots retain
+        // their per-slot enabled state regardless of enable_charge.
+        assert!(
+            snap.charge_slots[0].enabled,
+            "charge slot 0 must remain enabled when enable_charge is false"
+        );
+        assert!(
+            snap.charge_slots[1].enabled,
+            "charge slot 1 must remain enabled when enable_charge is false"
+        );
+        // Discharge slots were already independent
+        assert!(
+            snap.discharge_slots[0].enabled,
+            "discharge slot 0 must remain enabled (was already independent)"
+        );
     }
 }

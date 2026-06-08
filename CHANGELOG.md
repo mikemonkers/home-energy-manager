@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.12] - 2026-06-08
+
+### Fixed
+
+- **Charge slots no longer go blank after mode switches (ECO ←→ Timed)**
+  Removed the `enable_charge` gating on charge slot `enabled` state.
+  Some inverter firmware clears the master `enable_charge` flag (HR 96)
+  during mode transitions. Previously this caused ALL charge slots to
+  appear disabled in the UI even though their schedule times were still
+  correctly stored in the registers. Charge slots now behave like
+  discharge slots — always visible, with `enabled` reflecting whether
+  the slot has configured times. The frontend continues to use
+  `enable_charge && in_charge_window` to show whether the schedule is
+  actively charging, without hiding the configuration.
+
 ## [0.17.11] - 2026-06-08
 
 ### Fixed
