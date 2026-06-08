@@ -201,9 +201,6 @@ jobs:
                   return f"Linux-Debian-{arch}-{product}-{version}.deb"
               if ext_lower == ".rpm":
                   return f"Linux-RPM-{arch}-{product}-{version}.rpm"
-              if ext_lower == ".appimage":
-          pass # AppImage disabled — apprun-old asset returns 504 on GitHub
-                  return f"Linux-AppImage-{arch}-{product}-{version}.AppImage"
               return f"{platform}-{arch}-{product}-{version}{ext}"
 
           copied = []
