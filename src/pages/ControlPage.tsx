@@ -1785,8 +1785,9 @@ export default function ControlPage() {
         </div>
       </section>}
 
-      {/* Section 4: Discharge Schedule — only editable in timed mode */}
-      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && modeToCategory(effectiveMode) === 'timed' && (
+      {/* Section 4: Discharge Schedule — visible in all modes so users can
+          pre-configure slots before switching to Timed Demand/Export */}
+      {!cosyEnabled && chargeMode !== 'agile' && !schedulesUnsupported && (
         <section className="space-y-3">
           <h2 className="text-text-primary font-semibold text-lg">Discharge Schedule</h2>
           <p className="text-text-secondary/60 text-xs">Please Allow upto 30 Seconds for Changes to Save</p>

@@ -3348,6 +3348,8 @@ mod tests {
             pack_software_version: "GA000005".to_string(),
             number_of_modules: 5,
             cells_per_module: 24,
+            cluster_cell_voltage: 3.2,
+            status: 0x01,
             battery_voltage: 384.0,
             battery_current: -12.5,
             battery_power_w: -4800,

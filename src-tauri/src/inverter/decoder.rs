@@ -1061,6 +1061,10 @@ pub struct HvBcuCluster {
     pub number_of_modules: u16,
     /// Cells per module (IR 65).
     pub cells_per_module: u16,
+    /// Average cell voltage across the stack in V (IR 67, milli-V).
+    pub cluster_cell_voltage: f32,
+    /// BCU status flags (IR 70). 0x01 = normal operation.
+    pub status: u16,
     /// Pack terminal voltage in V (IR 73, /10).
     pub battery_voltage: f32,
     /// Pack current in A (IR 76, int16 /10).
@@ -1105,6 +1109,8 @@ pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
 
     let number_of_modules = get_reg(data, 64 - 60);
     let cells_per_module = get_reg(data, 65 - 60);
+    let cluster_cell_voltage = get_reg(data, 67 - 60) as f32 * 0.001; // IR(67): milli-V → V
+    let status = get_reg(data, 70 - 60); // IR(70): BCU status flags
 
     let battery_voltage = get_reg(data, 73 - 60) as f32 * 0.1;
     let battery_current = signed(get_reg(data, 76 - 60)) as f32 * 0.1;
@@ -1118,7 +1124,7 @@ pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
     let battery_soc_min = (soc_packed & 0xFF) as u8;
     let battery_soh = (get_reg(data, 81 - 60) & 0xFF) as u8;
 
-    let temperature = get_reg(data, 68 - 60) as f32; // IR(68): cluster_cell_temperature (uint16 °C, no deci)
+    let temperature = get_reg(data, 68 - 60) as f32 * 0.1; // IR(68): cluster_cell_temperature (deci °C)
 
     let nominal_capacity_ah = get_reg(data, 98 - 60) as f32 * 0.1;
     let remaining_capacity_ah = get_reg(data, 99 - 60) as f32 * 0.1;
@@ -1127,6 +1133,8 @@ pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
         pack_software_version,
         number_of_modules,
         cells_per_module,
+        cluster_cell_voltage,
+        status,
         battery_voltage,
         battery_current,
         battery_power_w,
@@ -2048,7 +2056,9 @@ mod tests {
         d[3] = 0x0005; // IR(63): version suffix → "GA000005"
         d[64 - 60] = 5; // IR(64): number_of_modules = 5
         d[65 - 60] = 24; // IR(65): cells_per_module = 24
-        d[68 - 60] = 25; // IR(68): cluster_cell_temperature = 25 °C (uint16, no deci)
+        d[67 - 60] = 3200; // IR(67): cluster_cell_voltage = 3.200 V
+        d[68 - 60] = 250; // IR(68): cluster_cell_temperature = 25.0 °C (deci)
+        d[70 - 60] = 0x01; // IR(70): status = normal
         d[73 - 60] = 3840; // IR(73): battery_voltage = 384.0 V
         d[74 - 60] = 3820; // IR(74): load_voltage = 382.0 V
         d[76 - 60] = (-125i16) as u16; // IR(76): battery_current = -12.5 A
@@ -2067,6 +2077,8 @@ mod tests {
         assert_eq!(c.pack_software_version, "GA000005");
         assert_eq!(c.number_of_modules, 5);
         assert_eq!(c.cells_per_module, 24);
+        assert!((c.cluster_cell_voltage - 3.2).abs() < 0.001);
+        assert_eq!(c.status, 0x01);
         assert!((c.battery_voltage - 384.0).abs() < 0.001);
         assert!((c.battery_current - -12.5).abs() < 0.001);
         assert_eq!(c.battery_power_w, 4800);
