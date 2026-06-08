@@ -6,6 +6,7 @@
 use chrono::{Datelike, Timelike, Utc};
 
 use crate::modbus::registers::{
+    HR_3PH_AC_CHARGE_ENABLE,
     HR_3PH_BATTERY_CHARGE_LIMIT,
     HR_3PH_BATTERY_DISCHARGE_LIMIT,
     HR_3PH_BATTERY_SOC_RESERVE,
@@ -18,7 +19,6 @@ use crate::modbus::registers::{
     HR_3PH_DISCHARGE_SLOT_1_START,
     HR_3PH_DISCHARGE_SLOT_2_END,
     HR_3PH_DISCHARGE_SLOT_2_START,
-    HR_3PH_AC_CHARGE_ENABLE,
     HR_3PH_FORCE_CHARGE_ENABLE,
     HR_3PH_FORCE_DISCHARGE_ENABLE,
     HR_ACTIVE_POWER_RATE,
@@ -38,6 +38,8 @@ use crate::modbus::registers::{
     HR_CHARGE_SLOT_1_END,
     HR_CHARGE_SLOT_1_START,
     HR_CHARGE_SLOT_2_END,
+    HR_CHARGE_SLOT_2_GEN3_END,
+    HR_CHARGE_SLOT_2_GEN3_START,
     HR_CHARGE_SLOT_2_START,
     HR_CHARGE_SLOT_3_END,
     // Extended slots 3-10
@@ -148,6 +150,10 @@ pub enum ControlCommand {
     SetChargeSlot1 { start: u16, end: u16 },
     /// Set charge slot 2 times (HHMM packed).
     SetChargeSlot2 { start: u16, end: u16 },
+    /// Set charge slot 2 times on Gen3/AIO/HV-Gen3 (HR 243-244).
+    /// On these models the authoritative register is in the extended block,
+    /// not the classic HR 31-32 location.
+    SetGen3ChargeSlot2 { start: u16, end: u16 },
     /// Set discharge slot 1 times (HHMM packed).
     SetDischargeSlot1 { start: u16, end: u16 },
     /// Set discharge slot 2 times (HHMM packed).
@@ -278,6 +284,14 @@ impl ControlCommand {
                 vec![
                     rw(HR_CHARGE_SLOT_2_START, *start),
                     rw(HR_CHARGE_SLOT_2_END, *end),
+                ]
+            }
+            ControlCommand::SetGen3ChargeSlot2 { start, end } => {
+                validate_hhmm(*start, "gen3 charge slot 2 start")?;
+                validate_hhmm(*end, "gen3 charge slot 2 end")?;
+                vec![
+                    rw(HR_CHARGE_SLOT_2_GEN3_START, *start),
+                    rw(HR_CHARGE_SLOT_2_GEN3_END, *end),
                 ]
             }
             ControlCommand::SetDischargeSlot1 { start, end } => {
@@ -1054,6 +1068,20 @@ mod tests {
         assert_eq!(writes[0].value, 2300);
         assert_eq!(writes[1].address, HR_CHARGE_SLOT_2_END);
         assert_eq!(writes[1].value, 500);
+    }
+
+    #[test]
+    fn set_gen3_charge_slot2_encodes_to_extended_register() {
+        let cmd = ControlCommand::SetGen3ChargeSlot2 {
+            start: 315,
+            end: 415,
+        };
+        let writes = cmd.encode().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].address, HR_CHARGE_SLOT_2_GEN3_START);
+        assert_eq!(writes[0].value, 315);
+        assert_eq!(writes[1].address, HR_CHARGE_SLOT_2_GEN3_END);
+        assert_eq!(writes[1].value, 415);
     }
 
     #[test]

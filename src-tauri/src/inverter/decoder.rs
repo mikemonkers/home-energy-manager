@@ -543,7 +543,44 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
 /// Gen3, AIO, and HV Gen3 devices map charge slots 3-10 at HR 246-268
 /// with per-slot target SOCs interleaved (e.g. HR 248 = target for slot 3).
 /// Discharge slots 3-10 are at HR 276-298 with the same pattern.
+///
+/// **Charge slot 2** is also mirrored at HR 243-244 on Gen3 firmware
+/// (named `charge_slot_2_x` in givenergy-modbus). The extended-block
+/// copy is authoritative — it supersedes the classic HR 31-32 values
+/// decoded in `decode_holding_0_59`. This matches GivTCP's behaviour
+/// where `RegisterMap.CHARGE_SLOT_2_START` resolves to 243 (the later
+/// class attribute assignment shadows the original 31).
 fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
+    // Charge slot 2 from extended block (HR 243-244).
+    // This is the authoritative copy on Gen3/AIO/HV-Gen3 firmware that
+    // does NOT use the three-phase schedule map.  Three-phase models read
+    // slot 2 from HR 1115-1116 instead, so we must not overwrite their
+    // slot 2 with stale HR 243-244 data.
+    if snap.device_type.supports_gen3_extended()
+        && !snap.device_type.uses_three_phase_schedule_slots()
+    {
+        let cs2_start = get_reg(data, 243 - 240);
+        let cs2_end = get_reg(data, 244 - 240);
+        if cs2_start != cs2_end {
+            if let (Some((sh, sm)), Some((eh, em))) =
+                (decode_hhmm(cs2_start), decode_hhmm(cs2_end))
+            {
+                snap.charge_slots[1] = ScheduleSlot {
+                    enabled: true,
+                    start_hour: sh,
+                    start_minute: sm,
+                    end_hour: eh,
+                    end_minute: em,
+                    // target_soc will be set below from HR 245
+                    target_soc: snap.charge_slots[1].target_soc,
+                };
+            }
+        } else if cs2_start == 0 && cs2_end == 0 {
+            // Both zero means the slot is explicitly disabled on Gen3 firmware.
+            snap.charge_slots[1].enabled = false;
+        }
+    }
+
     // Extended charge slots 3-10 at HR 246-268, offset by 240 in this block
     // Pattern: start, end, target_soc repeating for each slot
     for i in 0..8u16 {

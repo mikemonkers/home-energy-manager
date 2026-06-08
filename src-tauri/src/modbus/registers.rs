@@ -177,6 +177,15 @@ pub const HR_CHARGE_TARGET_SOC: u16 = 116;
 pub const HR_CHARGE_TARGET_SOC_1: u16 = 242;
 pub const HR_CHARGE_TARGET_SOC_2: u16 = 245;
 
+// Gen3 charge slot 2 — extended-block copy (HR 243-244).
+// On Gen3/AIO/HV-Gen3 firmware the authoritative charge slot 2 schedule
+// lives here, not at the classic HR 31-32 location.  Named
+// `charge_slot_2_x` in givenergy-modbus.  GivTCP's RegisterMap resolves
+// CHARGE_SLOT_2_START to 243 (later class assignment shadows the original
+// 31).
+pub const HR_CHARGE_SLOT_2_GEN3_START: u16 = 243;
+pub const HR_CHARGE_SLOT_2_GEN3_END: u16 = 244;
+
 // Gen3 discharge per-slot target SOC registers (HR 272-299):
 pub const HR_DISCHARGE_TARGET_SOC_1: u16 = 272;
 pub const HR_DISCHARGE_TARGET_SOC_2: u16 = 275;
@@ -438,6 +447,8 @@ pub const SAFE_WRITE_REGS: &[u16] = &[
     // Battery heater controls (givenergy-modbus #167, confirmed via GE Android app)
     104, // ENABLE_BATTERY_SELF_HEATING — hardware/batch-gated
     172, // ENABLE_MANUAL_BATTERY_HEATER — likely hardware-gated like 104
+    // Charge slot 2 — Gen3 extended (HR 243-244, mirrors classic HR 31-32)
+    243, 244,
     // Charge slots 3-10 (Gen3 extended)
     246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264,
     265, 266, 267, 268, 269, // Discharge slots 3-10 (Gen3 extended)

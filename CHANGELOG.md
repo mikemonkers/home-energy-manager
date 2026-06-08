@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.9] - 2026-06-08
+
+### Fixed
+
+- **Gen3 charge slot 2 register mismatch (#51)**
+  On Gen3/AIO/HV-Gen3 inverters, charge slot 2 schedule times were read
+  from the classic HR 31-32 registers instead of the authoritative HR 243-244
+  extended-block copy. The Gen3 firmware stores the active schedule at
+  HR 243-244 (named `charge_slot_2_x` in givenergy-modbus); HR 31-32 may
+  contain stale or zeroed data. This caused the slot to display wrong times
+  (e.g. `00:01-00:04` instead of the configured `03:15-04:15`).
+
+  **Decoder** (`decode_holding_240_299`): now reads charge slot 2 times from
+  HR 243-244 when the device supports Gen3 extended slots and does NOT use
+  the three-phase schedule map. The extended-block values override the
+  classic HR 31-32 decode.
+
+  **Encoder** (`SetGen3ChargeSlot2`): new command variant that writes to
+  HR 243-244 instead of HR 31-32 for affected models.
+
+  **API** (`charge_slot_command_for_device`): routes charge slot 2 writes
+  to the Gen3 variant when `device_type.supports_gen3_extended()` and the
+  model does not use three-phase schedule slots.
+
+  Cross-referenced against both givenergy-modbus (`charge_slot_2_x` at
+  HR 243-244) and GivTCP (RegisterMap.CHARGE_SLOT_2_START resolves to 243
+  due to Python class attribute shadowing).
+
 ## [0.17.8] - 2026-06-07
 
 ### Fixed

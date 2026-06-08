@@ -70,6 +70,11 @@ fn charge_slot_command_for_device(
         (true, 3..=10, _) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
         (false, _, false) => Ok(ControlCommand::SetEnableCharge { enabled: false }),
         (false, 1, true) => Ok(ControlCommand::SetChargeSlot1 { start, end }),
+        // Gen3/AIO/HV-Gen3 use HR 243-244 for charge slot 2 (the extended-block
+        // copy is authoritative on these models; classic HR 31-32 may be stale).
+        (false, 2, true) if device_type.supports_gen3_extended() => {
+            Ok(ControlCommand::SetGen3ChargeSlot2 { start, end })
+        }
         (false, 2, true) => Ok(ControlCommand::SetChargeSlot2 { start, end }),
         (false, 3..=10, true) => Ok(ControlCommand::SetChargeSlotN { slot, start, end }),
         (_, _, _) => Err(format!("Unsupported charge slot {}", slot)),
@@ -1188,6 +1193,50 @@ mod tests {
                 slot: 10,
                 start: 2000,
                 end: 2230
+            }
+        ));
+    }
+
+    #[test]
+    fn gen3_charge_slot2_uses_extended_register() {
+        // Gen3Hybrid should route slot 2 to the extended block (HR 243-244)
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::Gen3Hybrid, 2, true, 315, 415).unwrap(),
+            ControlCommand::SetGen3ChargeSlot2 {
+                start: 315,
+                end: 415
+            }
+        ));
+        // AIO models also use the extended block
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::AllInOne5kW, 2, true, 100, 200).unwrap(),
+            ControlCommand::SetGen3ChargeSlot2 {
+                start: 100,
+                end: 200
+            }
+        ));
+        // HV Gen3 uses three-phase schedule slots, so slot 2 should NOT
+        // use the Gen3 extended variant — it goes through 3ph dispatch.
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::HybridHvGen3, 2, true, 300, 400).unwrap(),
+            ControlCommand::SetThreePhaseChargeSlot2 {
+                start: 300,
+                end: 400
+            }
+        ));
+        // Gen1/Gen2 should still use the classic register (HR 31-32)
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::Gen1Hybrid, 2, true, 500, 600).unwrap(),
+            ControlCommand::SetChargeSlot2 {
+                start: 500,
+                end: 600
+            }
+        ));
+        assert!(matches!(
+            charge_slot_command_for_device(DeviceType::Gen2Hybrid, 2, true, 700, 800).unwrap(),
+            ControlCommand::SetChargeSlot2 {
+                start: 700,
+                end: 800
             }
         ));
     }
