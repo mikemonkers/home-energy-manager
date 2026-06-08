@@ -776,9 +776,14 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
     //   5 → IR(1065): i_ac2 (/10 A)
     //   6 → IR(1066): i_ac3 (/10 A)
     //   7 → IR(1067): f_ac1 (/100 Hz)
+    //   8 → IR(1068): power_factor (int16, /1000)
     //   9 → IR(1069)+IR(1070): p_inverter_out (int32 /10 W)
+    //  13 → IR(1073)+IR(1074): p_grid_apparent (uint32 /10 VA)
     //  19 → IR(1079)+IR(1080): p_meter_import (uint32 /10 W)
     //  21 → IR(1081)+IR(1082): p_meter_export (uint32 /10 W)
+    //  23 → IR(1083): p_load_ac1 (/10 W)
+    //  24 → IR(1084): p_load_ac2 (/10 W)
+    //  25 → IR(1085): p_load_ac3 (/10 W)
     //  29 → IR(1089)+IR(1090): p_load_all (uint32 /10 W)
     let v1 = get_reg(data, 1) as f32 * 0.1;
     let v2 = get_reg(data, 2) as f32 * 0.1;
@@ -802,6 +807,16 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
     // Create a synthetic meter entry from the inverter's built-in grid CT.
     // Positive total = import (matching MeterData convention).
     let i_total = (i1 + i2 + i3) / 3.0;
+
+    // IR(1068): power_factor (int16, /1000) — three-phase inverter-wide PF.
+    let pf_raw = signed(get_reg(data, 8)) as f32 * 0.001;
+    // IR(1073-1074): p_grid_apparent (uint32 /10 VA).
+    let p_apparent = uint32(get_reg(data, 13), get_reg(data, 14)) as f32 * 0.1;
+    // IR(1083-1085): p_load_ac1..3 (/10 W) — real per-phase load power.
+    let p_load_ac1 = get_reg(data, 23) as f32 * 0.1;
+    let p_load_ac2 = get_reg(data, 24) as f32 * 0.1;
+    let p_load_ac3 = get_reg(data, 25) as f32 * 0.1;
+
     snap.meters.push(MeterData {
         address: 0x00, // synthetic "built-in grid CT"
         v_phase_1: v1,
@@ -811,13 +826,15 @@ fn decode_input_1060_1119(data: &[u16], snap: &mut InverterSnapshot) {
         i_phase_2: i2,
         i_phase_3: i3,
         i_total,
-        p_active_phase_1: -p_grid / 3,
-        p_active_phase_2: -p_grid / 3,
-        p_active_phase_3: -p_grid / 3,
+        // No per-phase grid import/export registers exist; use per-phase load
+        // power as the best available proxy for the grid CT direction.
+        p_active_phase_1: -p_load_ac1 as i32,
+        p_active_phase_2: -p_load_ac2 as i32,
+        p_active_phase_3: -p_load_ac3 as i32,
         p_active_total: -p_grid,
-        p_reactive_total: 0,
-        p_apparent_total: (i_total * (v1 + v2 + v3) / 3.0) as i32,
-        pf_total: 1.0,
+        p_reactive_total: 0, // no reactive register available
+        p_apparent_total: p_apparent as i32,
+        pf_total: pf_raw.abs().clamp(0.0, 1.0),
         frequency: snap.grid_frequency,
         e_import_active_kwh: 0.0,
         e_export_active_kwh: 0.0,
@@ -1548,14 +1565,25 @@ mod tests {
         ir1000[1020 - 1000] = 15_000; // PV2 power 1500.0W
 
         let mut ir1060 = vec![0u16; 60];
-        ir1060[1061 - 1060] = 2310; // grid voltage 231.0V
+        ir1060[1061 - 1060] = 2310; // grid voltage L1 231.0V
+        ir1060[1062 - 1060] = 2320; // grid voltage L2 232.0V
+        ir1060[1063 - 1060] = 2290; // grid voltage L3 229.0V
+        ir1060[1064 - 1060] = 10;   // current L1 1.0A
+        ir1060[1065 - 1060] = 12;   // current L2 1.2A
+        ir1060[1066 - 1060] = 8;    // current L3 0.8A
         ir1060[1067 - 1060] = 5000; // grid frequency 50.00Hz
+        ir1060[1068 - 1060] = 980;  // power factor 0.980
+        ir1060[1073 - 1060] = 0;
+        ir1060[1074 - 1060] = 15_000; // grid apparent power 1500.0VA
         ir1060[1079 - 1060] = 0;
         ir1060[1080 - 1060] = 3000; // import 300W
         ir1060[1081 - 1060] = 0;
         ir1060[1082 - 1060] = 9000; // export 900W => grid_power +600W
+        ir1060[1083 - 1060] = 700;  // load L1 70.0W
+        ir1060[1084 - 1060] = 800;  // load L2 80.0W
+        ir1060[1085 - 1060] = 600;  // load L3 60.0W
         ir1060[1089 - 1060] = 0;
-        ir1060[1090 - 1060] = 22_000; // load 2200W
+        ir1060[1090 - 1060] = 22_000; // load total 2200W
 
         let mut ir1120 = vec![0u16; 60];
         ir1120[1128 - 1120] = 355; // inverter temp 35.5C
@@ -1625,6 +1653,18 @@ mod tests {
             snap.meters[0].p_active_total, -600,
             "Meter total = -grid_power (positive = import)"
         );
+        // Per-phase load power from IR(1083-1085) — raw values /10 W
+        assert_eq!(snap.meters[0].p_active_phase_1, -70, "L1 = -p_load_ac1");
+        assert_eq!(snap.meters[0].p_active_phase_2, -80, "L2 = -p_load_ac2");
+        assert_eq!(snap.meters[0].p_active_phase_3, -60, "L3 = -p_load_ac3");
+        // Power factor from IR(1068) — raw 980 → 0.980
+        assert!((snap.meters[0].pf_total - 0.980).abs() < 0.001, "PF from register");
+        // Apparent power from IR(1073-1074) — raw 15000 → 1500VA
+        assert_eq!(snap.meters[0].p_apparent_total, 1500, "Apparent from register");
+        // Voltages from IR(1061-1063)
+        assert!((snap.meters[0].v_phase_1 - 231.0).abs() < 0.1);
+        assert!((snap.meters[0].v_phase_2 - 232.0).abs() < 0.1);
+        assert!((snap.meters[0].v_phase_3 - 229.0).abs() < 0.1);
         assert!((snap.meters[0].frequency - 50.0).abs() < 0.01);
         assert!((snap.meters[0].e_import_active_kwh - 88.8).abs() < 0.1, "3-phase meter import = total_import_kwh");
         assert!((snap.meters[0].e_export_active_kwh - 99.9).abs() < 0.1, "3-phase meter export = total_export_kwh");

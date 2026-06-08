@@ -17,6 +17,7 @@
 //! spawned as a long-lived Tokio task. It handles auto-reconnection
 //! with exponential back-off.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -799,11 +800,24 @@ fn persist_agile_state_sync(label: String) {
 /// `pending_mode` tracks a mode that differs from the previous reading but
 /// hasn't yet been confirmed by a second consecutive reading. This prevents
 /// mode flicker caused by a single corrupt register read.
+/// Tracks how many consecutive poll cycles each cumulative field has been
+/// corrected downward (raw < prev). If the inverter consistently reports the
+/// same lower value for many cycles, the *baseline* was likely the corrupted
+/// one (e.g. a grace-period spike). After `DELTA_CORRECTION_RELEASE_THRESHOLD`
+/// consecutive corrections, we accept the raw value and reset the counter.
+#[derive(Default)]
+struct DeltaCorrectionCounts(HashMap<&'static str, u8>);
+
+/// Number of consecutive downward corrections before we accept that the
+/// raw value is correct and the baseline was wrong.
+const DELTA_CORRECTION_RELEASE_THRESHOLD: u8 = 10;
+
 fn sanitize_snapshot(
     snap: &mut InverterSnapshot,
     prev: Option<&InverterSnapshot>,
     skip_delta: bool,
     pending_mode: &mut Option<BatteryMode>,
+    delta_corrections: &mut DeltaCorrectionCounts,
 ) -> bool {
     let mut sanitized = false;
     let max_battery_power: i32 = 10_000; // 10 kW — residential battery limit
@@ -1185,6 +1199,7 @@ fn sanitize_snapshot(
                 // Allow if raw is small and prev was large.
                 else if raw < prev_val && raw < 5.0 && prev_val > 5.0 {
                     // Legitimate midnight reset — accept raw as-is
+                    delta_corrections.0.remove($name);
                 }
                 // Tiny one-tick decreases are normal read noise; carry the
                 // previous value forward silently so cumulative values remain
@@ -1197,14 +1212,29 @@ fn sanitize_snapshot(
                     );
                     $value = prev_val;
                 }
-                // Counter must not decrease materially (register corruption)
+                // Counter must not decrease materially (register corruption).
+                // However, if the inverter consistently reports the same lower
+                // value for many cycles, the baseline was likely wrong — release.
                 else if raw < prev_val {
-                    tracing::warn!(
-                        field = $name, raw, prev = prev_val,
-                        "Daily energy decreased (register corruption) — using previous",
-                    );
-                    $value = prev_val;
-                    sanitized = true;
+                    let count = delta_corrections.0.entry($name).or_insert(0);
+                    *count += 1;
+                    if *count >= DELTA_CORRECTION_RELEASE_THRESHOLD {
+                        tracing::info!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            "Daily energy consistently lower — accepting raw, baseline was likely wrong",
+                        );
+                        $value = raw;
+                        delta_corrections.0.remove($name);
+                        // Don't set sanitized=true — we're accepting raw, not rejecting it
+                    } else {
+                        tracing::warn!(
+                            field = $name, raw, prev = prev_val,
+                            "Daily energy decreased (register corruption) — using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
+                    }
                 }
                 // Increase must be plausible for elapsed time
                 else if raw > prev_val + max_increase_kwh {
@@ -1215,6 +1245,10 @@ fn sanitize_snapshot(
                     );
                     $value = prev_val;
                     sanitized = true;
+                }
+                else {
+                    // Normal increase within rate limit — raw accepted, reset counter
+                    delta_corrections.0.remove($name);
                 }
             };
         }
@@ -1289,14 +1323,27 @@ fn sanitize_snapshot(
                     );
                     $value = prev_val;
                 }
-                // Counter must not decrease materially
+                // Counter must not decrease materially.
+                // Same consecutive-correction release as daily counters.
                 else if raw < prev_val {
-                    tracing::warn!(
-                        field = $name, raw, prev = prev_val,
-                        "Lifetime total decreased (register corruption) — using previous",
-                    );
-                    $value = prev_val;
-                    sanitized = true;
+                    let count = delta_corrections.0.entry($name).or_insert(0);
+                    *count += 1;
+                    if *count >= DELTA_CORRECTION_RELEASE_THRESHOLD {
+                        tracing::info!(
+                            field = $name, raw, prev = prev_val,
+                            count = *count,
+                            "Lifetime total consistently lower — accepting raw, baseline was likely wrong",
+                        );
+                        $value = raw;
+                        delta_corrections.0.remove($name);
+                    } else {
+                        tracing::warn!(
+                            field = $name, raw, prev = prev_val,
+                            "Lifetime total decreased (register corruption) — using previous",
+                        );
+                        $value = prev_val;
+                        sanitized = true;
+                    }
                 }
                 // Increase must be plausible for elapsed time
                 else if raw > prev_val + max_lifetime_increase_kwh {
@@ -1307,6 +1354,10 @@ fn sanitize_snapshot(
                     );
                     $value = prev_val;
                     sanitized = true;
+                }
+                else {
+                    // Normal increase within rate limit — raw accepted, reset counter
+                    delta_corrections.0.remove($name);
                 }
             };
         }
@@ -1865,6 +1916,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                 // correct lower reading to be rejected as a "decrease".
                 let mut grace_cumulative_samples: Vec<GraceCumulativeSamples> = Vec::new();
                 let mut pending_mode: Option<BatteryMode> = None;
+                let mut delta_corrections = DeltaCorrectionCounts::default();
                 let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
                 let mut detected_meters: Vec<u8> = Vec::new();
                 let mut meter_probe_done = false;
@@ -2587,7 +2639,7 @@ pub async fn run_poll_loop(state: Arc<AppState>) {
                                 let in_grace = readings_since_connect < GRACE_READINGS;
                                 let (sanitized, prev_modules) = {
                                     let prev = state.latest_snapshot.lock().await;
-                                    let mut s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode);
+                                    let mut s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections);
                                     if carry_forward_optional_block_values(
                                         &mut snapshot,
                                         prev.as_ref(),
@@ -3570,8 +3622,9 @@ mod tests {
             ..Default::default()
         };
         let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
 
-        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode);
+        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections);
 
         assert!(!sanitized, "noise tolerance must not force immediate re-poll");
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
@@ -3598,11 +3651,116 @@ mod tests {
             ..Default::default()
         };
         let mut pending_mode = None;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
 
-        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode);
+        let sanitized = sanitize_snapshot(&mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections);
 
         assert!(sanitized);
         assert_eq!(snap.today_consumption_kwh, prev.today_consumption_kwh);
+    }
+
+    #[test]
+    fn daily_energy_consecutive_decrease_releases_baseline() {
+        // Simulate the scenario: the inverter consistently reports 7.1 kWh
+        // but our baseline was 7.7 (from a corrupted grace-period reading).
+        // After DELTA_CORRECTION_RELEASE_THRESHOLD consecutive corrections,
+        // the raw value should be accepted.
+        let prev_consumption = 7.7;
+        let raw_consumption = 7.1;
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+
+        for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
+            let prev = InverterSnapshot {
+                timestamp: 100 + i as i64 * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_consumption_kwh: prev_consumption,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 100 + (i as i64 + 1) * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_consumption_kwh: raw_consumption,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+
+            let _sanitized = sanitize_snapshot(
+                &mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections,
+            );
+
+            if i < DELTA_CORRECTION_RELEASE_THRESHOLD - 1 {
+                // Before threshold: carry forward the baseline
+                assert_eq!(snap.today_consumption_kwh, prev_consumption,
+                    "cycle {}: should carry forward baseline", i);
+            } else {
+                // On threshold cycle: accept raw — the baseline was wrong
+                assert_eq!(snap.today_consumption_kwh, raw_consumption,
+                    "cycle {}: should accept raw value after threshold", i);
+            }
+        }
+
+        // Counter should be reset after release
+        assert!(delta_corrections.0.get("today_consumption_kwh").is_none()
+            || *delta_corrections.0.get("today_consumption_kwh").unwrap() == 0);
+    }
+
+    #[test]
+    fn daily_energy_correction_count_resets_on_normal_increase() {
+        // If we get a few corrections then a normal increase, the counter resets.
+        let mut delta_corrections = DeltaCorrectionCounts::default();
+
+        // First 3 cycles: decrease → correction
+        for i in 0..3u8 {
+            let prev = InverterSnapshot {
+                timestamp: 100 + i as i64 * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_consumption_kwh: 7.7,
+                ..Default::default()
+            };
+            let mut snap = InverterSnapshot {
+                timestamp: 100 + (i as i64 + 1) * 3,
+                battery_mode: BatteryMode::Eco,
+                grid_voltage: 230.0,
+                grid_frequency: 50.0,
+                today_consumption_kwh: 7.1,
+                ..Default::default()
+            };
+            let mut pending_mode = None;
+            let _ = sanitize_snapshot(
+                &mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections,
+            );
+        }
+        assert_eq!(*delta_corrections.0.get("today_consumption_kwh").unwrap(), 3);
+
+        // Normal increase: raw > prev → counter resets
+        let prev = InverterSnapshot {
+            timestamp: 109,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            today_consumption_kwh: 7.1,
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            timestamp: 112,
+            battery_mode: BatteryMode::Eco,
+            grid_voltage: 230.0,
+            grid_frequency: 50.0,
+            today_consumption_kwh: 7.5,
+            ..Default::default()
+        };
+        let mut pending_mode = None;
+        let _ = sanitize_snapshot(
+            &mut snap, Some(&prev), false, &mut pending_mode, &mut delta_corrections,
+        );
+        assert!(delta_corrections.0.get("today_consumption_kwh").is_none(),
+            "counter should be reset after normal increase");
     }
 
     #[test]

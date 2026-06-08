@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.11] - 2026-06-08
+
+### Fixed
+
+- **Delta baseline self-correction for cumulative counters**: If a daily
+  or lifetime energy counter is consistently reported lower by the
+  inverter for 10+ consecutive poll cycles, the system now accepts the
+  raw value instead of locking onto a corrupted baseline forever.
+  Previously, a single grace-period spike (e.g. reading 7.7 kWh when
+  the actual value was 7.1) would cause the sanitizer to carry forward
+  the wrong value indefinitely, logging "register corruption" warnings
+  every 3 seconds. After 10 consecutive corrections the baseline is
+  released at `INFO` level and normal operation resumes.
+
+### Improved
+
+- **Three-phase meter decoder**: Per-phase active power (`p_active_phase_1/2/3`)
+  now comes from the dedicated load power registers IR(1083-1085) instead of
+  dividing total grid power by 3. Power factor is read from IR(1068) and
+  apparent power from IR(1073-1074), replacing synthesised estimates with
+  actual register values.
+
 ## [0.17.10] - 2026-06-08
 
 ### Fixed
