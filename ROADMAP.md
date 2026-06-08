@@ -4,6 +4,34 @@ Planned and under-investigation items for Home Energy Manager. This is not a
 release commitment; items may change as hardware access, simulator support, and
 user reports improve.
 
+### HV battery capacity — nominal vs usable
+
+**Status**: Data available but frontend displays nominal, not usable.
+
+HV stackable batteries (GIV-BAT-3.4-HV modules) report capacity via the BCU
+cluster at device 0x70, IR(98) per-module Ah × IR(64) module count × 76.8V
+nominal ÷ 1000.
+
+| Source | Value for 5-module stack | Notes |
+|---|---|---|
+| BCU IR(98) per module | 51.0 Ah | deci: raw 510 ÷ 10 |
+| BCU IR(64) modules | 5 | |
+| Total Ah | 255 Ah | 51 × 5 |
+| Nominal kWh | **~19.6 kWh** | 255 × 76.8 ÷ 1000 |
+| Minus 10% overhead | ~17.6 kWh | GivTCP's 0.9 factor |
+| Minus 4% SOC reserve | ~16.9 kWh | Default reserve |
+| Minus 10% SOC reserve | ~15.8 kWh | User-configurable |
+
+**Gap**: The displayed capacity is the raw nominal from the BCU (~20 kWh),
+not the nameplate rating (~17 kWh for GIV-BAT-17.0-HV). GivTCP applies a
+0.9 factor (`battery_capacity_hv` converter). The app should either:
+- Apply the 0.9 factor to match the datasheet, or
+- Display both nominal and usable, or
+- Document that the value is theoretical and usable depends on reserve.
+
+See also: `derive_three_phase_battery_fields()` in poll.rs, GivTCP
+`register.py:battery_capacity_hv()`.
+
 ## Near-term candidates
 
 ### Octopus Agile Integration
