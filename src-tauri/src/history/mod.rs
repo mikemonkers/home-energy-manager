@@ -405,8 +405,17 @@ impl HistoryDb {
                         if secs_today == 0 {
                             raw_end
                         } else {
-                            // Add remaining seconds to reach next local midnight
-                            raw_end + (86400 - secs_today as i64)
+                            // Next local midnight: go to midnight of the next day
+                            let tomorrow = raw_local.date_naive()
+                                + chrono::Duration::days(1);
+                            let next_midnight_naive = tomorrow
+                                .and_hms_opt(0, 0, 0)
+                                .unwrap();
+                            let next_midnight_local = chrono::Local
+                                .from_local_datetime(&next_midnight_naive)
+                                .earliest()
+                                .unwrap();
+                            next_midnight_local.timestamp()
                         }
                     }
                 };
