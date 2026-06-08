@@ -73,6 +73,8 @@ export default function SettingsPage() {
   // General
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
+  const [showRestartModal, setShowRestartModal] = useState(false);
+  const [pendingConnect, setPendingConnect] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
   const [clients, setClients] = useState<string[]>([]);
@@ -125,10 +127,18 @@ export default function SettingsPage() {
 
   // Save connection
   const handleConnect = async () => {
+    const savedHost = localStorage.getItem('saved_host');
+    const hostChanged = savedHost && savedHost !== host;
     setSaving(true);
     try {
       await apiPost('/api/settings', { host, port, serial });
-      flash('Settings saved — reconnecting…', true);
+      localStorage.setItem('saved_host', host);
+      if (hostChanged) {
+        setPendingConnect(true);
+        setShowRestartModal(true);
+      } else {
+        flash('Settings saved — reconnecting…', true);
+      }
     } catch (error) {
       flash(error instanceof Error ? error.message : 'Failed to save settings', false);
     }
@@ -234,6 +244,31 @@ export default function SettingsPage() {
 
   return (
     <div className="flex flex-col gap-8 max-w-2xl mx-auto px-4 py-6">
+      {/* Restart modal */}
+      {showRestartModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-bg-surface rounded-2xl p-6 max-w-sm mx-4 shadow-2xl">
+            <h3 className="text-text-primary text-lg font-semibold mb-2">Restart Required</h3>
+            <p className="text-text-secondary text-sm mb-6">
+              The connection to <strong className="text-text-primary">{host}</strong> has been saved.
+              Please restart the app for the changes to take full effect.
+            </p>
+            <button
+              onClick={() => {
+                setShowRestartModal(false);
+                if (pendingConnect) {
+                  flash('Connection saved. Restart required.', true);
+                  setPendingConnect(false);
+                }
+              }}
+              className="w-full py-2.5 bg-flow-active/20 text-flow-active rounded-lg text-sm font-medium hover:bg-flow-active/30 transition"
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
       {message && (
         <div
