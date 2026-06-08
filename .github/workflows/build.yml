@@ -67,7 +67,7 @@ jobs:
 
       - name: Build Tauri app (Windows)
         if: matrix.platform == 'windows-latest'
-        run: cargo tauri build --target ${{ matrix.target }} --bundles nsis,msi
+        run: cargo tauri build --target ${{ matrix.target }} --bundles msi
 
       - name: Build Tauri app (Linux)
         if: matrix.platform == 'ubuntu-22.04' || matrix.platform == 'ubuntu-24.04-arm'
@@ -288,7 +288,7 @@ jobs:
             | `macOS-Apple-Silicon-...dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
             | `macOS-Intel-...dmg` | **macOS** — Intel |
             | `Windows-Installer-...exe` | **Windows** — standard installer |
-            | `Windows-MSI-...msi` | **Windows** — MSI package |
+            | `Windows-MSI-...msi` | **Windows** — MSI package (NSIS installer temporarily disabled) |
             | `Linux-Debian-...deb` | **Linux** — Debian/Ubuntu |
             | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
             | — | AppImage temporarily disabled — GitHub asset returns 504 |
