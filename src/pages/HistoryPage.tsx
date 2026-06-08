@@ -744,7 +744,20 @@ export default function HistoryPage() {
         return [alignedEnd - windowMs, alignedEnd];
       })();
 
-  const effectiveDomain: [number, number] = xDomain;
+  // Trim the domain start to the earliest data point so the line reaches
+  // the y-axis instead of leaving a gap. Only for 1h/6h (not 24h — the
+  // user expects 24h to always span midnight to midnight).
+  const effectiveDomain: [number, number] = (() => {
+    if (range !== '1h' && range !== '6h') return xDomain;
+    let firstTs = Infinity;
+    for (const pts of Object.values(data)) {
+      if (pts.length > 0 && pts[0].t < firstTs) firstTs = pts[0].t;
+    }
+    if (firstTs !== Infinity && firstTs > xDomain[0]) {
+      return [firstTs, xDomain[1]];
+    }
+    return xDomain;
+  })();
 
   const [importTariffCfg, setImportTariffCfg] = useState<TariffConfig>({
     peak_rate: 0.285, off_peak_rate: 0.09, off_peak_start: '00:30', off_peak_end: '05:30',
