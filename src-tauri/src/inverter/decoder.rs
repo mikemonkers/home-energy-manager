@@ -1118,7 +1118,7 @@ pub fn decode_hv_bcu_cluster(data: &[u16]) -> HvBcuCluster {
     let battery_soc_min = (soc_packed & 0xFF) as u8;
     let battery_soh = (get_reg(data, 81 - 60) & 0xFF) as u8;
 
-    let temperature = get_reg(data, 68 - 60) as f32 * 0.1;
+    let temperature = get_reg(data, 68 - 60) as f32; // IR(68): cluster_cell_temperature (uint16 °C, no deci)
 
     let nominal_capacity_ah = get_reg(data, 98 - 60) as f32 * 0.1;
     let remaining_capacity_ah = get_reg(data, 99 - 60) as f32 * 0.1;
@@ -2048,7 +2048,7 @@ mod tests {
         d[3] = 0x0005; // IR(63): version suffix → "GA000005"
         d[64 - 60] = 5; // IR(64): number_of_modules = 5
         d[65 - 60] = 24; // IR(65): cells_per_module = 24
-        d[68 - 60] = 295; // IR(68): cluster_cell_temperature = 29.5 °C
+        d[68 - 60] = 25; // IR(68): cluster_cell_temperature = 25 °C (uint16, no deci)
         d[73 - 60] = 3840; // IR(73): battery_voltage = 384.0 V
         d[74 - 60] = 3820; // IR(74): load_voltage = 382.0 V
         d[76 - 60] = (-125i16) as u16; // IR(76): battery_current = -12.5 A
@@ -2073,7 +2073,7 @@ mod tests {
         assert_eq!(c.battery_soc_max, 90);
         assert_eq!(c.battery_soc_min, 85);
         assert_eq!(c.battery_soh, 98);
-        assert!((c.temperature - 29.5).abs() < 0.001);
+        assert!((c.temperature - 25.0).abs() < 0.001);
         assert!((c.nominal_capacity_ah - 51.0).abs() < 0.001);
         assert!((c.remaining_capacity_ah - 44.0).abs() < 0.001);
         // Stack totals: per-module Ah × module count.
