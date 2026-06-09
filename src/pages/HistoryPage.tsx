@@ -22,6 +22,10 @@ import {
   shouldTrimHistoryRangeLeadingGap,
   trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
+import { getSeriesOpacity } from '../lib/chartSeries';
+import { SeriesLegend } from '../components/SeriesLegend';
+import { useInverterStore } from '../store/useInverterStore';
+import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, PollSettings, TariffConfig } from '../lib/types';
 
 // ---------------------------------------------------------------------------
@@ -335,6 +339,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
   domain: [number, number];
   ticks?: number[];
 }) {
+  const [mutedSeries, setMutedSeries] = useState<Partial<Record<string, boolean>>>({});
   const allFields = [...chart.fields.map((f) => f.field), ...(chart.requires ?? [])];
   const uniqueFields = [...new Set(allFields)];
 
@@ -367,6 +372,14 @@ function ChartCard({ chart, data, range, domain, ticks }: {
     const suffix = chart.fields.filter((ff, j) => j < i && ff.field === f.field).length;
     return `${f.field}${suffix > 0 ? `_${suffix}` : ''}`;
   });
+  const legendItems: SeriesLegendItem[] = chart.fields.map((f, i) => ({
+    key: seriesNames[i],
+    label: f.label ?? f.field,
+    color: f.color,
+  }));
+  const toggleSeries = (key: string) => {
+    setMutedSeries((current) => ({ ...current, [key]: !current[key] }));
+  };
 
   const seriesData = merged.map((row) => {
     const out: Record<string, number | null> = { t: row.t };
@@ -384,17 +397,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
       <div className="flex items-center justify-between mb-3 gap-2">
         <h3 className="text-text-primary text-sm font-sans font-bold">{chart.title}</h3>
         {chart.fields.length > 1 && (
-          <div className="flex items-center gap-3">
-            {chart.fields.map((f, i) => (
-              <span key={i} className="flex items-center gap-1.5 text-xs font-sans font-semibold">
-                <span
-                  className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-                  style={{ backgroundColor: f.color }}
-                />
-                <span className="text-text-secondary">{f.label ?? f.field}</span>
-              </span>
-            ))}
-          </div>
+          <SeriesLegend items={legendItems} muted={mutedSeries} onToggle={toggleSeries} />
         )}
       </div>
       <ResponsiveContainer width="100%" height={200}>
@@ -456,6 +459,7 @@ function ChartCard({ chart, data, range, domain, ticks }: {
               dataKey={seriesNames[i]}
               stroke={f.color}
               fill={`url(#grad-${chart.key}-${i})`}
+              opacity={getSeriesOpacity(mutedSeries[seriesNames[i]] ?? false)}
               strokeWidth={2}
               dot={false}
               isAnimationActive={false}
@@ -595,7 +599,8 @@ function useNow(): number {
 
 export default function HistoryPage() {
   const [tab, setTab] = useState<MetricTab>('battery');
-  const [range, setRange] = useState<HistoryRange>('24h');
+  const range = useInverterStore((state) => state.chartRange);
+  const setChartRange = useInverterStore((state) => state.setChartRange);
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<Record<string, TimePoint[]>>({});
   
@@ -667,7 +672,7 @@ export default function HistoryPage() {
   };
 
   const handleRangeChange = (r: HistoryRange) => {
-    setRange(r);
+    setChartRange(r);
     setOffset(0);
   };
 
@@ -706,6 +711,8 @@ export default function HistoryPage() {
         {HISTORY_RANGES.map((r) => (
           <button
             key={r.key}
+            type="button"
+            aria-pressed={range === r.key}
             onClick={() => handleRangeChange(r.key)}
             className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
               range === r.key
