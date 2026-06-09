@@ -724,6 +724,17 @@ pub struct InverterSnapshot {
     #[serde(default)]
     pub battery_pause_slot: ScheduleSlot,
 
+    // -- External CT configuration (single-phase only) --
+    /// Whether the external CT ammeter is enabled — HR(7).
+    #[serde(default)]
+    pub enable_ammeter: bool,
+    /// Whether the CT clamp is installed reversed — HR(42).
+    #[serde(default)]
+    pub enable_reversed_ct_clamp: bool,
+    /// Installed external meter type — HR(47).
+    #[serde(default)]
+    pub meter_type: u8,
+
     // -- External CT meters --
     /// Detected external clamp meters (device addresses 0x01-0x08).
     #[serde(default)]

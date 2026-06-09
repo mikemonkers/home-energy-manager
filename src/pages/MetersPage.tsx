@@ -1,5 +1,5 @@
 import { useInverterStore } from '../store/useInverterStore';
-import type { MeterData } from '../lib/types';
+import type { InverterSnapshot, MeterData } from '../lib/types';
 
 /** A phase is "active" if it has a plausible non-zero voltage (>10 V). */
 const VOLTAGE_THRESHOLD = 10;
@@ -88,6 +88,47 @@ function MeterCard({ meter }: { meter: MeterData }) {
   );
 }
 
+function CtConfigCard({ snapshot }: { snapshot: InverterSnapshot }) {
+  const meterTypeLabel = (() => {
+    switch (snapshot.meter_type) {
+      case 0: return 'CT / EM418';
+      case 1: return 'EM115';
+      default: return snapshot.meter_type > 0 ? `Unknown (${snapshot.meter_type})` : null;
+    }
+  })();
+
+  return (
+    <div className="bg-bg-surface rounded-xl p-4 space-y-3">
+      <h3 className="text-text-primary font-medium">CT Clamp Configuration</h3>
+      <div className="grid grid-cols-3 gap-3 text-center">
+        <div>
+          <div className="text-xs text-text-secondary">Ammeter Enabled</div>
+          <div className={`font-mono text-sm font-medium ${snapshot.enable_ammeter ? 'text-green-400' : 'text-red-400'}`}>
+            {snapshot.enable_ammeter ? 'Yes' : 'No'}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-text-secondary">Reversed CT</div>
+          <div className={`font-mono text-sm font-medium ${snapshot.enable_reversed_ct_clamp ? 'text-amber-400' : 'text-text-primary'}`}>
+            {snapshot.enable_reversed_ct_clamp ? 'Yes' : 'No'}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-text-secondary">Meter Type</div>
+          <div className="font-mono text-sm text-text-primary">
+            {meterTypeLabel ?? '—'}
+          </div>
+        </div>
+      </div>
+      {!snapshot.enable_ammeter && (
+        <p className="text-xs text-text-secondary">
+          External CT ammeter is disabled. Enable it in the inverter settings if you have a CT clamp installed.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function MetersPage() {
   const snapshot = useInverterStore((s) => s.snapshot);
   const meters = snapshot?.meters;
@@ -95,6 +136,10 @@ export default function MetersPage() {
   return (
     <div className="flex flex-col gap-4 max-w-2xl mx-auto px-4 py-6">
       <h2 className="text-text-primary font-semibold text-lg">External CT Meters</h2>
+
+      {snapshot && (
+        <CtConfigCard snapshot={snapshot} />
+      )}
 
       {!meters || meters.length === 0 ? (
         <div className="bg-bg-surface rounded-xl p-6 text-center">

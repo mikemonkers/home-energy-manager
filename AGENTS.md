@@ -2,12 +2,16 @@
 
 Desktop app for monitoring and controlling GivEnergy solar inverters over local Modbus TCP.
 
+## General rules
+
+- **Never close GitHub issues or PRs** without explicit permission from the project owner. Marking an issue as completed/resolved, closing a PR, or otherwise finalising a ticket requires a specific instruction — do not assume based on the work performed.
+
 ## Stack
 
 - **Frontend**: React 19 + TypeScript + Vite 9 + Tailwind CSS 4 + Zustand + Recharts + React Router 7
 - **Backend**: Tauri 2 desktop shell; embedded Axum HTTP/WS server on port **7337**
 - **Modbus**: Custom Rust TCP client to GivEnergy data adapter (port **8899**) aligned with [givenergy-modbus](https://github.com/dewet22/givenergy-modbus) reference library and [GivTCP](https://github.com/dewet22/giv_tcp)
-- **Testing**: Rust unit tests (244) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour (no frontend tests)
+- **Testing**: Rust unit tests (244) + integration tests with a mock TCP server that simulates GivEnergy dongle behaviour + Playwright end-to-end tests for UI behaviour
 - **References**: Local clones at `~/repos/givenergy-modbus` and `~/repos/giv_tcp` are the source of truth for register layout, slot maps, slave addressing, and command encoding
 
 ## Prerequisites
@@ -28,8 +32,12 @@ Desktop app for monitoring and controlling GivEnergy solar inverters over local 
 | `cargo clippy` (in `src-tauri/`) | Run Rust linter |
 | `cargo tauri dev` | Dev mode with Tauri window + Vite + hot-reload |
 | `cargo tauri build` | Production build of the desktop app |
+| `docker build .` | Docker container build (verifies full multi-stage build) |
+| `npm run test:e2e` | Playwright end-to-end tests (requires `npm run build` + `cd src-tauri && cargo build --release` first) |
 
-Order for full verification: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` (typechecks) → `cargo test` in `src-tauri/`.
+Order for full verification: `cargo clippy` → `npm run lint` → `npm run lint:md` → `npm run build` (typechecks) → `cargo test` in `src-tauri/` → `npm run test:e2e` (end-to-end tests) → `docker build .` (container build).
+
+When running these commands, do **not** close any associated GitHub issues or PRs unless explicitly told to.
 
 ## Linting rules
 
@@ -289,15 +297,18 @@ Flags passed in: `has_ac_config_block`, `has_extended_slots_block`, `has_three_p
 The Discharge Schedule section is always visible regardless of mode. This lets users configure discharge slots ahead of time, even while in Eco mode.
 
 **Eco mode constraints:**
+
 - Slot edits in Eco mode are held **client-side only** — no API call is made to the inverter (prevents the Gen3 firmware quirk where non-zero slot registers auto-enable `enable_discharge`)
 - The **Timed** mode button is locked (disabled) until at least one discharge slot is configured
 - A yellow banner explains: "Configure your discharge slots here, then switch to Timed mode to activate them"
 
 **Switching to Timed mode:**
+
 - The frontend sends discharge slots + mode change atomically in a single request
 - The backend (`server/api.rs` `set_mode`) writes slot registers **before** the `enable_discharge=1` flag, so the inverter never sees HR59=1 without slot constraints (which would cause unrestricted export)
 
 **Switching from Timed to Eco mode:**
+
 - The backend appends writes that clear all discharge slot registers (HR44-45, HR56-57) to prevent the inverter from auto-enabling discharge on Gen3 firmware
 
 **Safety**: The reference library (`givenergy-modbus`) always provides a default discharge slot when enabling timed discharge. Setting `enable_discharge=1` without any slot constraint causes the Gen3 inverter to discharge freely (unrestricted export). HEM prevents this by requiring at least one configured slot before allowing the Timed mode switch.

@@ -450,6 +450,15 @@ fn decode_holding_0_59(data: &[u16], snap: &mut InverterSnapshot, raw: &mut RawC
     // Battery calibration stage: HR(29) — 0=off, 5=balance
     snap.battery_calibration_stage = get_reg(data, 29) as u8;
 
+    // External CT ammeter enabled: HR(7) — bool
+    snap.enable_ammeter = get_reg(data, 7) != 0;
+
+    // CT clamp reversed: HR(42) — bool
+    snap.enable_reversed_ct_clamp = get_reg(data, 42) != 0;
+
+    // External meter type: HR(47) — 0=CT/EM418, 1=EM115
+    snap.meter_type = get_reg(data, 47) as u8;
+
     // Enable charge target (winter mode): HR(20) — bool
     snap.enable_charge_target = get_reg(data, 20) != 0;
 

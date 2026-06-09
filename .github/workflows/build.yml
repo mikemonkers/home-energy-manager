@@ -193,8 +193,6 @@ jobs:
                   if "aarch64" in target:
                       return f"macOS-Apple-Silicon-{product}-{version}.dmg"
                   return f"macOS-Intel-{product}-{version}.dmg"
-              if ext_lower == ".exe":
-                  return f"Windows-Installer-{product}-{version}.exe"
               if ext_lower == ".msi":
                   return f"Windows-MSI-{product}-{version}.msi"
               if ext_lower == ".deb":
@@ -284,8 +282,7 @@ jobs:
             |---|---|
             | `macOS-Apple-Silicon-...dmg` | **macOS** — Apple Silicon (M1/M2/M3/M4) |
             | `macOS-Intel-...dmg` | **macOS** — Intel |
-            | `Windows-Installer-...exe` | **Windows** — standard installer |
-            | `Windows-MSI-...msi` | **Windows** — MSI package |
+            | `Windows-MSI-...msi` | **Windows** — MSI installer |
             | `Linux-Debian-...deb` | **Linux** — Debian/Ubuntu |
             | `Linux-RPM-...rpm` | **Linux** — RHEL/Fedora/openSUSE, not macOS |
             | — | AppImage temporarily disabled — GitHub asset returns 504 |

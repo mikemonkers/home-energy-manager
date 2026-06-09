@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.19] - 2026-06-09
+
+### Added
+
+- **CT clamp configuration display on Meters page**: New "CT Clamp Configuration" card reads three inverter registers and shows the current CT setup at a glance:
+  - `enable_ammeter` (HR 7) — whether the external CT ammeter input is enabled
+  - `enable_reversed_ct_clamp` (HR 42) — whether the CT is installed reversed
+  - `meter_type` (HR 47) — the connected meter type (CT/EM418 vs EM115)
+  - If the ammeter is disabled, a hint explains how to enable it in the inverter settings
+  - Helps users understand why meters may or may not be detected
+
+### Changed
+
+- **Windows release asset updated**: The standard `.exe` installer has been removed from the build. Windows releases now ship only the MSI package (`--bundles msi`). The GitHub release notes table has been updated accordingly.
+
+### Documentation
+
+- **AGENTS.md**: Updated with general project rules (never close issues/PRs without permission), Playwright e2e test instructions, Docker build command, and full verification order.
+- **ROADMAP.md**: Minor formatting fixes for planned features.
+
+### Internal
+
+- **Version bump**: 0.17.18 → 0.17.19 across `package.json`, `Cargo.toml`, `tauri.conf.json`, and `Cargo.lock`.
+
 ## [0.17.18] - 2026-06-09
 
 ### Changed

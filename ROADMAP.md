@@ -25,6 +25,7 @@ nominal ÷ 1000.
 **Gap**: The displayed capacity is the raw nominal from the BCU (~20 kWh),
 not the nameplate rating (~17 kWh for GIV-BAT-17.0-HV). GivTCP applies a
 0.9 factor (`battery_capacity_hv` converter). The app should either:
+
 - Apply the 0.9 factor to match the datasheet, or
 - Display both nominal and usable, or
 - Document that the value is theoretical and usable depends on reserve.
@@ -50,6 +51,7 @@ causing a blank page until the cache expires (reported as "up to 10 minutes").
 **Proposed change**:
 
 1. Enable the `set-header` feature on `tower-http` in `Cargo.toml`:
+
    ```toml
    tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
    ```
@@ -85,6 +87,7 @@ accessible without authentication — no Octopus account needed.
 | `GET /v1/products/{code}/electricity-tariffs/{rate_code}/standard-unit-rates/` | Half-hourly prices with `valid_from`/`valid_to` and `value_inc_vat` (pence/kWh) |
 
 Key characteristics:
+
 - **No authentication required** for tariff rate lookups
 - **Half-hourly granularity** (48 slots/day)
 - **Day-ahead prices** published ~4pm BST each day
