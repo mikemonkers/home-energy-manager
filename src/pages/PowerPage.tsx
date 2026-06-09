@@ -251,7 +251,7 @@ export default function PowerPage() {
           </p>
         </div>
         <div className="text-text-secondary text-xs font-sans text-right">
-          {snapshot ? new Date(snapshot.timestamp).toLocaleTimeString() : 'Waiting for data'}
+          {snapshot ? new Date(snapshot.timestamp * 1000).toLocaleTimeString() : 'Waiting for data'}
         </div>
       </div>
 
