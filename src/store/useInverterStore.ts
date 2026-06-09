@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { InverterSnapshot, ConnectionState, ScheduleSlot } from '../lib/types';
+import type { InverterSnapshot, ConnectionState, HistoryRange, ScheduleSlot } from '../lib/types';
 
 type ThemeMode = 'dark' | 'light';
 
@@ -9,6 +9,8 @@ interface InverterState {
   connectedHost: string | null;
   developerMode: boolean;
   themeMode: ThemeMode;
+  /** Shared time range used by Power and History charts. */
+  chartRange: HistoryRange;
   /** Discharge slots configured locally in Eco mode, not yet written to the inverter. */
   pendingDischargeSlots: Record<number, ScheduleSlot>;
   setSnapshot: (snapshot: InverterSnapshot) => void;
@@ -16,6 +18,7 @@ interface InverterState {
   setConnection: (state: ConnectionState, host?: string) => void;
   setDeveloperMode: (enabled: boolean) => void;
   setThemeMode: (mode: ThemeMode) => void;
+  setChartRange: (range: HistoryRange) => void;
   setPendingDischargeSlots: (slots: Record<number, ScheduleSlot>) => void;
   clearPendingDischargeSlots: () => void;
 }
@@ -34,6 +37,29 @@ function loadThemeMode(): ThemeMode {
     return stored === 'light' ? 'light' : 'dark';
   } catch {
     return 'dark';
+  }
+}
+
+function loadChartRange(): HistoryRange {
+  try {
+    const stored = localStorage.getItem('chartRange');
+    switch (stored) {
+      case '1h':
+      case '6h':
+      case '12h':
+      case '24h':
+      case 'today':
+      case '7d':
+      case '30d':
+      case 'month':
+      case '6m':
+      case '1y':
+        return stored;
+      default:
+        return '24h';
+    }
+  } catch {
+    return '24h';
   }
 }
 
@@ -57,6 +83,7 @@ export const useInverterStore = create<InverterState>((set) => ({
   connectedHost: null,
   developerMode: loadDeveloperMode(),
   themeMode: loadThemeMode(),
+  chartRange: loadChartRange(),
   pendingDischargeSlots: loadPendingDischargeSlots(),
   setSnapshot: (snapshot) => set({ snapshot }),
   clearSnapshot: () => set({ snapshot: null }),
@@ -72,6 +99,12 @@ export const useInverterStore = create<InverterState>((set) => ({
       localStorage.setItem('themeMode', mode);
     } catch { /* ignore */ }
     set({ themeMode: mode });
+  },
+  setChartRange: (range) => {
+    try {
+      localStorage.setItem('chartRange', range);
+    } catch { /* ignore */ }
+    set({ chartRange: range });
   },
   setPendingDischargeSlots: (slots) => {
     savePendingDischargeSlots(slots);
