@@ -69,7 +69,7 @@ function FlowTrack({ flow }: { flow: FlowDef }) {
   const dy = flow.to.cy - flow.from.cy;
   const len = Math.sqrt(dx * dx + dy * dy);
 
-  const offset = 50;
+  const offset = 55;
   const ux = dx / len;
   const uy = dy / len;
   const x1 = flow.from.cx + ux * offset;
@@ -87,12 +87,18 @@ function FlowTrack({ flow }: { flow: FlowDef }) {
   );
 }
 
-function FlowAnimation({ flow }: { flow: FlowDef }) {
+/** Compute a visual stroke width proportional to power volume. */
+function flowStrokeWidth(power: number, maxPower: number): number {
+  if (maxPower <= 0) return 3.5;
+  return Math.max(2.5, Math.min(6, 2.5 + (power / maxPower) * 3.5));
+}
+
+function FlowAnimation({ flow, maxPower }: { flow: FlowDef; maxPower: number }) {
   const dx = flow.to.cx - flow.from.cx;
   const dy = flow.to.cy - flow.from.cy;
   const len = Math.sqrt(dx * dx + dy * dy);
 
-  const offset = 50;
+  const offset = 55;
   const ux = dx / len;
   const uy = dy / len;
   const x1 = flow.from.cx + ux * offset;
@@ -107,12 +113,14 @@ function FlowAnimation({ flow }: { flow: FlowDef }) {
 
   if (!flow.active) return null;
 
+  const sw = flowStrokeWidth(flow.power, maxPower);
+
   return (
     <>
       <line
         x1={x1} y1={y1} x2={x2} y2={y2}
         stroke="#22D3EE"
-        strokeWidth={2.5}
+        strokeWidth={sw}
         strokeLinecap="round"
         strokeDasharray="8 6"
         opacity={0.85}
@@ -127,7 +135,7 @@ function FlowAnimation({ flow }: { flow: FlowDef }) {
       </line>
       {/* Arrow at midpoint */}
       <polygon
-        points="0,-4.5 9,0 0,4.5"
+        points="0,-6 12,0 0,6"
         fill="#22D3EE"
         transform={`translate(${mx},${my}) rotate(${angle})`}
       />
@@ -150,7 +158,7 @@ interface NodeProps {
 }
 
 function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
-  const r = hub ? 48 : 44;
+  const r = hub ? 56 : 50;
   // Guard against non-string props that would crash React (<text> children
   // must be strings or numbers — objects cause React error #31).
   const safeLabel = typeof label === 'string' ? label : String(label ?? '');
@@ -165,10 +173,10 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       <circle cx={cx} cy={cy} r={r} fill="#0D1117" stroke={safeColor} strokeWidth={hub ? 2.5 : 2} />
       {/* Label */}
       <text
-        x={cx} y={cy - (hub ? 12 : 11)}
+        x={cx} y={cy - (hub ? 14 : 13)}
         textAnchor="middle"
         fill={safeColor}
-        fontSize={hub ? 10 : 10.5}
+        fontSize={hub ? 11 : 11.5}
         fontWeight="700"
         fontFamily="var(--font-sans, sans-serif)"
         letterSpacing="0.6"
@@ -177,10 +185,10 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Value */}
       <text
-        x={cx} y={cy + (hub ? 8 : 7)}
+        x={cx} y={cy + (hub ? 10 : 9)}
         textAnchor="middle"
         fill="#F0F6FC"
-        fontSize="15"
+        fontSize="18"
         fontWeight="700"
         fontFamily="var(--font-mono, monospace)"
       >
@@ -188,10 +196,10 @@ function FlowNode({ cx, cy, color, label, value, unit, hub }: NodeProps) {
       </text>
       {/* Unit / secondary info */}
       <text
-        x={cx} y={cy + (hub ? 23 : 22)}
+        x={cx} y={cy + (hub ? 27 : 26)}
         textAnchor="middle"
         fill="#8B949E"
-        fontSize="10"
+        fontSize="11"
         fontFamily="var(--font-mono, monospace)"
       >
         {safeUnit}
@@ -301,7 +309,7 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
 
         {/* Layer 2: All animated cyan flows (on top of all tracks) */}
         {flows.map((f) => (
-          <FlowAnimation key={`anim-${f.id}`} flow={f} />
+          <FlowAnimation key={`anim-${f.id}`} flow={f} maxPower={Math.max(...flows.map(x => x.power), 1)} />
         ))}
 
         {/* Layer 3: Nodes (on top of everything) */}
@@ -328,17 +336,17 @@ function EnergyFlowDiagramInner({ snapshot: s }: Props) {
         {/* Battery mode label */}
         <text
           x={W / 2}
-          y={400}
+          y={418}
           textAnchor="middle"
           fill="#8B949E"
           style={{ fontSize: 10, fontFamily: 'sans-serif' }}
-        >
+>
           {modeDisplayLabel(s.battery_mode, s.cosy_active, s.cosy_enabled, s.enable_charge, s.enable_discharge, chargeSlotActive, dischargeSlotActive)}
         </text>
         {s.agile_active && (
           <text
             x={W / 2}
-            y={423}
+            y={430}
             textAnchor="middle"
             fill="#F59E0B"
             style={{ fontSize: 9, fontFamily: 'sans-serif' }}

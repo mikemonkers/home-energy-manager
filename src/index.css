@@ -61,6 +61,17 @@ body {
   transition: background-color 150ms ease, color 150ms ease;
 }
 
+/* Safe area inset utilities for iOS PWA home-screen mode */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@utility pl-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+@utility pr-safe {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
 /* Smooth scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

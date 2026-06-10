@@ -175,7 +175,7 @@ function Layout() {
       </header>
 
       {/* Content */}
-      <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8">
+      <main className="flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8 pb-safe">
         <Routes>
           <Route path="/" element={<ErrorBoundary><StatusPage /></ErrorBoundary>} />
           <Route path="/power" element={<ErrorBoundary><PowerPage /></ErrorBoundary>} />
@@ -197,7 +197,7 @@ function Layout() {
           - sm+:  icon-only, 20px icon, slightly larger padding
           - md+:  icon + text label
           A title/aria-label keeps icon-only modes discoverable. */}
-      <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 py-1 flex items-stretch z-30">
+      <nav className="sticky bottom-0 bg-bg-surface/90 backdrop-blur-md border-t border-white/5 px-0 pt-1 pb-safe flex items-stretch z-30">
         {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
