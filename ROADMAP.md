@@ -4,7 +4,19 @@ Planned and under-investigation items for Home Energy Manager. This is not a
 release commitment; items may change as hardware access, simulator support, and
 user reports improve.
 
+## Mobile Experience (iOS/iPhone)
+These items address accessibility and visual polish when the app is saved to the home screen (PWA mode), as reported in [Issue #63](https://github.com/psylsph/home-energy-manager/issues/63).
+
+- **App Icon**: Implement custom apple-touch-icons to replace the default placeholder.
+- **Safe Area Insets**: Use `env(safe-area-inset-bottom)` to raise the bottom navigation toolbar, preventing it from being cut off by rounded screen edges on iPhones.
+- **Energy Flow Enhancements**:
+  - Increase size of flow nodes (bubbles) and connecting line thickness.
+  - Implement dynamic stroke width for flow lines based on energy volume (e.g., thicker lines for higher power).
+
+---
+
 ### HV battery capacity — nominal vs usable
+
 
 **Status**: Data available but frontend displays nominal, not usable.
 

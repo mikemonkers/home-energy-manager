@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.20] - 2026-06-10
+
+### Added
+
+- **Interactive chart legends** (contributed by [@mikemonkers](https://github.com/mikemonkers) in PR #62):
+  - New reusable `SeriesLegend` component with clickable legend items
+  - Power chart and multi-series History chart series can now be muted/restored by clicking their legend labels
+  - Muted series render at 22% opacity with no active dot
+- **Shared chart time range**: The selected time range (1h, 6h, 12h, etc.) is now shared between the Power and History pages via Zustand store + localStorage, persisting across page reloads
+- **Simulator-based E2E coverage**: New `local-charts.spec.ts` with 5 tests covering legend toggles, range sharing between pages, and reload persistence — tested against the real GivEnergy simulator
+
+### Accessibility
+
+- **`aria-pressed` on range buttons**: All time range selection buttons on the Power and History pages now have `aria-pressed` attributes, improving screen reader feedback
+
+### Internal
+
+- **Version bump**: 0.17.19 → 0.17.20 across `package.json`, `Cargo.toml`, `tauri.conf.json`, and `Cargo.lock`
+- **Vite watch ignored paths**: Added `**/src-tauri/target/**` to `server.watch.ignored` to prevent ENOSPC file watcher errors during development
+
 ## [0.17.19] - 2026-06-09
 
 ### Added
