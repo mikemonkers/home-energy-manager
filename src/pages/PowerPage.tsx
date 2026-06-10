@@ -24,6 +24,9 @@ import {
   trimDomainStartToFirstDataPoint,
 } from '../lib/historyRangeConfig';
 import { formatPower } from '../lib/format';
+import { getSeriesOpacity } from '../lib/chartSeries';
+import { SeriesLegend } from '../components/SeriesLegend';
+import type { SeriesLegendItem } from '../components/SeriesLegend';
 import type { HistoryRange, TimePoint } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 
@@ -63,6 +66,10 @@ const POWER_SERIES: { key: PowerSeriesKey; label: string; color: string }[] = [
 const HOME_POWER_SERIES = POWER_SERIES.find((series) => series.key === 'homePower');
 const DIRECTIONAL_POWER_SERIES = POWER_SERIES.filter((series) => series.key !== 'homePower');
 const SOC_SERIES = { key: 'soc', label: 'Battery SOC', color: '#A78BFA' } as const;
+const POWER_CHART_SERIES: SeriesLegendItem<PowerChartKey>[] = [
+  ...POWER_SERIES,
+  { ...SOC_SERIES, marker: 'line' },
+];
 
 const SPIKE_THRESHOLD_W = 4000;
 
@@ -185,7 +192,8 @@ function PowerStat({ label, value, color, direction, waiting }: {
 
 export default function PowerPage() {
   const snapshot = useInverterStore((state) => state.snapshot);
-  const [range, setRange] = useState<HistoryRange>('24h');
+  const range = useInverterStore((state) => state.chartRange);
+  const setRange = useInverterStore((state) => state.setChartRange);
   const now = useNow();
   const rolling = isRollingHistoryRange(range);
   const refreshKey = shouldRefreshHistoryRange(range) ? now : 0;
@@ -194,6 +202,7 @@ export default function PowerPage() {
     data: {},
     error: '',
   });
+  const [mutedSeries, setMutedSeries] = useState<Partial<Record<PowerChartKey, boolean>>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -231,6 +240,9 @@ export default function PowerPage() {
   const yDomain = useMemo(() => calculateDomain(rows), [rows]);
   const hasData = rows.length > 0;
   const waitingForLiveData = snapshot == null;
+  const toggleSeries = (key: PowerChartKey) => {
+    setMutedSeries((current) => ({ ...current, [key]: !current[key] }));
+  };
 
   const currentSolar = Math.max(snapshot?.solar_power ?? 0, 0);
   const currentBattery = snapshot?.battery_power ?? 0;
@@ -306,27 +318,7 @@ export default function PowerPage() {
       <div className="bg-bg-elevated rounded-xl p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
           <h2 className="text-text-primary text-sm font-sans font-bold">Power Flow</h2>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            {POWER_SERIES.map((series) => (
-              <span
-                key={series.key}
-                className="flex items-center gap-1.5 text-xs font-sans font-semibold"
-              >
-                <span
-                  className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-                  style={{ backgroundColor: series.color }}
-                />
-                <span className="text-text-secondary">{series.label}</span>
-              </span>
-            ))}
-            <span className="flex items-center gap-1.5 text-xs font-sans font-semibold">
-              <span
-                className="inline-block w-5 h-0.5 shrink-0"
-                style={{ backgroundColor: SOC_SERIES.color }}
-              />
-              <span className="text-text-secondary">{SOC_SERIES.label}</span>
-            </span>
-          </div>
+          <SeriesLegend items={POWER_CHART_SERIES} muted={mutedSeries} onToggle={toggleSeries} />
         </div>
 
         {loading ? (
@@ -439,6 +431,7 @@ export default function PowerPage() {
                   dataKey={series.key}
                   stroke={series.color}
                   fill={`url(#power-grad-${series.key})`}
+                  opacity={getSeriesOpacity(mutedSeries[series.key] ?? false)}
                   strokeWidth={2}
                   dot={false}
                   isAnimationActive={false}
@@ -451,9 +444,10 @@ export default function PowerPage() {
                   type="monotone"
                   dataKey={HOME_POWER_SERIES.key}
                   stroke={HOME_POWER_SERIES.color}
+                  opacity={getSeriesOpacity(mutedSeries[HOME_POWER_SERIES.key] ?? false)}
                   strokeWidth={3}
                   dot={false}
-                  activeDot={{ r: 4 }}
+                  activeDot={mutedSeries[HOME_POWER_SERIES.key] ? false : { r: 4 }}
                   isAnimationActive={false}
                   connectNulls
                 />
@@ -463,10 +457,11 @@ export default function PowerPage() {
                 type="monotone"
                 dataKey={SOC_SERIES.key}
                 stroke={SOC_SERIES.color}
+                opacity={getSeriesOpacity(mutedSeries[SOC_SERIES.key] ?? false)}
                 strokeWidth={2}
                 strokeDasharray="5 4"
                 dot={false}
-                activeDot={{ r: 4 }}
+                activeDot={mutedSeries[SOC_SERIES.key] ? false : { r: 4 }}
                 isAnimationActive={false}
                 connectNulls
               />
