@@ -303,6 +303,7 @@ export default function PowerPage() {
           <button
             key={r.key}
             type="button"
+            aria-pressed={range === r.key}
             onClick={() => setRange(r.key)}
             className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-sans font-medium transition-colors ${
               range === r.key
