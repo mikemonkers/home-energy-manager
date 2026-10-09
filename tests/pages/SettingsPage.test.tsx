@@ -207,6 +207,15 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       expect(thirtyBtn.className).toContain('text-on-accent');
     });
 
+    it('warns that each poll also reaches the GivEnergy cloud via the dongle', async () => {
+      mountApiMocks();
+      render(<SettingsPage />);
+      await screen.findByText('Refresh Interval');
+      expect(
+        screen.getByText(/Each poll also reaches the GivEnergy cloud through the WiFi dongle/),
+      ).toBeTruthy();
+    });
+
     it('hydrates the standing charge when set', async () => {
       mountApiMocks({ import_standing_charge_p_per_day: 54.86 });
       render(<SettingsPage />);
@@ -384,13 +393,14 @@ describe('<SettingsPage/> — page shell & hydration', () => {
       });
     });
 
-    it('offers the Forecast panel and persists hiding it', async () => {
-      // The Forecast tab was missing from the Panel Visibility list even
-      // though the router already treats it as hideable — a user could not
-      // hide it from the bottom navigation bar.
+    it('offers the Planner panel and persists hiding it', async () => {
+      // The Planner (formerly Forecast) tab was missing from the Panel
+      // Visibility list even though the router already treats it as
+      // hideable — a user could not hide it from the bottom navigation bar.
+      // Its saved key stays `forecast` so existing settings keep working.
       mountApiMocks();
       render(<SettingsPage />);
-      const forecastCheckbox = await screen.findByRole('checkbox', { name: 'Forecast' });
+      const forecastCheckbox = await screen.findByRole('checkbox', { name: 'Planner' });
       expect((forecastCheckbox as HTMLInputElement).checked).toBe(true);
 
       fireEvent.click(forecastCheckbox);

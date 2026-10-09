@@ -18,14 +18,27 @@ import {
 import { useInverterStore } from '../store/useInverterStore';
 import { isValidIpv4Host } from '../lib/validators';
 
-function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; ariaLabel?: string }) {
+/**
+ * An on/off switch. The label is required: every switch must have an
+ * accessible name, and the type system now enforces it. It is focusable and
+ * flips on Space or Enter as well as on click.
+ */
+function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: (v: boolean) => void; ariaLabel: string }) {
   return (
     <div
       className="relative cursor-pointer shrink-0"
-      role={ariaLabel ? 'switch' : undefined}
+      role="switch"
       aria-label={ariaLabel}
-      aria-checked={ariaLabel ? checked : undefined}
+      aria-checked={checked}
+      tabIndex={0}
       onClick={() => onChange(!checked)}
+      onKeyDown={(e) => {
+        if (e.key === ' ' || e.key === 'Enter') {
+          // Space would otherwise scroll the page.
+          e.preventDefault();
+          onChange(!checked);
+        }
+      }}
     >
       <div className={`w-10 h-5 rounded-full transition-colors ${checked ? 'bg-accent/40' : 'bg-bg-elevated'}`} />
       <div className={`absolute left-0.5 top-0.5 w-4 h-4 rounded-full transition-all ${checked ? 'translate-x-5 bg-accent' : 'bg-text-secondary'}`} />
@@ -237,6 +250,8 @@ export default function SettingsPage() {
     setVisualNoiseThreshold,
     gridLineWeight,
     setGridLineWeight,
+    showHistoryAverages,
+    setShowHistoryAverages,
     gridMeterAddress,
     setGridMeterAddress,
     snapshot,
@@ -348,6 +363,12 @@ export default function SettingsPage() {
   const [showRestartModal, setShowRestartModal] = useState(false);
   const [pendingConnect, setPendingConnect] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // The alert config loads separately from the main settings and its form always
+  // renders, so its Save must wait: saving defaults would blank the saved tokens.
+  const [alertsLoaded, setAlertsLoaded] = useState(false);
+  // A failed load leaves the form on defaults, so it stays locked: saving would
+  // overwrite the stored tokens.
+  const [alertsLoadFailed, setAlertsLoadFailed] = useState(false);
   const [lanIp, setLanIp] = useState<string | null>(null);
   const [clients, setClients] = useState<string[]>([]);
   const [hiddenPanels, setHiddenPanels] = useState<string[]>([]);
@@ -504,9 +525,13 @@ export default function SettingsPage() {
           // the response into the initialized defaults so those fields remain
           // controlled inputs and are not sent back as `undefined` on save.
           setAlertsConfig((current) => ({ ...current, ...res.data.config }));
+          setAlertsLoaded(true);
+        } else {
+          setAlertsLoadFailed(true);
         }
       } catch (e: unknown) {
         console.warn('Failed to load alerts config:', e);
+        setAlertsLoadFailed(true);
       }
     })();
 
@@ -1361,7 +1386,7 @@ export default function SettingsPage() {
               setDisableAutoDiscovery(!v);
               apiPost('/api/settings', { disable_auto_discovery: !v })
                 .then(() => flash('Auto-Discovery setting saved', true))
-                .catch((e) => flash(e.message ?? 'Failed to save', false));
+                .catch((e) => flash(e instanceof Error ? e.message : 'Failed to save', false));
             }}
           />
         </div>
@@ -1561,6 +1586,10 @@ export default function SettingsPage() {
           <p className="text-text-secondary text-xs font-sans">
             How often the app polls the inverter for fresh data.
           </p>
+          <p className="text-text-secondary text-xs font-sans">
+            Each poll also reaches the GivEnergy cloud through the WiFi dongle, which stores it as a
+            data point, so a short interval makes your cloud history much larger.
+          </p>
           <div className="flex gap-2">
             {VALID_INTERVALS.map((s) => (
               <button
@@ -1616,6 +1645,7 @@ export default function SettingsPage() {
             </div>
             <Toggle
               checked={autostartEnabled}
+              ariaLabel="Start on Login"
               onChange={handleAutostartToggle}
             />
           </div>
@@ -1630,6 +1660,7 @@ export default function SettingsPage() {
             </div>
             <Toggle
               checked={minimiseToTray}
+              ariaLabel="Minimise to Tray"
               onChange={handleMinimiseToTrayToggle}
             />
           </div>
@@ -1644,6 +1675,7 @@ export default function SettingsPage() {
             </div>
             <Toggle
               checked={startMinimised}
+              ariaLabel="Start Hidden in Tray"
               onChange={handleStartMinimisedToggle}
             />
           </div>
@@ -1972,6 +2004,7 @@ export default function SettingsPage() {
             <span className="text-text-primary text-sm font-sans">Enable Weather</span>
             <Toggle
               checked={weatherState?.config.enabled ?? false}
+              ariaLabel="Enable Weather"
               onChange={(v) => {
                 // Optimistic toggle — persist immediately, like the alerts
                 // enable switch above.
@@ -2103,7 +2136,9 @@ export default function SettingsPage() {
       </section>
 
       {/* ─── Section 6: Notifications ─── */}
-      <section className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
+      {/* Inert until the saved config has loaded: anything typed earlier would be
+          replaced by the load, and a Save would post the defaults. */}
+      <section inert={!alertsLoaded} className="bg-bg-surface rounded-xl p-5 flex flex-col gap-4">
         <div className="flex items-center justify-between">
           <h2 className="text-text-primary text-lg font-semibold font-sans">Notifications</h2>
           <button
@@ -2119,11 +2154,12 @@ export default function SettingsPage() {
             <span className="text-text-primary text-sm font-sans">Enable Alerts</span>
             <Toggle
               checked={alertsConfig.enabled}
+              ariaLabel="Enable Alerts"
               onChange={(v) => {
                 setAlertsConfig((p) => ({ ...p, enabled: v }));
                 apiPost('/api/alerts', { enabled: v })
                   .then(() => flash(v ? 'Alerts enabled' : 'Alerts disabled', true))
-                  .catch((e) => flash(e.message ?? 'Failed to save', false));
+                  .catch((e) => flash(e instanceof Error ? e.message : 'Failed to save', false));
               }}
             />
           </div>
@@ -2332,6 +2368,7 @@ export default function SettingsPage() {
                 <span className="text-text-primary text-sm font-sans">Grid Offline</span>
                 <Toggle
                   checked={alertsConfig.grid_offline_enabled}
+                  ariaLabel="Grid Offline"
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, grid_offline_enabled: v }))}
                 />
               </div>
@@ -2339,6 +2376,7 @@ export default function SettingsPage() {
                 <span className="text-text-primary text-sm font-sans">Inverter Trip</span>
                 <Toggle
                   checked={alertsConfig.inverter_trip_enabled}
+                  ariaLabel="Inverter Trip"
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, inverter_trip_enabled: v }))}
                 />
               </div>
@@ -2346,6 +2384,7 @@ export default function SettingsPage() {
                 <span className="text-text-primary text-sm font-sans">Inverter Battery Warning</span>
                 <Toggle
                   checked={alertsConfig.battery_over_temp_enabled}
+                  ariaLabel="Inverter Battery Warning"
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_over_temp_enabled: v }))}
                 />
               </div>
@@ -2358,6 +2397,7 @@ export default function SettingsPage() {
                 </span>
                 <Toggle
                   checked={alertsConfig.solar_clipping_enabled}
+                  ariaLabel="Solar Clipping"
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, solar_clipping_enabled: v }))}
                 />
               </div>
@@ -2383,6 +2423,7 @@ export default function SettingsPage() {
                 </span>
                 <Toggle
                   checked={alertsConfig.battery_connection_lost_enabled}
+                  ariaLabel="Battery Connection Lost"
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, battery_connection_lost_enabled: v }))}
                 />
               </div>
@@ -2395,6 +2436,7 @@ export default function SettingsPage() {
                 </span>
                 <Toggle
                   checked={alertsConfig.connection_lost_enabled}
+                  ariaLabel="Connection Lost"
                   onChange={(v) => setAlertsConfig((p) => ({ ...p, connection_lost_enabled: v }))}
                 />
               </div>
@@ -2415,10 +2457,15 @@ export default function SettingsPage() {
           </div>
         )}
 
+        {alertsLoadFailed && (
+          <p className="text-amber-300 text-xs font-sans">
+            The saved notification settings could not be loaded, so this section is turned off to avoid overwriting them. Reload the page to try again.
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row gap-2">
           <button
             onClick={handleAlertsSave}
-            disabled={alertsSaving}
+            disabled={alertsSaving || !alertsLoaded}
             className="bg-accent text-on-accent font-sans font-semibold text-sm px-4 py-2 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity sm:w-auto"
           >
             {alertsSaving ? 'Saving…' : 'Save Notification Settings'}
@@ -2450,7 +2497,7 @@ export default function SettingsPage() {
               ['solar', 'Solar'],
               ['meters', 'Meters'],
               ['history', 'History'],
-              ['forecast', 'Forecast'],
+              ['forecast', 'Planner'],
               ...(octopusKeyConfigured ? [['octopus', 'Octopus'] as const] : []),
               ['control', 'Control'],
             ] as const).map(([key, label]) => (
@@ -2491,6 +2538,7 @@ export default function SettingsPage() {
             <span className="text-text-primary text-sm font-sans">Show Graphs</span>
             <Toggle
               checked={panelGraphsEnabled}
+              ariaLabel="Show Graphs"
               onChange={setPanelGraphsEnabled}
             />
           </div>
@@ -2524,6 +2572,7 @@ export default function SettingsPage() {
             <span className="text-text-primary text-sm font-sans">Lock Y-axis scale</span>
             <Toggle
               checked={panelGraphsYLock}
+              ariaLabel="Lock Y-axis scale"
               onChange={setPanelGraphsYLock}
             />
           </div>
@@ -2599,6 +2648,28 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        {/* ── Sub-section: History Chart Averages ── */}
+        {/* Draws a fixed horizontal average line per series on the History
+            graphs (issue #345). Cumulative graphs — the daily Energy (kWh)
+            totals and the Import Cost / Export Income running totals — are
+            left out: the average of a running total isn't a useful number.
+            Off by default so existing users see no change; persisted via the
+            store so it survives reloads. */}
+        <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
+          <h3 className="text-text-primary text-sm font-sans font-medium">History Chart Averages</h3>
+          <p className="text-text-secondary text-xs font-sans">
+            Draw a horizontal line on each History graph showing the average of that series over the selected period. Daily energy and cost graphs are left out, because the average of a running total doesn't tell you much.
+          </p>
+          <div className="flex items-center justify-between">
+            <span className="text-text-primary text-sm font-sans">Show average lines</span>
+            <Toggle
+              checked={showHistoryAverages}
+              onChange={setShowHistoryAverages}
+              ariaLabel="Show average lines on History charts"
+            />
+          </div>
+        </div>
+
         {/* ── Sub-section: Energy Flow Diagram ── */}
         <div className="border border-white/5 rounded-xl p-4 flex flex-col gap-3">
           <h3 className="text-text-primary text-sm font-sans font-medium">Energy Flow Diagram</h3>
@@ -2611,6 +2682,7 @@ export default function SettingsPage() {
             </div>
             <Toggle
               checked={showFlowStatusWords}
+              ariaLabel="Show Node Status Words"
               onChange={setShowFlowStatusWords}
             />
           </div>
@@ -2784,7 +2856,7 @@ export default function SettingsPage() {
           <div className="flex flex-col gap-0.5">
             <span className="text-text-primary text-sm font-sans">Developer Mode</span>
           </div>
-          <Toggle checked={developerMode} onChange={setDeveloperMode} />
+          <Toggle checked={developerMode} onChange={setDeveloperMode} ariaLabel="Developer Mode" />
         </div>
 
       </section>

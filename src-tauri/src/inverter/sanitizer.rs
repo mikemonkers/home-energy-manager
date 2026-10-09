@@ -288,13 +288,16 @@ pub(crate) fn carry_forward_optional_block_values(
     let Some(prev) = prev else { return false };
     let mut changed = false;
 
-    // AC-coupled config is read from optional HR(300-359). If that optional
-    // block is skipped for one poll, keep the previous AC config values rather
-    // than flashing defaults/zeros in the UI.
+    // AC-coupled (and Gateway) config is read from optional HR(300-359). If
+    // that optional block is skipped for one poll, keep the previous AC config
+    // values rather than flashing defaults/zeros in the UI.
     if !has_ac_config_block
         && matches!(
             snap.device_type,
-            DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::ACThreePhase
+            DeviceType::ACCoupled
+                | DeviceType::ACCoupledMk2
+                | DeviceType::ACThreePhase
+                | DeviceType::Gateway
         )
         && snap.device_type == prev.device_type
     {
@@ -403,6 +406,12 @@ pub(crate) fn carry_forward_optional_block_values(
                 snap.discharge_slots[idx] = prev.discharge_slots[idx].clone();
                 changed = true;
             }
+        }
+        if snap.raw_charge_slot_1_target_soc.is_none()
+            && prev.raw_charge_slot_1_target_soc.is_some()
+        {
+            snap.raw_charge_slot_1_target_soc = prev.raw_charge_slot_1_target_soc;
+            changed = true;
         }
         if changed {
             tracing::warn!(
@@ -5536,6 +5545,43 @@ mod tests {
     }
 
     #[test]
+    fn missed_extended_block_carries_forward_the_raw_slot_1_target() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            raw_charge_slot_1_target_soc: Some(30),
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        let changed =
+            carry_forward_optional_block_values(&mut snap, Some(&prev), true, false, true, true);
+
+        assert!(changed);
+        assert_eq!(snap.raw_charge_slot_1_target_soc, Some(30));
+    }
+
+    #[test]
+    fn present_extended_block_keeps_its_own_raw_slot_1_target() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            raw_charge_slot_1_target_soc: Some(30),
+            ..Default::default()
+        };
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            raw_charge_slot_1_target_soc: Some(100),
+            ..Default::default()
+        };
+
+        carry_forward_optional_block_values(&mut snap, Some(&prev), true, true, true, true);
+
+        assert_eq!(snap.raw_charge_slot_1_target_soc, Some(100));
+    }
+
+    #[test]
     fn optional_ac_config_does_not_carry_forward_when_block_present() {
         let prev = InverterSnapshot {
             device_type: DeviceType::ACCoupled,
@@ -6115,6 +6161,48 @@ mod tests {
             assert_eq!(snap.active_power_rate, 83, "DTC {code}");
             assert_eq!(snap.battery_power_cutoff, 17, "DTC {code}");
             assert_eq!(snap.export_limit_w, 5_000, "DTC {code}");
+        }
+    }
+
+    /// AC three-phase (0x60xx) reads HR 1002/1063/1078 from the same optional
+    /// block as the other 1000-range families: a missed block must keep the
+    /// previous values rather than fall back to the single-phase HR 50, and a
+    /// present block must leave the fresh values alone.
+    #[test]
+    fn optional_three_phase_high_config_carries_forward_for_ac_three_phase() {
+        for code in ["6001", "6002"] {
+            let prev = InverterSnapshot {
+                device_type: DeviceType::ACThreePhase,
+                device_type_code: code.to_string(),
+                active_power_rate: 60,
+                battery_power_cutoff: 80,
+                export_limit_w: 3_600,
+                ..Default::default()
+            };
+            let fresh = || InverterSnapshot {
+                device_type: DeviceType::ACThreePhase,
+                device_type_code: code.to_string(),
+                active_power_rate: 100, // stale standard-bank HR 50
+                ..Default::default()
+            };
+
+            let mut missed = fresh();
+            assert!(carry_forward_three_phase_high_config_values(
+                &mut missed,
+                Some(&prev),
+                false,
+            ));
+            assert_eq!(missed.active_power_rate, 60, "DTC {code}");
+            assert_eq!(missed.battery_power_cutoff, 80, "DTC {code}");
+            assert_eq!(missed.export_limit_w, 3_600, "DTC {code}");
+
+            let mut present = fresh();
+            assert!(!carry_forward_three_phase_high_config_values(
+                &mut present,
+                Some(&prev),
+                true,
+            ));
+            assert_eq!(present.active_power_rate, 100, "DTC {code}");
         }
     }
 
@@ -8110,5 +8198,782 @@ mod tests {
             "post-release a new decrease must start a fresh window (flagged, held)"
         );
         assert_eq!(snap.today_solar_kwh, lower, "held at the released baseline");
+    }
+
+    // -------------------------------------------------------------------
+    // Corrupted-register scenarios. Each test feeds the sanitizer the value
+    // a corrupt dongle read actually produces (0xFFFF / 0x7FFF scaled by the
+    // register's divisor, wrapped u8s, 30 kV BMS words) and pins what the
+    // user ends up seeing: the previous good reading when there is one, a
+    // safe default when there is not.
+    // -------------------------------------------------------------------
+
+    /// A good previous reading three seconds before `corrupt_snap()`.
+    fn good_prev() -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: 100,
+            grid_voltage: 231.5,
+            grid_frequency: 49.9,
+            inverter_temperature: 35.0,
+            battery_temperature: 22.0,
+            battery_voltage: 51.2,
+            soc: 60,
+            ..base_grid_connected_snap()
+        }
+    }
+
+    /// The next poll's snapshot, identical to `good_prev()` bar the timestamp.
+    fn corrupt_snap() -> InverterSnapshot {
+        InverterSnapshot {
+            timestamp: 103,
+            ..good_prev()
+        }
+    }
+
+    /// Set an energy-balanced flow (grid = solar + battery - home = 0) so the
+    /// power cross-check does not rewrite the fields a SOC test depends on.
+    /// `battery_w` follows HEM's sign: positive discharges, negative charges.
+    fn with_balanced_flow(
+        mut snap: InverterSnapshot,
+        solar_w: i32,
+        battery_w: i32,
+    ) -> InverterSnapshot {
+        snap.solar_power = solar_w;
+        snap.battery_power = battery_w;
+        snap.grid_power = 0;
+        snap.home_power = solar_w + battery_w;
+        snap
+    }
+
+    #[test]
+    fn clean_consecutive_readings_are_not_flagged() {
+        // Control for every test below: nothing here may be sanitized.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        assert!(!sanitize_for_test(&mut snap, Some(&prev)));
+    }
+
+    // ---- grid voltage / frequency -------------------------------------
+
+    #[test]
+    fn grid_voltage_saturated_register_uses_previous() {
+        // IR(5) = 0xFFFF -> 6553.5 V.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.grid_voltage = 0xFFFFu16 as f32 / 10.0;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.grid_voltage, 231.5);
+    }
+
+    #[test]
+    fn grid_voltage_collapsed_register_uses_previous() {
+        // A read that comes back as 2.3 V (decimal-point slip) on a live grid.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.grid_voltage = 2.3;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.grid_voltage, 231.5);
+    }
+
+    #[test]
+    fn grid_voltage_corrupt_with_no_previous_falls_back_to_nominal() {
+        let mut snap = corrupt_snap();
+        snap.grid_voltage = 6553.5;
+        assert!(sanitize_for_test(&mut snap, None));
+        assert_eq!(snap.grid_voltage, 230.0);
+    }
+
+    #[test]
+    fn grid_voltage_range_boundaries_are_accepted() {
+        for v in [180.0_f32, 280.0] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.grid_voltage = v;
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{v} V");
+            assert_eq!(snap.grid_voltage, v);
+        }
+        for v in [179.9_f32, 280.1] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.grid_voltage = v;
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{v} V");
+            assert_eq!(snap.grid_voltage, 231.5);
+        }
+    }
+
+    #[test]
+    fn three_phase_line_voltage_is_accepted_but_saturation_is_not() {
+        let mut prev = good_prev();
+        prev.device_type = DeviceType::ThreePhase;
+        prev.grid_voltage = 400.0;
+        let mut ok = prev.clone();
+        ok.timestamp = 103;
+        ok.grid_voltage = 415.0;
+        assert!(!sanitize_for_test(&mut ok, Some(&prev)));
+        assert_eq!(ok.grid_voltage, 415.0);
+
+        let mut corrupt = prev.clone();
+        corrupt.timestamp = 103;
+        corrupt.grid_voltage = 6553.5;
+        assert!(sanitize_for_test(&mut corrupt, Some(&prev)));
+        assert_eq!(corrupt.grid_voltage, 400.0);
+    }
+
+    #[test]
+    fn grid_frequency_saturated_register_uses_previous() {
+        // IR(13) = 0xFFFF -> 655.35 Hz.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.grid_frequency = 0xFFFFu16 as f32 / 100.0;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.grid_frequency, 49.9);
+    }
+
+    #[test]
+    fn grid_frequency_zero_while_grid_online_uses_previous() {
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.grid_frequency = 0.0;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.grid_frequency, 49.9);
+    }
+
+    #[test]
+    fn grid_frequency_corrupt_with_no_previous_falls_back_to_50hz() {
+        let mut snap = corrupt_snap();
+        snap.grid_frequency = 655.35;
+        assert!(sanitize_for_test(&mut snap, None));
+        assert_eq!(snap.grid_frequency, 50.0);
+    }
+
+    #[test]
+    fn grid_frequency_range_boundaries_are_accepted() {
+        for f in [45.0_f32, 55.0] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.grid_frequency = f;
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{f} Hz");
+        }
+        for f in [44.9_f32, 55.1] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.grid_frequency = f;
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{f} Hz");
+            assert_eq!(snap.grid_frequency, 49.9);
+        }
+    }
+
+    #[test]
+    fn grid_outage_zero_voltage_is_not_masked_by_previous_reading() {
+        // Genuine outage (fault word says grid is gone): 0 V / 0 Hz must be
+        // shown, not replaced with the last healthy values.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.grid_online = false;
+        snap.grid_voltage = 0.0;
+        snap.grid_frequency = 0.0;
+        sanitize_for_test(&mut snap, Some(&prev));
+        assert_eq!(snap.grid_voltage, 0.0);
+        assert_eq!(snap.grid_frequency, 0.0);
+    }
+
+    // ---- temperatures --------------------------------------------------
+
+    #[test]
+    fn battery_temperature_corrupt_values_use_previous() {
+        // 239 C is the textbook corrupt reading; -50 C is the underflow side.
+        for raw in [239.0_f32, 6553.5, -50.0] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.battery_temperature = raw;
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{raw}");
+            assert_eq!(snap.battery_temperature, 22.0, "{raw}");
+        }
+    }
+
+    #[test]
+    fn battery_temperature_corrupt_with_no_previous_reads_zero() {
+        let mut snap = corrupt_snap();
+        snap.battery_temperature = 239.0;
+        assert!(sanitize_for_test(&mut snap, None));
+        assert_eq!(snap.battery_temperature, 0.0);
+    }
+
+    #[test]
+    fn battery_temperature_range_boundaries_are_accepted() {
+        for t in [-20.0_f32, 80.0] {
+            let prev = InverterSnapshot {
+                battery_temperature: t,
+                ..good_prev()
+            };
+            let mut snap = InverterSnapshot {
+                battery_temperature: t,
+                ..corrupt_snap()
+            };
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{t} C");
+        }
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.battery_temperature = 80.1;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+    }
+
+    #[test]
+    fn inverter_temperature_corrupt_values_use_previous_or_zero() {
+        for raw in [239.0_f32, 100.1, -20.1, 6553.5] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.inverter_temperature = raw;
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{raw}");
+            assert_eq!(snap.inverter_temperature, 35.0, "{raw}");
+        }
+        let mut snap = corrupt_snap();
+        snap.inverter_temperature = 239.0;
+        assert!(sanitize_for_test(&mut snap, None));
+        assert_eq!(snap.inverter_temperature, 0.0);
+    }
+
+    // ---- SOC glitches --------------------------------------------------
+
+    #[test]
+    fn soc_zero_with_live_power_after_healthy_reading_is_carried_forward() {
+        let prev = good_prev(); // soc 60
+        let mut snap = with_balanced_flow(corrupt_snap(), 0, 1500); // discharging
+        snap.soc = 0;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.soc, 60);
+    }
+
+    #[test]
+    fn soc_zero_triggered_by_solar_or_grid_power_alone() {
+        // (solar, grid, home): solar-only, then grid-import-only.
+        for (solar, grid, home) in [(800_i32, 0_i32, 800_i32), (0, -400, 400)] {
+            let prev = good_prev();
+            let mut snap = corrupt_snap();
+            snap.soc = 0;
+            snap.solar_power = solar;
+            snap.grid_power = grid;
+            snap.home_power = home;
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{solar}/{grid}");
+            assert_eq!(snap.soc, 60);
+        }
+    }
+
+    #[test]
+    fn soc_zero_with_no_power_flowing_is_accepted() {
+        // A genuinely idle, empty battery must not be argued with.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.soc = 0;
+        assert!(!sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.soc, 0);
+    }
+
+    #[test]
+    fn soc_zero_with_power_is_accepted_as_a_rounding_tick_from_low_prev() {
+        for prev_soc in [0_u8, 1, 2] {
+            let prev = InverterSnapshot {
+                soc: prev_soc,
+                ..good_prev()
+            };
+            let mut snap = with_balanced_flow(corrupt_snap(), 0, 900);
+            snap.soc = 0;
+            sanitize_for_test(&mut snap, Some(&prev));
+            assert_eq!(snap.soc, 0, "prev {prev_soc}");
+            assert_eq!(snap.battery_power, 900, "fixture must reach the SOC rule");
+        }
+    }
+
+    #[test]
+    fn soc_hundred_while_fast_charging_after_mid_range_reading_is_carried_forward() {
+        let prev = good_prev(); // soc 60
+        let mut snap = with_balanced_flow(corrupt_snap(), 3000, -3000); // charging hard
+        snap.soc = 100;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.soc, 60);
+    }
+
+    #[test]
+    fn soc_hundred_while_charging_is_accepted_as_a_rounding_tick_from_98_or_99() {
+        for prev_soc in [98_u8, 99] {
+            let prev = InverterSnapshot {
+                soc: prev_soc,
+                ..good_prev()
+            };
+            let mut snap = with_balanced_flow(corrupt_snap(), 3000, -3000);
+            snap.soc = 100;
+            sanitize_for_test(&mut snap, Some(&prev));
+            assert_eq!(snap.soc, 100, "prev {prev_soc}");
+            assert_eq!(snap.battery_power, -3000, "fixture must reach the SOC rule");
+        }
+    }
+
+    #[test]
+    fn soc_hundred_with_slow_charge_is_accepted() {
+        // Below the 2 kW "fast charge" threshold 100% is plausible (trickle top-up).
+        let prev = good_prev();
+        let mut snap = with_balanced_flow(corrupt_snap(), 500, -500);
+        snap.soc = 100;
+        sanitize_for_test(&mut snap, Some(&prev));
+        assert_eq!(snap.soc, 100);
+    }
+
+    #[test]
+    fn soc_glitch_with_no_previous_cannot_be_carried_forward() {
+        // First reading after (re)connect: there is nothing to fall back on,
+        // so the special-case rules leave the value alone rather than invent one.
+        let mut snap = with_balanced_flow(corrupt_snap(), 0, 1500);
+        snap.soc = 0;
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.soc, 0);
+    }
+
+    // ---- battery / module voltage --------------------------------------
+
+    #[test]
+    fn lv_battery_voltage_saturation_uses_previous() {
+        // IR(50) = 0xFFFF / 100 = 655.35 V on a 51 V LV system.
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.battery_voltage = 655.35;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.battery_voltage, 51.2);
+    }
+
+    #[test]
+    fn negative_battery_voltage_is_rejected() {
+        let prev = good_prev();
+        let mut snap = corrupt_snap();
+        snap.battery_voltage = -1.0;
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.battery_voltage, 51.2);
+    }
+
+    #[test]
+    fn battery_voltage_corrupt_with_no_previous_reads_zero() {
+        let mut snap = corrupt_snap();
+        snap.battery_voltage = 655.35;
+        assert!(sanitize_for_test(&mut snap, None));
+        assert_eq!(snap.battery_voltage, 0.0);
+    }
+
+    #[test]
+    fn battery_voltage_ceiling_depends_on_the_battery_family() {
+        // (device, in-range value, first value over that family's ceiling)
+        let cases = [
+            (DeviceType::Gen2Hybrid, 60.0_f32, 60.1_f32),
+            (DeviceType::AllInOne6kW, 400.0, 400.1),
+            (DeviceType::HybridHvGen3, 600.0, 600.1),
+            (DeviceType::ThreePhase, 600.0, 600.1),
+        ];
+        for (device_type, ok, bad) in cases {
+            let prev = InverterSnapshot {
+                device_type,
+                battery_voltage: 50.0,
+                ..good_prev()
+            };
+            let mut good = InverterSnapshot {
+                device_type,
+                battery_voltage: ok,
+                ..corrupt_snap()
+            };
+            sanitize_for_test(&mut good, Some(&prev));
+            assert_eq!(good.battery_voltage, ok, "{device_type:?} {ok} V");
+
+            let mut corrupt = InverterSnapshot {
+                device_type,
+                battery_voltage: bad,
+                ..corrupt_snap()
+            };
+            sanitize_for_test(&mut corrupt, Some(&prev));
+            assert_eq!(corrupt.battery_voltage, 50.0, "{device_type:?} {bad} V");
+        }
+    }
+
+    fn module_with_voltage(index: usize, voltage: f32) -> BatteryModule {
+        BatteryModule {
+            index,
+            voltage,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn module_voltage_30kv_uses_previous_for_the_same_module() {
+        let mut prev = good_prev();
+        prev.battery_modules = vec![module_with_voltage(0, 51.0), module_with_voltage(1, 51.4)];
+        let mut snap = corrupt_snap();
+        snap.battery_modules = vec![
+            module_with_voltage(0, 51.0),
+            module_with_voltage(1, 30_000.0), // corrupt BMS word on module 1 only
+        ];
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.battery_modules[0].voltage, 51.0);
+        assert_eq!(snap.battery_modules[1].voltage, 51.4);
+    }
+
+    #[test]
+    fn module_voltage_corrupt_for_a_module_with_no_previous_reads_zero() {
+        // A newly appeared module has no history to fall back on.
+        let mut prev = good_prev();
+        prev.battery_modules = vec![module_with_voltage(0, 51.0)];
+        let mut snap = corrupt_snap();
+        snap.battery_modules = vec![
+            module_with_voltage(0, 51.0),
+            module_with_voltage(1, 30_000.0),
+        ];
+        assert!(sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.battery_modules[1].voltage, 0.0);
+
+        // And with no previous snapshot at all.
+        let mut snap = corrupt_snap();
+        snap.battery_modules = vec![module_with_voltage(0, -5.0)];
+        assert!(sanitize_for_test(&mut snap, None));
+        assert_eq!(snap.battery_modules[0].voltage, 0.0);
+    }
+
+    #[test]
+    fn hv_module_voltage_up_to_500v_is_accepted() {
+        let mut prev = good_prev();
+        prev.battery_modules = vec![module_with_voltage(0, 345.0)];
+        let mut snap = corrupt_snap();
+        snap.battery_modules = vec![module_with_voltage(0, 500.0)];
+        assert!(!sanitize_for_test(&mut snap, Some(&prev)));
+        assert_eq!(snap.battery_modules[0].voltage, 500.0);
+    }
+
+    // ---- daily energy totals: the documented corruption values --------
+
+    #[test]
+    fn corrupt_daily_energy_values_are_rejected_on_the_first_reading() {
+        // 245 / 275 / 879 / 1010 kWh are the spikes seen in the wild. With no
+        // previous reading they must read 0, never become the delta baseline.
+        for raw in [245.0_f32, 275.0, 879.0, 1010.0] {
+            let mut snap = corrupt_snap();
+            snap.today_solar_kwh = raw;
+            snap.today_import_kwh = raw;
+            snap.today_export_kwh = raw;
+            assert!(sanitize_for_test(&mut snap, None), "{raw}");
+            assert_eq!(snap.today_solar_kwh, 0.0, "{raw}");
+            assert_eq!(snap.today_import_kwh, 0.0, "{raw}");
+            assert_eq!(snap.today_export_kwh, 0.0, "{raw}");
+        }
+    }
+
+    #[test]
+    fn corrupt_daily_energy_values_fall_back_to_the_previous_reading() {
+        for raw in [245.0_f32, 1010.0, -3.0] {
+            let prev = InverterSnapshot {
+                today_solar_kwh: 12.3,
+                today_import_kwh: 4.5,
+                ..good_prev()
+            };
+            let mut snap = InverterSnapshot {
+                today_solar_kwh: raw,
+                today_import_kwh: raw,
+                ..corrupt_snap()
+            };
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{raw}");
+            assert_eq!(snap.today_solar_kwh, 12.3, "{raw}");
+            assert_eq!(snap.today_import_kwh, 4.5, "{raw}");
+        }
+    }
+
+    #[test]
+    fn daily_energy_ceiling_is_200_kwh_but_gateways_get_500() {
+        let mut snap = corrupt_snap();
+        snap.today_solar_kwh = 200.0;
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(
+            snap.today_solar_kwh, 200.0,
+            "200 kWh is the inclusive limit"
+        );
+
+        let mut snap = corrupt_snap();
+        snap.today_solar_kwh = 200.1;
+        sanitize_for_test(&mut snap, None);
+        assert_eq!(snap.today_solar_kwh, 0.0);
+
+        let mut gateway = InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            today_solar_kwh: 400.0,
+            ..corrupt_snap()
+        };
+        sanitize_for_test(&mut gateway, None);
+        assert_eq!(
+            gateway.today_solar_kwh, 400.0,
+            "gateway aggregates are larger"
+        );
+    }
+
+    // ---- whole-block corruption through the decoder -------------------
+
+    #[test]
+    fn decode_then_sanitize_saturated_environment_registers() {
+        // Grid voltage, frequency and SOC registers all read 0xFFFF at once.
+        let prev = decode_snapshot(&standard_blocks_with(&[]));
+        let mut corrupt = decode_snapshot(&standard_blocks_with(&[
+            (5, 0xFFFF),
+            (13, 0xFFFF),
+            (59, 0xFFFF),
+        ]));
+        corrupt.timestamp = prev.timestamp + 3;
+        let sanitized = SeqSanitizer::new().run(&mut corrupt, Some(&prev));
+        assert!(sanitized);
+        assert_eq!(corrupt.grid_voltage, prev.grid_voltage);
+        assert_eq!(corrupt.grid_frequency, prev.grid_frequency);
+        assert!(
+            corrupt.soc <= 100,
+            "SOC must never exceed 100, got {}",
+            corrupt.soc
+        );
+    }
+
+    #[test]
+    fn decode_then_sanitize_all_zero_block_does_not_zero_the_grid() {
+        // An "EmptyData" dongle returns all-zero registers. With the grid
+        // reported online, 0 V / 0 Hz is corruption and must not replace the
+        // last good values.
+        let prev = decode_snapshot(&standard_blocks_with(&[]));
+        let mut empty = decode_snapshot(&standard_blocks_with(&[(5, 0), (13, 0), (59, 0)]));
+        empty.timestamp = prev.timestamp + 3;
+        empty.grid_online = true;
+        SeqSanitizer::new().run(&mut empty, Some(&prev));
+        assert_eq!(empty.grid_voltage, prev.grid_voltage);
+        assert_eq!(empty.grid_frequency, prev.grid_frequency);
+    }
+
+    // -------------------------------------------------------------------
+    // Every cumulative counter, every corruption mode.
+    //
+    // The daily (`today_*`) and lifetime (`total_*`) counters are checked by
+    // per-field macro invocations, so a field that is dropped from, or
+    // mistyped in, one of them gets no protection and nothing fails. These
+    // tests run the same scenarios over the whole list.
+    // -------------------------------------------------------------------
+
+    type CounterAccessor = fn(&mut InverterSnapshot) -> &mut f32;
+
+    const DAILY_COUNTERS: &[(&str, CounterAccessor)] = &[
+        ("today_solar_kwh", |s| &mut s.today_solar_kwh),
+        ("today_pv1_kwh", |s| &mut s.today_pv1_kwh),
+        ("today_pv2_kwh", |s| &mut s.today_pv2_kwh),
+        ("today_import_kwh", |s| &mut s.today_import_kwh),
+        ("today_export_kwh", |s| &mut s.today_export_kwh),
+        ("today_charge_kwh", |s| &mut s.today_charge_kwh),
+        ("today_discharge_kwh", |s| &mut s.today_discharge_kwh),
+        ("today_consumption_kwh", |s| &mut s.today_consumption_kwh),
+        ("today_ac_charge_kwh", |s| &mut s.today_ac_charge_kwh),
+    ];
+
+    const LIFETIME_COUNTERS: &[(&str, CounterAccessor)] = &[
+        ("total_import_kwh", |s| &mut s.total_import_kwh),
+        ("total_export_kwh", |s| &mut s.total_export_kwh),
+        ("total_solar_kwh", |s| &mut s.total_solar_kwh),
+        ("total_charge_kwh", |s| &mut s.total_charge_kwh),
+        ("total_discharge_kwh", |s| &mut s.total_discharge_kwh),
+        ("total_throughput_kwh", |s| &mut s.total_throughput_kwh),
+    ];
+
+    /// `prev` (t=100) and `snap` (t=103) differing only in one counter.
+    fn counter_pair(
+        field: CounterAccessor,
+        prev_value: f32,
+        raw_value: f32,
+    ) -> (InverterSnapshot, InverterSnapshot) {
+        let mut prev = good_prev();
+        *field(&mut prev) = prev_value;
+        let mut snap = corrupt_snap();
+        *field(&mut snap) = raw_value;
+        (prev, snap)
+    }
+
+    #[test]
+    fn every_counter_is_present_in_the_tables() {
+        // Guard the tables themselves: a counter added to the snapshot must
+        // be added here (and to the sanitizer) or this count drifts.
+        assert_eq!(DAILY_COUNTERS.len(), 9);
+        assert_eq!(LIFETIME_COUNTERS.len(), 6);
+        let mut names: Vec<_> = DAILY_COUNTERS
+            .iter()
+            .chain(LIFETIME_COUNTERS)
+            .map(|(n, _)| *n)
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 15, "duplicate name in the counter tables");
+    }
+
+    #[test]
+    fn every_daily_counter_rejects_an_impossible_value() {
+        for &(name, field) in DAILY_COUNTERS {
+            for raw in [200.1_f32, 1010.0, -1.0] {
+                // With a previous reading: held at it.
+                let (prev, mut snap) = counter_pair(field, 12.0, raw);
+                assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 12.0, "{name} {raw} with prev");
+
+                // Without one: zero, never the corrupt value.
+                let (_, mut snap) = counter_pair(field, 12.0, raw);
+                assert!(sanitize_for_test(&mut snap, None), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 0.0, "{name} {raw} without prev");
+            }
+        }
+    }
+
+    #[test]
+    fn every_lifetime_counter_rejects_an_impossible_value() {
+        for &(name, field) in LIFETIME_COUNTERS {
+            // 4_294_967.0 is what a corrupt uint32 pair decodes to.
+            for raw in [100_000.1_f32, 4_294_967.0, -1.0] {
+                let (prev, mut snap) = counter_pair(field, 12_000.0, raw);
+                assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 12_000.0, "{name} {raw} with prev");
+
+                let (_, mut snap) = counter_pair(field, 12_000.0, raw);
+                assert!(sanitize_for_test(&mut snap, None), "{name} {raw}");
+                assert_eq!(*field(&mut snap), 0.0, "{name} {raw} without prev");
+            }
+        }
+    }
+
+    #[test]
+    fn every_counter_accepts_its_range_boundary() {
+        for &(name, field) in DAILY_COUNTERS {
+            let (_, mut snap) = counter_pair(field, 0.0, 200.0);
+            sanitize_for_test(&mut snap, None);
+            assert_eq!(*field(&mut snap), 200.0, "{name}");
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (_, mut snap) = counter_pair(field, 0.0, 100_000.0);
+            sanitize_for_test(&mut snap, None);
+            assert_eq!(*field(&mut snap), 100_000.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_daily_counter_holds_a_physically_impossible_rate_spike() {
+        // +80 kWh in three seconds is inside the 200 kWh daily ceiling but far
+        // beyond the 10 kW rate budget.
+        for &(name, field) in DAILY_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 5.0, 85.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 5.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_lifetime_counter_holds_a_physically_impossible_rate_spike() {
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 10_000.0, 10_500.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 10_000.0, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_counter_accepts_realistic_growth() {
+        // 0.3 kWh and 0.5 kWh in three seconds is within the rate budget.
+        for &(name, field) in DAILY_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 5.0, 5.3);
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 5.3, "{name}");
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 10_000.0, 10_000.5);
+            assert!(!sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 10_000.5, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_counter_holds_a_material_decrease_mid_day() {
+        // 50 -> 30 kWh at a time that is nowhere near a midnight reset.
+        for &(name, field) in DAILY_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 50.0, 30.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 50.0, "{name}");
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            let (prev, mut snap) = counter_pair(field, 10_000.0, 9_000.0);
+            assert!(sanitize_for_test(&mut snap, Some(&prev)), "{name}");
+            assert_eq!(*field(&mut snap), 10_000.0, "{name}");
+        }
+    }
+
+    /// Feed the same lower reading until the sanitizer gives up and accepts it,
+    /// returning how many polls it was held for.
+    fn polls_held_before_release(field: CounterAccessor, prev_value: f32, raw_value: f32) -> u8 {
+        let mut sanitizer = SeqSanitizer::new();
+        for i in 0..DELTA_CORRECTION_RELEASE_THRESHOLD {
+            let (mut prev, mut snap) = counter_pair(field, prev_value, raw_value);
+            prev.timestamp = 100 + i as i64 * 3;
+            snap.timestamp = prev.timestamp + 3;
+            sanitizer.run(&mut snap, Some(&prev));
+            if *field(&mut snap) == raw_value {
+                return i;
+            }
+            assert_eq!(
+                *field(&mut snap),
+                prev_value,
+                "held while counting, poll {i}"
+            );
+        }
+        DELTA_CORRECTION_RELEASE_THRESHOLD
+    }
+
+    #[test]
+    fn every_counter_releases_a_persistent_lower_baseline_after_the_threshold() {
+        // A wrong baseline must not freeze the counter forever: after
+        // DELTA_CORRECTION_RELEASE_THRESHOLD identical lower reads it is taken.
+        for &(name, field) in DAILY_COUNTERS {
+            assert_eq!(
+                polls_held_before_release(field, 50.0, 30.0),
+                DELTA_CORRECTION_RELEASE_THRESHOLD - 1,
+                "{name}"
+            );
+        }
+        for &(name, field) in LIFETIME_COUNTERS {
+            assert_eq!(
+                polls_held_before_release(field, 10_000.0, 9_000.0),
+                DELTA_CORRECTION_RELEASE_THRESHOLD - 1,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn counters_are_independent_one_corrupt_field_does_not_touch_the_others() {
+        // Corrupt exactly one counter; every other must keep its raw value.
+        let base_for = |name: &str| {
+            if name.starts_with("total_") {
+                10_000.0
+            } else {
+                5.0
+            }
+        };
+        let all: Vec<_> = DAILY_COUNTERS.iter().chain(LIFETIME_COUNTERS).collect();
+        for &&(victim, victim_field) in &all {
+            let mut prev = good_prev();
+            let mut snap = corrupt_snap();
+            for &&(name, field) in &all {
+                *field(&mut prev) = base_for(name);
+                *field(&mut snap) = base_for(name) + 0.1;
+            }
+            *victim_field(&mut snap) = 4_000_000.0;
+            sanitize_for_test(&mut snap, Some(&prev));
+            for &&(name, field) in &all {
+                let expected = if name == victim {
+                    base_for(name)
+                } else {
+                    base_for(name) + 0.1
+                };
+                let got = *field(&mut snap);
+                assert!(
+                    (got - expected).abs() < 1e-2,
+                    "corrupting {victim}: {name} is {got}, expected {expected}"
+                );
+            }
+        }
     }
 }

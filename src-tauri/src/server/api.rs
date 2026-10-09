@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
-use crate::inverter::model::{DeviceType, InverterSnapshot};
+use crate::inverter::model::{DeviceType, InverterSnapshot, PowerLimitBank};
 use crate::inverter::poll::{
     stamp_solar_array_fields, AppState, ConnectionState, ForceChargeRevert, ForceDischargeRevert,
     ForceRestorationRequest, PauseModeRevert, PendingWriteBatch, PollMessage, PollSettings,
@@ -88,7 +88,7 @@ fn server_error(error: &str) -> (StatusCode, Json<Value>) {
 /// Lock the latest snapshot once and resolve the current [`DeviceType`].
 ///
 /// Every control handler that routes behaviour on device type MUST obtain it
-/// through this helper (or [`device_type_flags`]) so each derived flag comes
+/// through this helper so each derived flag comes
 /// from a single consistent view of the snapshot. Locking the snapshot
 /// independently per check — e.g. once for AC-coupled, again for three-phase —
 /// lets the poll loop update the snapshot between the two locks, so the flags
@@ -230,23 +230,34 @@ async fn release_foreign_force_baseline(
     error_response("The inverter identity changed; the stale restoration baseline was released")
 }
 
-/// Resolve the AC-coupled and three-phase routing flags from a single lock,
-/// returning `(is_ac_coupled, is_three_phase)`.
-///
-/// `is_three_phase` takes priority over `is_ac_coupled` in the command
-/// selection (matching the original `if is_three_phase { … } else if
-/// is_ac_coupled { … }` ordering) — no real device is both, but computing them
-/// from one locked view guarantees they can never transiently disagree.
-///
-/// Handlers that need the full [`DeviceType`] (e.g. for
-/// `clear_discharge_slot_writes`) should call [`latest_device_type`] directly
-/// instead of discarding the enum.
-async fn device_type_flags(state: &Arc<AppState>) -> (bool, bool) {
-    let dt = latest_device_type(state).await;
-    (
-        matches!(dt, DeviceType::ACCoupled | DeviceType::ACCoupledMk2),
-        dt.uses_three_phase_schedule_slots(),
-    )
+/// The charge power-limit write for a register bank. One mapping shared by the
+/// manual endpoint, the forecast/plan apply path and the tests, so the register
+/// a limit is written to always matches the one the decoder reads back.
+fn charge_limit_command(bank: PowerLimitBank, limit: u16) -> ControlCommand {
+    match bank {
+        PowerLimitBank::ThreePhase => ControlCommand::SetThreePhaseChargeLimit { limit },
+        PowerLimitBank::AcBank => ControlCommand::SetAcChargeLimit { limit },
+        PowerLimitBank::HalfScale => ControlCommand::SetChargeLimit { limit },
+    }
+}
+
+/// The discharge power-limit write for a register bank; see
+/// [`charge_limit_command`].
+fn discharge_limit_command(bank: PowerLimitBank, limit: u16) -> ControlCommand {
+    match bank {
+        PowerLimitBank::ThreePhase => ControlCommand::SetThreePhaseDischargeLimit { limit },
+        PowerLimitBank::AcBank => ControlCommand::SetAcDischargeLimit { limit },
+        PowerLimitBank::HalfScale => ControlCommand::SetDischargeLimit { limit },
+    }
+}
+
+/// Human label for the bank in API responses.
+fn power_limit_bank_label(bank: PowerLimitBank) -> &'static str {
+    match bank {
+        PowerLimitBank::ThreePhase => "Three-phase",
+        PowerLimitBank::AcBank => "AC",
+        PowerLimitBank::HalfScale => "Battery",
+    }
 }
 
 fn charge_slot_command_for_device(
@@ -1140,6 +1151,7 @@ pub(crate) fn snapshot_matches_writes(
         HR_CHARGE_TARGET_SOC | HR_3PH_CHARGE_TARGET_SOC => {
             snapshot.target_soc as u16 == write.value
         }
+        HR_CHARGE_TARGET_SOC_1 => snapshot.raw_charge_slot_1_target_soc == Some(write.value),
         HR_CHARGE_SLOT_1_START | HR_3PH_CHARGE_SLOT_1_START => {
             slot_hhmm(&snapshot.charge_slots[0], true) == write.value
         }
@@ -1228,6 +1240,15 @@ async fn capture_force_charge_revert(
         firmware_version: snap.firmware_version.clone(),
         enable_discharge: snap.enable_discharge,
         target_soc: snap.target_soc,
+        charge_slot_1_target_soc: if device_type.uses_extended_schedule_slots() {
+            // Only a value the encoder can write back (4..=100) is a usable
+            // baseline; 0 means "no per-slot target set".
+            snap.raw_charge_slot_1_target_soc
+                .filter(|raw| (4..=100).contains(raw))
+                .map(|raw| raw as u8)
+        } else {
+            None
+        },
         battery_power_mode: snap.battery_power_mode,
         charge_rate: Some(snap.charge_rate),
         charge_slot_1_start,
@@ -1371,6 +1392,20 @@ pub(crate) fn build_force_charge_stop_writes(
             address: HR_CHARGE_SLOT_1_END,
             value: end_hhmm,
         });
+    }
+
+    // 10-slot models: put slot 1's own target back (the start raised it to
+    // 100). Skipped when no usable baseline was captured.
+    if device_type.uses_extended_schedule_slots() {
+        if let Some(target) = revert
+            .charge_slot_1_target_soc
+            .filter(|target| (4..=100).contains(target))
+        {
+            writes.push(RegisterWrite {
+                address: crate::modbus::registers::HR_CHARGE_TARGET_SOC_1,
+                value: target as u16,
+            });
+        }
     }
 
     writes
@@ -1819,6 +1854,8 @@ pub async fn get_settings(State(_state): State<Arc<AppState>>) -> (StatusCode, J
             // cheap charging tariff window and notifies the user.
             "forecast_plan_auto_apply_enabled": settings.forecast_plan_auto_apply_enabled,
             "forecast_plan_auto_apply_lead_minutes": settings.forecast_plan_auto_apply_lead_minutes,
+            // How the Planner sizes the overnight charge (issue #359).
+            "forecast_plan_strategy": settings.forecast_plan_strategy,
         }
         })),
     )
@@ -2192,6 +2229,11 @@ pub async fn update_settings(
                 ));
             }
             persist.forecast_plan_auto_apply_lead_minutes = v as u16;
+        }
+        if let Some(v) = body.get("forecast_plan_strategy") {
+            persist.forecast_plan_strategy = serde_json::from_value(v.clone()).map_err(|_| {
+                "Unknown planner strategy — expected \"min_soc\" or \"hold_window\"".to_string()
+            })?;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
             let parsed: Vec<crate::settings::SolarArrayConfig> = arrays
@@ -4182,6 +4224,32 @@ pub async fn set_charge_slot(
         (Err(error), _) | (_, Err(error)) => return error_response(&error),
     };
 
+    // The requested rate is a share of the inverter's maximum; turning it into
+    // a register value needs the pack size and rating from the latest snapshot.
+    let requested_charge_rate = {
+        let guard = state.latest_snapshot.lock().await;
+        requested_charge_rate_pct.map(|percent| crate::inverter::power_limit::ChargeRateRequest {
+            percent,
+            scale: guard.as_ref().map_or_else(
+                || {
+                    crate::inverter::power_limit::PowerLimitScale::new(
+                        device_type.power_limit_bank(),
+                        0,
+                        0.0,
+                    )
+                },
+                crate::inverter::power_limit::PowerLimitScale::from_snapshot,
+            ),
+        })
+    };
+    // The rate is only applied to an enabled slot, so a disable never needs it.
+    if enabled && requested_charge_rate.is_some_and(|request| request.needs_pack_size()) {
+        return error_response(
+            "The battery size is not known yet, so a partial charge rate cannot be \
+             converted for this inverter. Try again once the inverter has been read, \
+             or request 100%.",
+        );
+    }
     match build_charge_slot_writes(
         device_type,
         slot,
@@ -4189,14 +4257,78 @@ pub async fn set_charge_slot(
         start,
         end,
         target_soc,
-        requested_charge_rate_pct,
+        requested_charge_rate,
     ) {
-        Ok(writes) => {
+        Ok(mut writes) => {
+            // Only the Planner's Apply sends a charge rate (issue #359): a
+            // full charge from it disarms the target an earlier hold plan
+            // armed, and a hold records the target it arms.
+            let planner_apply = enabled && requested_charge_rate_pct.is_some();
+            if planner_apply && target_soc >= 100 {
+                let armed = state
+                    .latest_snapshot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map_or(100, |snapshot| snapshot.target_soc);
+                let recorded = crate::settings::Settings::load_async()
+                    .await
+                    .forecast_plan_armed_target_pct;
+                extend_unwritten(
+                    &mut writes,
+                    planner_target_reset(device_type, armed, recorded),
+                );
+            }
             tracing::info!("SetChargeSlot {} encoded: {:?}", slot, writes);
             queue_writes(&state, writes).await;
+            if planner_apply {
+                let next = (target_soc < 100).then_some(target_soc);
+                if let Err(error) = crate::settings::Settings::update_async(move |settings| {
+                    settings.forecast_plan_armed_target_pct = next;
+                })
+                .await
+                {
+                    tracing::warn!("Could not record the planner's charge target: {error}");
+                }
+            }
             ok_response(&format!("Charge slot {} configured", slot))
         }
         Err(e) => error_response(&e),
+    }
+}
+
+/// The writes that disarm the charge target a hold plan armed (issue #359),
+/// when the inverter still reports exactly that target (`planner_armed`):
+/// HR 116 back to 100 on single-phase extended-slot models, which follow the
+/// global target without the HR 20 flag, or HR 20 cleared on flag-gated
+/// models (Gen1/2, AC-coupled). Three-phase keeps its target elsewhere. A
+/// target the user set, or changed since, is never touched, so the Control
+/// page's "an explicit 100 never writes HR 116" rule still holds.
+pub(crate) fn planner_target_reset(
+    device_type: DeviceType,
+    armed_target_soc: u8,
+    planner_armed: Option<u8>,
+) -> Vec<RegisterWrite> {
+    if planner_armed != Some(armed_target_soc)
+        || !(5..=99).contains(&armed_target_soc)
+        || device_type.uses_three_phase_schedule_slots()
+    {
+        return Vec::new();
+    }
+    let command = if device_type.uses_extended_schedule_slots() {
+        ControlCommand::SetChargeTargetSocOnly { soc: 100 }
+    } else {
+        ControlCommand::ClearChargeTargetFlag
+    };
+    command.encode().unwrap_or_default()
+}
+
+/// Append `extra` writes whose register the batch doesn't already write.
+pub(crate) fn extend_unwritten(writes: &mut Vec<RegisterWrite>, extra: Vec<RegisterWrite>) {
+    for write in extra {
+        if !writes.iter().any(|w| w.address == write.address) {
+            writes.push(write);
+        }
     }
 }
 
@@ -4213,7 +4345,7 @@ pub(crate) fn build_charge_slot_writes(
     start: u16,
     end: u16,
     target_soc: u8,
-    requested_charge_rate_pct: Option<u16>,
+    requested_charge_rate: Option<crate::inverter::power_limit::ChargeRateRequest>,
 ) -> Result<Vec<RegisterWrite>, String> {
     let mut writes = charge_slot_command_for_device(device_type, slot, enabled, start, end)?
         .encode()
@@ -4279,19 +4411,10 @@ pub(crate) fn build_charge_slot_writes(
                 writes.extend(enable_writes);
             }
         }
-        if let Some(rate_pct) = requested_charge_rate_pct {
-            let raw_limit = if device_type.uses_direct_charge_limit() {
-                rate_pct
-            } else {
-                (rate_pct as f64 / 2.0).round() as u16
-            };
-            let rate_command = if device_type.uses_three_phase_schedule_slots() {
-                ControlCommand::SetThreePhaseChargeLimit { limit: raw_limit }
-            } else if device_type.uses_direct_charge_limit() {
-                ControlCommand::SetAcChargeLimit { limit: raw_limit }
-            } else {
-                ControlCommand::SetChargeLimit { limit: raw_limit }
-            };
+        if let Some(request) = requested_charge_rate {
+            // Pick the register from the same bank the value was converted for,
+            // so the two cannot disagree.
+            let rate_command = charge_limit_command(request.scale.bank, request.to_raw());
             match rate_command.encode() {
                 Ok(rate_writes) => writes.extend(rate_writes),
                 Err(e) => return Err(format!("Validation error: {}", e)),
@@ -4991,26 +5114,17 @@ pub async fn set_charge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let (is_ac_coupled, is_three_phase) = device_type_flags(&state).await;
-    let cmd = if is_three_phase {
-        ControlCommand::SetThreePhaseChargeLimit { limit }
-    } else if is_ac_coupled {
-        ControlCommand::SetAcChargeLimit { limit }
-    } else {
-        ControlCommand::SetChargeLimit { limit }
-    };
+    let bank = latest_device_type(&state).await.power_limit_bank();
+    let cmd = charge_limit_command(bank, limit);
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetChargeLimit encoded: {:?}", writes);
             queue_owned_writes(&state, writes, DischargeControlOwner::ManualMode).await;
-            let label = if is_three_phase {
-                "Three-phase"
-            } else if is_ac_coupled {
-                "AC-coupled"
-            } else {
-                "Battery"
-            };
-            ok_response(&format!("{} charge limit set to {}%", label, limit))
+            ok_response(&format!(
+                "{} charge limit set to {}%",
+                power_limit_bank_label(bank),
+                limit
+            ))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -5029,26 +5143,17 @@ pub async fn set_discharge_rate(
         None => return error_response("Missing 'limit' field (0-50)"),
     };
 
-    let (is_ac_coupled, is_three_phase) = device_type_flags(&state).await;
-    let cmd = if is_three_phase {
-        ControlCommand::SetThreePhaseDischargeLimit { limit }
-    } else if is_ac_coupled {
-        ControlCommand::SetAcDischargeLimit { limit }
-    } else {
-        ControlCommand::SetDischargeLimit { limit }
-    };
+    let bank = latest_device_type(&state).await.power_limit_bank();
+    let cmd = discharge_limit_command(bank, limit);
     match cmd.encode() {
         Ok(writes) => {
             tracing::info!("SetDischargeLimit encoded: {:?}", writes);
             queue_owned_writes(&state, writes, DischargeControlOwner::ManualMode).await;
-            let label = if is_three_phase {
-                "Three-phase"
-            } else if is_ac_coupled {
-                "AC-coupled"
-            } else {
-                "Battery"
-            };
-            ok_response(&format!("{} discharge limit set to {}%", label, limit))
+            ok_response(&format!(
+                "{} discharge limit set to {}%",
+                power_limit_bank_label(bank),
+                limit
+            ))
         }
         Err(e) => error_response(&format!("Validation error: {}", e)),
     }
@@ -5101,6 +5206,16 @@ pub async fn set_active_power_rate(
         },
         None => return error_response("Missing 'rate' field"),
     };
+
+    // `SetActivePowerRate` encodes HR 50, which the 1000-range-layout families
+    // (and unknown models) ignore — reporting success there would be a lie.
+    let device_type = latest_device_type(&state).await;
+    if !device_type.uses_hr50_active_power_rate() {
+        return error_response(&format!(
+            "Active power rate is not supported on {} inverters",
+            device_type.display_name()
+        ));
+    }
 
     let cmd = ControlCommand::SetActivePowerRate { rate };
     match cmd.encode() {
@@ -5606,6 +5721,15 @@ pub(crate) async fn force_charge_at_unlocked(
     match cmd.encode() {
         Ok(mut cmd_writes) => {
             writes.append(&mut cmd_writes);
+            // On 10-slot models the inverter stops charging at the lower of the
+            // global target and slot 1's own target (HR 242), so raise that to
+            // 100 as well or Force Charge does nothing above slot 1's target.
+            if device_type.uses_extended_schedule_slots() {
+                match (ControlCommand::SetChargeTargetSocSlot { slot: 1, soc: 100 }).encode() {
+                    Ok(mut slot_target_writes) => writes.append(&mut slot_target_writes),
+                    Err(e) => return error_response(&format!("Validation error: {}", e)),
+                }
+            }
             if let Err(error) =
                 persist_external_force_recovery(&state, command_id, revert.as_ref()).await
             {
@@ -8365,9 +8489,30 @@ pub(crate) fn compute_full_plan(
             }),
         );
     };
+    // A hold plan charges at full rate from the window's start until it
+    // reaches its target. The export planner simulates a full-rate charge
+    // across whatever window it is given, so it gets that charging stretch,
+    // not the whole hold window (issue #359).
+    let hold_charging = match &charge {
+        PlanRecommendation::ChargeAndHold { window, kwh, .. } => {
+            crate::forecast::planner::hold_charging_window(window, *kwh, params.max_charge_kw)
+        }
+        PlanRecommendation::Charge { .. }
+        | PlanRecommendation::NoChargeNeeded { .. }
+        | PlanRecommendation::NoPlan { .. } => None,
+    };
     let charge_window = match &charge {
         crate::forecast::planner::PlanRecommendation::Charge { window, .. } => Some(window),
-        _ => None,
+        PlanRecommendation::ChargeAndHold { .. } => hold_charging.as_ref(),
+        PlanRecommendation::NoChargeNeeded { .. } | PlanRecommendation::NoPlan { .. } => None,
+    };
+    // The whole hold slot is off limits to an export: slot 1 is active,
+    // charging or holding, across all of it.
+    let hold_window = match &charge {
+        PlanRecommendation::ChargeAndHold { window, .. } => Some(window),
+        PlanRecommendation::Charge { .. }
+        | PlanRecommendation::NoChargeNeeded { .. }
+        | PlanRecommendation::NoPlan { .. } => None,
     };
     let export = crate::forecast::planner::plan_export_window(&ExportPlanInputs {
         sim_hours: &sim_hours,
@@ -8375,6 +8520,7 @@ pub(crate) fn compute_full_plan(
         export_tariff,
         import_tariff,
         charge_window,
+        hold_window,
         floor_pct: min_soc_pct,
         now_ts,
     });
@@ -8565,7 +8711,7 @@ fn compute_charge_plan_inner<'a>(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
-    let charge = crate::forecast::planner::plan_overnight_charge(&inputs);
+    let charge = crate::forecast::planner::plan_charge(&inputs, settings.forecast_plan_strategy);
     // The export advice rides the same trajectory: hand over the hourly
     // inputs, params, tariff, and floor. `None` when there is no import
     // tariff — the charge planner has already NoPlan'd on that gate.
@@ -8666,6 +8812,40 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                     "timed_charge": { "enabled": true },
                 },
             })
+        }
+        // Issue #359: still a `charge` to the Planner page, serialised by
+        // the Charge arm, with the strategy and the slot's target added. The
+        // target flows into the Apply payload so the existing Control
+        // endpoint writes it.
+        PlanRecommendation::ChargeAndHold {
+            window,
+            target_soc_pct,
+            kwh,
+            min_soc_pct,
+            observed_min_soc_pct,
+            after_min_soc_pct,
+            current_soc_pct,
+            rationale,
+            with_charge_series,
+            import_tomorrow_with_charge_kwh,
+            export_tomorrow_with_charge_kwh,
+        } => {
+            let mut value = plan_to_json_value(&PlanRecommendation::Charge {
+                window: window.clone(),
+                kwh: *kwh,
+                min_soc_pct: *min_soc_pct,
+                observed_min_soc_pct: *observed_min_soc_pct,
+                after_min_soc_pct: *after_min_soc_pct,
+                current_soc_pct: *current_soc_pct,
+                rationale: rationale.clone(),
+                with_charge_series: with_charge_series.clone(),
+                import_tomorrow_with_charge_kwh: *import_tomorrow_with_charge_kwh,
+                export_tomorrow_with_charge_kwh: *export_tomorrow_with_charge_kwh,
+            });
+            value["strategy"] = serde_json::json!(crate::settings::PlanStrategy::HoldWindow);
+            value["slot_target_soc_pct"] = serde_json::json!(target_soc_pct);
+            value["apply"]["charge_slot"]["target_soc"] = serde_json::json!(target_soc_pct);
+            value
         }
         PlanRecommendation::NoPlan { reason } => serde_json::json!({
             "kind": "no_plan",
@@ -9439,6 +9619,7 @@ pub(crate) mod tests {
                         .unwrap_or(0);
                     set_slot(&mut snap.discharge_slots[1], write.value, end);
                 }
+                HR_CHARGE_TARGET_SOC_1 => snap.raw_charge_slot_1_target_soc = Some(write.value),
                 HR_BATTERY_PAUSE_MODE => pause_mode = Some(write.value),
                 HR_BATTERY_PAUSE_SLOT_1_START => pause_start = Some(write.value),
                 HR_BATTERY_PAUSE_SLOT_1_END => pause_end = Some(write.value),
@@ -10128,6 +10309,152 @@ pub(crate) mod tests {
         .await;
     }
 
+    /// Issue #346: a forecast plan's `charge_rate_percent` is a share of the
+    /// inverter's maximum, but HR 111 stores a percentage of battery capacity,
+    /// so the register must be derived through the pack size.
+    #[tokio::test]
+    async fn charge_slot_rate_percent_is_derived_through_the_pack_size() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+                snapshot.battery_capacity_kwh = 9.5;
+                snapshot.max_battery_power_w = 2600;
+            }
+            for (percent, expected_raw) in [(62, 17), (40, 11), (100, 50), (0, 0)] {
+                let body = serde_json::json!({
+                    "slot": 1,
+                    "start_hour": 2, "start_minute": 0,
+                    "end_hour": 3, "end_minute": 36,
+                    "enabled": true,
+                    "target_soc": 100,
+                    "charge_rate_percent": percent,
+                });
+                let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                let rate = writes
+                    .iter()
+                    .find(|w| w.address == HR_BATTERY_CHARGE_LIMIT)
+                    .expect("slot must set the DC charge limit");
+                assert_eq!(rate.value, expected_raw, "{percent}% on 9.5 kWh / 2.6 kW");
+            }
+        })
+        .await;
+    }
+
+    /// Issue #346: without the pack size a partial charge rate cannot be turned
+    /// into a register value, and falling back to plain halving is exactly the
+    /// mapping that limits nothing on a large pack. Refuse it rather than write
+    /// a value that looks applied; 100% ("no limit", register 50) never needs
+    /// the pack size.
+    #[tokio::test]
+    async fn charge_slot_refuses_a_partial_rate_when_the_pack_size_is_unknown() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let slot_body = |percent: u32| {
+                serde_json::json!({
+                    "slot": 1,
+                    "start_hour": 2, "start_minute": 0,
+                    "end_hour": 3, "end_minute": 36,
+                    "enabled": true,
+                    "target_soc": 100,
+                    "charge_rate_percent": percent,
+                })
+            };
+
+            // A snapshot whose capacity has not been read yet, and no snapshot.
+            let known_device = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let no_snapshot = Arc::new(AppState::new());
+            for state in [known_device, no_snapshot] {
+                let (status, body) =
+                    set_charge_slot(State(state.clone()), Json(slot_body(62))).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    body.0["error"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("battery size"),
+                    "error should explain why: {:?}",
+                    body.0
+                );
+                assert!(
+                    drain_pending_writes(&state).await.is_empty(),
+                    "nothing may be queued for a refused request"
+                );
+            }
+
+            // 100% still works without the pack size.
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let (status, _) = set_charge_slot(State(state.clone()), Json(slot_body(100))).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_BATTERY_CHARGE_LIMIT)
+                .expect("100% must still set the charge limit");
+            assert_eq!(rate.value, 50);
+        })
+        .await;
+    }
+
+    /// The rate is only applied when a slot is enabled, so disabling one must not
+    /// be refused over a rate that would have been ignored anyway.
+    #[tokio::test]
+    async fn disabling_a_slot_is_not_refused_over_an_unconvertible_rate() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_BATTERY_CHARGE_LIMIT;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 0, "start_minute": 0,
+                "end_hour": 0, "end_minute": 0,
+                "enabled": false,
+                "target_soc": 100,
+                "charge_rate_percent": 62,
+            });
+            for state in [
+                make_state_with_device(DeviceType::Gen1Hybrid).await,
+                Arc::new(AppState::new()),
+            ] {
+                let (status, _) = set_charge_slot(State(state.clone()), Json(body.clone())).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                assert!(
+                    !writes.iter().any(|w| w.address == HR_BATTERY_CHARGE_LIMIT),
+                    "a disabled slot must not touch the charge limit"
+                );
+            }
+        })
+        .await;
+    }
+
+    /// A direct bank is a plain percentage of the maximum, so it never needs the
+    /// pack size and a partial rate is accepted without it.
+    #[tokio::test]
+    async fn charge_slot_partial_rate_on_a_direct_bank_does_not_need_the_pack_size() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_AC_BATTERY_CHARGE_LIMIT;
+            let state = make_state_with_device(DeviceType::ACCoupled).await;
+            let body = serde_json::json!({
+                "slot": 1,
+                "start_hour": 2, "start_minute": 0,
+                "end_hour": 3, "end_minute": 36,
+                "enabled": true,
+                "target_soc": 100,
+                "charge_rate_percent": 62,
+            });
+            let (status, _) = set_charge_slot(State(state.clone()), Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            let rate = writes
+                .iter()
+                .find(|w| w.address == HR_AC_BATTERY_CHARGE_LIMIT)
+                .expect("AC-coupled must set the AC charge limit");
+            assert_eq!(rate.value, 62);
+        })
+        .await;
+    }
+
     /// CODE_REVIEW.md Minor 1: the `charge_rate_percent` branch must pick
     /// the right register per device family. AC-coupled uses HR 313 with a
     /// direct 1–100 scale (no half-scale division).
@@ -10207,7 +10534,14 @@ pub(crate) mod tests {
             200,
             336,
             SLOT_TARGET_SOC_NONE,
-            Some(PLAN_CHARGE_RATE_PERCENT),
+            Some(crate::inverter::power_limit::ChargeRateRequest {
+                percent: PLAN_CHARGE_RATE_PERCENT,
+                scale: crate::inverter::power_limit::PowerLimitScale::new(
+                    DeviceType::Gen2Hybrid.power_limit_bank(),
+                    2600,
+                    9.5,
+                ),
+            }),
         )
         .expect("refresh slot writes must encode");
         let rate = writes
@@ -10501,6 +10835,67 @@ pub(crate) mod tests {
                 .find(|w| w.address == HR_ENABLE_CHARGE)
                 .expect("AIO charge slot must set HR 96");
             assert_eq!(enable.value, 1);
+        })
+        .await;
+    }
+
+    /// Issue #359: the Planner's Apply (the only caller sending
+    /// `charge_rate_percent`) records the target a hold plan arms, and a
+    /// later full charge from it resets that target, and only that one.
+    /// Other saves keep the "100 never writes HR 116" rule pinned below.
+    #[tokio::test]
+    async fn planner_apply_records_and_resets_only_its_own_target() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC;
+            let state = make_state_with_device(DeviceType::AllInOne6kW).await;
+            let apply = |target: u64| {
+                serde_json::json!({
+                    "slot": 1,
+                    "start_hour": 23, "start_minute": 0,
+                    "end_hour": 6, "end_minute": 0,
+                    "enabled": true,
+                    "target_soc": target,
+                    "charge_rate_percent": 100,
+                })
+            };
+            let targets = |writes: &[RegisterWrite]| -> Vec<u16> {
+                writes
+                    .iter()
+                    .filter(|w| w.address == HR_CHARGE_TARGET_SOC)
+                    .map(|w| w.value)
+                    .collect()
+            };
+
+            // A hold plan applied from the Planner records its target.
+            let (status, _) = set_charge_slot(State(state.clone()), Json(apply(62))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(targets(&drain_pending_writes(&state).await), vec![62]);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_armed_target_pct,
+                Some(62)
+            );
+
+            // The inverter now reports 62; a full charge resets it.
+            if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+                snapshot.target_soc = 62;
+            }
+            let (status, _) = set_charge_slot(State(state.clone()), Json(apply(100))).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert_all_whitelisted(&writes);
+            assert_eq!(targets(&writes), vec![100], "{writes:?}");
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_armed_target_pct,
+                None
+            );
+
+            // A target the user set by hand is left alone.
+            if let Some(snapshot) = state.latest_snapshot.lock().await.as_mut() {
+                snapshot.target_soc = 80;
+            }
+            let (status, _) = set_charge_slot(State(state.clone()), Json(apply(100))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(targets(&drain_pending_writes(&state).await).is_empty());
         })
         .await;
     }
@@ -14764,11 +15159,11 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Device-type routing: every control handler must derive its AC-coupled /
-    // three-phase flags from a SINGLE locked view of the snapshot (via
-    // latest_device_type / device_type_flags) rather than two independent
-    // locks that can race with the poll loop. These tests lock in the routing
-    // per device family end-to-end and cover the helper defaults.
+    // Device-type routing: every control handler must derive its register
+    // bank from a SINGLE locked view of the snapshot (via latest_device_type /
+    // DeviceType::power_limit_bank) rather than independent locks that can
+    // race with the poll loop. These tests lock in the routing per device
+    // family end-to-end and cover the helper defaults.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -14781,52 +15176,58 @@ pub(crate) mod tests {
                 DeviceType::Gen2Hybrid,
                 "no-snapshot default must be Gen2Hybrid (neither AC nor 3-phase)"
             );
-            // The flags derived from that default are both false.
-            let (ac, tp) = device_type_flags(&state).await;
-            assert!(!ac);
-            assert!(!tp);
+            // The default routes to the DC-hybrid half-scale bank.
+            assert_eq!(
+                latest_device_type(&state).await.power_limit_bank(),
+                PowerLimitBank::HalfScale
+            );
         })
         .await;
     }
 
     #[tokio::test]
-    async fn device_type_flags_matches_each_device_family() {
+    async fn power_limit_bank_matches_each_device_family() {
         with_isolated_config_dir_async(|| async {
-            // (device, is_ac_coupled, is_three_phase)
             let cases = [
-                (DeviceType::Gen2Hybrid, false, false),
-                (DeviceType::Gen3Hybrid, false, false),
-                (DeviceType::Gen1Hybrid, false, false),
-                (DeviceType::ACCoupled, true, false),
-                (DeviceType::ACCoupledMk2, true, false),
-                (DeviceType::ThreePhase, false, true),
-                (DeviceType::ACThreePhase, false, true),
-                (DeviceType::HybridHvGen3, false, true),
-                (DeviceType::AllInOneHybrid, false, true),
-                // Gateway is single-phase-class for control (issue #149): not
-                // AC-coupled, and not three-phase for schedule-slot routing.
-                (DeviceType::Gateway, false, false),
+                (DeviceType::Gen1Hybrid, PowerLimitBank::HalfScale),
+                (DeviceType::Gen2Hybrid, PowerLimitBank::HalfScale),
+                (DeviceType::Gen3Hybrid, PowerLimitBank::HalfScale),
+                (DeviceType::AllInOne6kW, PowerLimitBank::HalfScale),
+                (DeviceType::ACCoupled, PowerLimitBank::AcBank),
+                (DeviceType::ACCoupledMk2, PowerLimitBank::AcBank),
+                (DeviceType::ThreePhase, PowerLimitBank::ThreePhase),
+                (DeviceType::ACThreePhase, PowerLimitBank::ThreePhase),
+                (DeviceType::HybridHvGen3, PowerLimitBank::ThreePhase),
+                (DeviceType::AllInOneHybrid, PowerLimitBank::ThreePhase),
+                // Gateway is single-phase-class for schedule slots (issue
+                // #149) but keeps its power limits in the AC bank, HR 313/314.
+                (DeviceType::Gateway, PowerLimitBank::AcBank),
             ];
-            for (dt, want_ac, want_tp) in cases {
+            for (dt, want) in cases {
                 let state = make_state_with_device(dt).await;
-                let (ac, tp) = device_type_flags(&state).await;
-                assert_eq!(
-                    (ac, tp),
-                    (want_ac, want_tp),
-                    "device_type_flags wrong for {:?}",
-                    dt
-                );
-                // Consistency: the helper's flag must equal deriving it from
-                // the same single-locked device type.
                 let resolved = latest_device_type(&state).await;
-                assert_eq!(
-                    ac,
-                    matches!(resolved, DeviceType::ACCoupled | DeviceType::ACCoupledMk2)
-                );
-                assert_eq!(tp, resolved.uses_three_phase_schedule_slots());
+                assert_eq!(resolved.power_limit_bank(), want, "{dt:?}");
             }
         })
         .await;
+    }
+
+    /// The command builders must write the register the bank names, for both
+    /// directions, so the write side can never disagree with the decoder.
+    #[test]
+    fn limit_command_builders_write_the_register_their_bank_names() {
+        for bank in [
+            PowerLimitBank::HalfScale,
+            PowerLimitBank::AcBank,
+            PowerLimitBank::ThreePhase,
+        ] {
+            let charge = charge_limit_command(bank, 30).encode().unwrap();
+            assert_eq!(charge.len(), 1, "{bank:?}");
+            assert_eq!(charge[0].address, bank.charge_register(), "{bank:?}");
+            let discharge = discharge_limit_command(bank, 30).encode().unwrap();
+            assert_eq!(discharge.len(), 1, "{bank:?}");
+            assert_eq!(discharge[0].address, bank.discharge_register(), "{bank:?}");
+        }
     }
 
     #[tokio::test]
@@ -14847,9 +15248,9 @@ pub(crate) mod tests {
                 (DeviceType::AllInOne6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_CHARGE_LIMIT),
                 (DeviceType::AllInOne5kW, HR_BATTERY_CHARGE_LIMIT),
-                // Gateway is single-phase-class for control, so charge-rate
-                // writes use the standard HR 111 path.
-                (DeviceType::Gateway, HR_BATTERY_CHARGE_LIMIT),
+                // Gateway charge-rate writes go to the AC-limit bank, matching
+                // GivTCP's `set_battery_charge_limit_ac` routing.
+                (DeviceType::Gateway, HR_AC_BATTERY_CHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;
@@ -14864,6 +15265,116 @@ pub(crate) mod tests {
                     dt
                 );
                 assert_eq!(writes[0].value, 30);
+            }
+        })
+        .await;
+    }
+
+    /// `SetActivePowerRate` writes HR 50, which the 1000-range-layout
+    /// families and unknown models (including the unsupported commercial
+    /// 0x41xx/0x51xx codes) ignore — the endpoint must refuse rather than
+    /// report a success that never lands.
+    #[tokio::test]
+    async fn set_active_power_rate_rejects_devices_without_hr50() {
+        with_isolated_config_dir_async(|| async {
+            for dt in [
+                DeviceType::ThreePhase,
+                DeviceType::ACThreePhase,
+                DeviceType::HybridHvGen3,
+                DeviceType::AllInOneHybrid,
+                DeviceType::from_register(0x4101),
+                DeviceType::from_register(0x5101),
+            ] {
+                let state = make_state_with_device(dt).await;
+                let (status, Json(body)) = set_active_power_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "rate": 60 })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{dt:?}");
+                assert_eq!(body["ok"], false, "{dt:?}");
+                assert!(
+                    drain_pending_writes(&state).await.is_empty(),
+                    "{dt:?} must not queue an HR 50 write"
+                );
+            }
+        })
+        .await;
+    }
+
+    /// Issue #346 was reported on a Gen1 Hybrid. The Control page sends the
+    /// halved 0-50 register value; the backend must write it verbatim to
+    /// HR 111/112 and refuse anything the register cannot hold, without
+    /// queueing a partial write.
+    #[tokio::test]
+    async fn gen1_hybrid_charge_and_discharge_limits_write_hr111_112_on_the_half_scale() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::{HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_DISCHARGE_LIMIT};
+            for limit in [0u16, 1, 17, 33, 50] {
+                let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+                let (status, _) = set_charge_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "limit": limit })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "charge limit {limit}");
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].address, HR_BATTERY_CHARGE_LIMIT);
+                assert_eq!(writes[0].value, limit);
+
+                let (status, _) = set_discharge_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "limit": limit })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "discharge limit {limit}");
+                let writes = drain_pending_writes(&state).await;
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].address, HR_BATTERY_DISCHARGE_LIMIT);
+                assert_eq!(writes[0].value, limit);
+            }
+
+            // An unhalved display percentage must be rejected, not clamped.
+            let state = make_state_with_device(DeviceType::Gen1Hybrid).await;
+            let (status, _) = set_charge_rate(
+                State(state.clone()),
+                Json(serde_json::json!({ "limit": 66 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, _) = set_discharge_rate(
+                State(state.clone()),
+                Json(serde_json::json!({ "limit": 51 })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(drain_pending_writes(&state).await.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_active_power_rate_writes_hr50_on_single_phase_layouts() {
+        with_isolated_config_dir_async(|| async {
+            for dt in [
+                DeviceType::Gen3Hybrid,
+                DeviceType::ACCoupled,
+                DeviceType::AllInOne6kW,
+                DeviceType::Gateway,
+            ] {
+                let state = make_state_with_device(dt).await;
+                let (status, _) = set_active_power_rate(
+                    State(state.clone()),
+                    Json(serde_json::json!({ "rate": 60 })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{dt:?}");
+                let writes = drain_pending_writes(&state).await;
+                assert_eq!(writes.len(), 1, "{dt:?}");
+                assert_eq!(writes[0].address, 50, "{dt:?}");
+                assert_eq!(writes[0].value, 60, "{dt:?}");
             }
         })
         .await;
@@ -14887,6 +15398,8 @@ pub(crate) mod tests {
                 (DeviceType::AllInOne6kW, HR_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::AllInOne3_6kW, HR_BATTERY_DISCHARGE_LIMIT),
                 (DeviceType::AllInOne5kW, HR_BATTERY_DISCHARGE_LIMIT),
+                // Gateway keeps its limits in the AC bank (GivTCP routing).
+                (DeviceType::Gateway, HR_AC_BATTERY_DISCHARGE_LIMIT),
             ];
             for (dt, want_reg) in cases {
                 let state = make_state_with_device(dt).await;
@@ -16457,6 +16970,274 @@ pub(crate) mod tests {
         .await;
     }
 
+    // ---- Force Charge and slot 1's own target SOC (HR 242) -----------------
+    //
+    // On 10-slot inverters the firmware stops charging at the LOWER of the
+    // global target and slot 1's target, so Force Charge that only raises the
+    // global one does nothing when the SOC is already above slot 1's stored
+    // target (GivTCP #576). Start must raise HR 242 and Stop must put it back,
+    // and the restoration must be provable from a snapshot or ownership of the
+    // Force Charge would be pinned forever.
+
+    const TEN_SLOT_MODELS: [DeviceType; 5] = [
+        DeviceType::Gen3Hybrid,
+        DeviceType::AllInOne6kW,
+        DeviceType::Gen4Hybrid,
+        DeviceType::HybridHvGen3,
+        DeviceType::ThreePhase,
+    ];
+
+    /// Seed a snapshot for `device_type` whose HR 242 reads `raw_hr242`, with
+    /// slot 1 enabled or not (the capture must not depend on it).
+    async fn seed_slot1_target_pre_state(
+        state: &Arc<AppState>,
+        device_type: DeviceType,
+        raw_hr242: Option<u16>,
+        slot_1_enabled: bool,
+    ) {
+        let mut snap = crate::inverter::model::InverterSnapshot {
+            device_type,
+            inverter_serial: "HEM-TEST-001".into(),
+            enable_charge_target: true,
+            target_soc: 80,
+            battery_power_mode: 1,
+            raw_charge_slot_1_target_soc: raw_hr242,
+            ..Default::default()
+        };
+        snap.charge_slots[0].enabled = slot_1_enabled;
+        *state.latest_snapshot.lock().await = Some(snap);
+    }
+
+    #[tokio::test]
+    async fn force_charge_start_raises_slot_1_target_on_ten_slot_models() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            for device_type in TEN_SLOT_MODELS {
+                for body in [None, Some(Json(json!({ "minutes": 30 })))] {
+                    let with_minutes = body.is_some();
+                    let state = make_state_with_device(device_type).await;
+                    seed_slot1_target_pre_state(&state, device_type, Some(30), true).await;
+                    let (status, _) = force_charge(State(state.clone()), body).await;
+                    assert_eq!(status, StatusCode::OK);
+                    let writes = drain_pending_writes(&state).await;
+                    assert_all_whitelisted(&writes);
+                    let per_slot: Vec<_> = writes
+                        .iter()
+                        .filter(|w| w.address == HR_CHARGE_TARGET_SOC_1)
+                        .collect();
+                    assert_eq!(
+                        per_slot.len(),
+                        1,
+                        "{device_type:?} (minutes={with_minutes}) must write HR 242 exactly once"
+                    );
+                    assert_eq!(
+                        per_slot[0].value, 100,
+                        "{device_type:?} (minutes={with_minutes}) must raise slot 1's target to 100"
+                    );
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_start_leaves_slot_1_target_alone_on_other_models() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            for device_type in [
+                DeviceType::Gen1Hybrid,
+                DeviceType::Gen2Hybrid,
+                DeviceType::ACCoupled,
+                DeviceType::Gateway,
+            ] {
+                let state = make_state_with_device(device_type).await;
+                let (status, _) = force_charge(State(state.clone()), None).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                assert!(
+                    writes.iter().all(|w| w.address != HR_CHARGE_TARGET_SOC_1),
+                    "{device_type:?} has no per-slot target block; HR 242 must not be written"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_captures_slot_1_target_even_when_slot_is_disabled() {
+        with_isolated_config_dir_async(|| async {
+            for device_type in TEN_SLOT_MODELS {
+                let state = make_state_with_device(device_type).await;
+                seed_slot1_target_pre_state(&state, device_type, Some(30), false).await;
+                let _ = force_charge(State(state.clone()), None).await;
+                let revert = state.force_charge_revert.lock().await.clone().unwrap();
+                assert_eq!(
+                    revert.charge_slot_1_target_soc,
+                    Some(30),
+                    "{device_type:?}: the raw HR 242 must be captured whatever slot 1's enable state"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_does_not_capture_unusable_slot_1_target() {
+        with_isolated_config_dir_async(|| async {
+            // Unset (None / 0) and out-of-range values cannot be written back
+            // (the encoder accepts 4..=100), so they must not become a baseline.
+            for raw in [None, Some(0), Some(3), Some(101)] {
+                let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+                seed_slot1_target_pre_state(&state, DeviceType::Gen3Hybrid, raw, true).await;
+                let _ = force_charge(State(state.clone()), None).await;
+                let revert = state.force_charge_revert.lock().await.clone().unwrap();
+                assert_eq!(
+                    revert.charge_slot_1_target_soc, None,
+                    "raw HR 242 = {raw:?}"
+                );
+            }
+
+            let state = make_state_with_device(DeviceType::Gen2Hybrid).await;
+            seed_slot1_target_pre_state(&state, DeviceType::Gen2Hybrid, Some(30), true).await;
+            let _ = force_charge(State(state.clone()), None).await;
+            let revert = state.force_charge_revert.lock().await.clone().unwrap();
+            assert_eq!(
+                revert.charge_slot_1_target_soc, None,
+                "models without the HR 240-299 block never capture a slot 1 target"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_stop_restores_slot_1_target() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            for device_type in TEN_SLOT_MODELS {
+                let state = make_state_with_device(device_type).await;
+                seed_slot1_target_pre_state(&state, device_type, Some(30), false).await;
+                let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 }))))
+                    .await;
+                let _ = drain_pending_writes(&state).await;
+
+                let (status, _) = force_charge_stop(State(state.clone())).await;
+                assert_eq!(status, StatusCode::OK);
+                let writes = drain_pending_writes(&state).await;
+                assert_all_whitelisted(&writes);
+                assert!(
+                    writes
+                        .iter()
+                        .any(|w| w.address == HR_CHARGE_TARGET_SOC_1 && w.value == 30),
+                    "{device_type:?}: stop must put slot 1's target back to the captured 30, got {writes:?}"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_stop_skips_slot_1_target_when_none_was_captured() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_slot1_target_pre_state(&state, DeviceType::Gen3Hybrid, None, true).await;
+            let _ = force_charge(State(state.clone()), None).await;
+            let _ = drain_pending_writes(&state).await;
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+            assert!(
+                writes.iter().all(|w| w.address != HR_CHARGE_TARGET_SOC_1),
+                "no baseline means no HR 242 restore write"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn force_charge_slot_1_target_restoration_only_confirms_once_read_back() {
+        with_isolated_config_dir_async(|| async {
+            use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+            let state = make_state_with_device(DeviceType::Gen3Hybrid).await;
+            seed_slot1_target_pre_state(&state, DeviceType::Gen3Hybrid, Some(30), false).await;
+            let _ = force_charge(State(state.clone()), Some(Json(json!({ "minutes": 30 })))).await;
+            let _ = drain_pending_writes(&state).await;
+            let (status, _) = force_charge_stop(State(state.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            let writes = drain_pending_writes(&state).await;
+
+            // Everything restored EXCEPT HR 242, which still reads the forced
+            // 100: ownership must be retained.
+            let mut stale = writes.clone();
+            stale.retain(|w| w.address != HR_CHARGE_TARGET_SOC_1);
+            stale.push(RegisterWrite {
+                address: HR_CHARGE_TARGET_SOC_1,
+                value: 100,
+            });
+            confirm_force_restoration(&state, &stale).await;
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "a stale HR 242 must not release the Force Charge baseline"
+            );
+
+            // The exact restoration read back releases it.
+            confirm_force_restoration(&state, &writes).await;
+            assert!(state.force_charge_revert.lock().await.is_none());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[test]
+    fn snapshot_matches_writes_checks_the_raw_slot_1_target() {
+        use crate::modbus::registers::HR_CHARGE_TARGET_SOC_1;
+        let write = [RegisterWrite {
+            address: HR_CHARGE_TARGET_SOC_1,
+            value: 30,
+        }];
+        let mut snap = crate::inverter::model::InverterSnapshot::default();
+        assert!(
+            !snapshot_matches_writes(&snap, &write),
+            "an unread HR 242 cannot prove a restore"
+        );
+        snap.raw_charge_slot_1_target_soc = Some(100);
+        assert!(!snapshot_matches_writes(&snap, &write));
+        snap.raw_charge_slot_1_target_soc = Some(30);
+        assert!(snapshot_matches_writes(&snap, &write));
+    }
+
+    #[test]
+    fn force_charge_revert_without_slot_1_target_field_still_deserialises() {
+        let revert = ForceChargeRevert {
+            started_at_ms: 1,
+            external_owner: None,
+            force_charge_slot_end_ms: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::Gen3Hybrid,
+            inverter_serial: "HEM-TEST-001".into(),
+            firmware_version: String::new(),
+            enable_discharge: false,
+            target_soc: 80,
+            charge_slot_1_target_soc: Some(30),
+            battery_power_mode: 1,
+            charge_rate: None,
+            charge_slot_1_start: None,
+            charge_slot_1_end: None,
+            three_phase_force_charge_enable: None,
+            three_phase_ac_charge_enable: None,
+            battery_pause_mode: None,
+        };
+        let mut json = serde_json::to_value(&revert).unwrap();
+        assert_eq!(json["charge_slot_1_target_soc"], 30);
+        json.as_object_mut()
+            .unwrap()
+            .remove("charge_slot_1_target_soc");
+        let legacy: ForceChargeRevert = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.charge_slot_1_target_soc, None);
+        assert_eq!(legacy.target_soc, 80);
+    }
+
     /// The pause-writing three-phase family (ACThreePhase) must also have a
     /// provable stop write set: its discharge stop emits the HR318-320 pause
     /// restores in addition to the slot registers, and an unprovable register
@@ -16542,6 +17323,7 @@ pub(crate) mod tests {
             firmware_version: "400".into(),
             enable_discharge: false,
             target_soc: 80,
+            charge_slot_1_target_soc: None,
             battery_power_mode: 1,
             charge_rate: Some(30),
             charge_slot_1_start: Some((2, 0)),
@@ -16645,6 +17427,7 @@ pub(crate) mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 80,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: Some((2, 0)),
@@ -16704,6 +17487,7 @@ pub(crate) mod tests {
                 firmware_version: String::new(),
                 enable_discharge: false,
                 target_soc: 80,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: Some((2, 0)),
@@ -16758,6 +17542,7 @@ pub(crate) mod tests {
             firmware_version: "400".into(),
             enable_discharge: false,
             target_soc: 4,
+            charge_slot_1_target_soc: None,
             battery_power_mode: 1,
             charge_rate: None,
             charge_slot_1_start: Some((2, 0)),
@@ -16840,6 +17625,7 @@ pub(crate) mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,
@@ -19270,6 +20056,58 @@ pub(crate) mod tests {
         .await;
     }
 
+    /// Issue #359: the planner strategy saves, validates, and reads back.
+    /// Unknown values are rejected and leave disk untouched.
+    #[tokio::test]
+    async fn update_settings_validates_forecast_plan_strategy() {
+        with_isolated_config_dir_async(|| async {
+            use crate::settings::PlanStrategy;
+            let state = test_state();
+            for bad in [json!("bogus"), json!(7), json!(null)] {
+                let (status, body) = update_settings(
+                    State(state.clone()),
+                    Json(json!({ "forecast_plan_strategy": bad })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+                assert!(
+                    body["error"].as_str().unwrap().contains("strategy"),
+                    "{bad}: {}",
+                    body.0
+                );
+                assert_eq!(
+                    crate::settings::Settings::load().forecast_plan_strategy,
+                    PlanStrategy::MinSoc
+                );
+            }
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "hold_window" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_strategy,
+                PlanStrategy::HoldWindow
+            );
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_strategy"], "hold_window");
+
+            let (status, _) = update_settings(
+                State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "min_soc" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_strategy,
+                PlanStrategy::MinSoc
+            );
+        })
+        .await;
+    }
+
     /// Issue #283 planner v2: the settings endpoint accepts and validates
     /// `forecast_min_soc_pct` (0..=100, the SOC floor for the forecast
     /// window). Out-of-range values are rejected and leave disk untouched.
@@ -20227,13 +21065,7 @@ pub(crate) mod tests {
         s.import_standing_charge_p_per_day = standing_charge_p_per_day;
         s.save().expect("save settings");
 
-        let tmp_path = std::env::temp_dir().join(format!(
-            "givenergy-test-history-{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let tmp_path = crate::test_util::make_unique_test_dir("api-history").join("history.db");
         let db = crate::history::HistoryDb::open(&tmp_path).expect("open history db");
         let db_arc = std::sync::Arc::new(db);
 
@@ -23092,5 +23924,143 @@ pub(crate) mod tests {
             );
         })
         .await;
+    }
+
+    // ---- golden plan JSON (issue #359, Phase 0) -----------------------------
+
+    /// The full JSON the Planner page and its Apply button consume today,
+    /// for each recommendation kind. The #359 strategies may only add to
+    /// this shape; the default planner's output must stay identical.
+    #[test]
+    fn default_plan_json_matches_the_golden_shape() {
+        use crate::forecast::planner::{ChargeWindow, PlanRecommendation};
+
+        let charge = PlanRecommendation::Charge {
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 3 * 60 + 34,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            kwh: 16.44,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 20.5,
+            current_soc_pct: 30.0,
+            rationale: "why".into(),
+            with_charge_series: vec![(1_000, 21.0), (4_600, 38.0)],
+            import_tomorrow_with_charge_kwh: 12.84,
+            export_tomorrow_with_charge_kwh: 0.5,
+        };
+        assert_eq!(
+            plan_to_json_value(&charge),
+            json!({
+                "kind": "charge",
+                "window": {"start": "23:00", "end": "03:34", "rate": 0.07, "tomorrow": false},
+                "kwh": 16.44,
+                "min_soc_pct": 20.0,
+                "observed_min_soc_pct": 4.0,
+                "after_min_soc_pct": 20.5,
+                "current_soc_pct": 30.0,
+                "rationale": "why",
+                "with_charge_series": [[1_000, 21.0], [4_600, 38.0]],
+                "import_tomorrow_with_charge_kwh": 12.84,
+                "export_tomorrow_with_charge_kwh": 0.5,
+                "apply": {
+                    "charge_slot": {
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": 23,
+                        "start_minute": 0,
+                        "end_hour": 3,
+                        "end_minute": 34,
+                        "target_soc": 100,
+                        "charge_rate_percent": 100,
+                    },
+                    "timed_charge": {"enabled": true},
+                },
+            })
+        );
+
+        let no_charge = PlanRecommendation::NoChargeNeeded {
+            current_soc_pct: 80.0,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 45.0,
+        };
+        assert_eq!(
+            plan_to_json_value(&no_charge),
+            json!({
+                "kind": "no_charge_needed",
+                "min_soc_pct": 20.0,
+                "observed_min_soc_pct": 45.0,
+                "current_soc_pct": 80.0,
+                "rationale": "Battery is at 80% now and the forecast trough stays above your 20% minimum — nothing to schedule.",
+                "apply": null,
+            })
+        );
+
+        let no_plan = PlanRecommendation::NoPlan {
+            reason: "no tariff".into(),
+        };
+        assert_eq!(
+            plan_to_json_value(&no_plan),
+            json!({"kind": "no_plan", "reason": "no tariff", "apply": null})
+        );
+    }
+
+    /// Issue #359: a hold plan is still a `charge` to the Planner page, with
+    /// its strategy and target added and the target flowing into Apply.
+    #[test]
+    fn hold_plan_json_adds_its_strategy_and_target() {
+        use crate::forecast::planner::{ChargeWindow, PlanRecommendation};
+        let rec = PlanRecommendation::ChargeAndHold {
+            window: ChargeWindow {
+                start_min: 23 * 60,
+                end_min: 6 * 60,
+                tomorrow: false,
+                rate: 0.07,
+            },
+            target_soc_pct: 62,
+            kwh: 5.4,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 4.0,
+            after_min_soc_pct: 21.0,
+            current_soc_pct: 30.0,
+            rationale: "why".into(),
+            with_charge_series: vec![(1_000, 62.0)],
+            import_tomorrow_with_charge_kwh: 9.1,
+            export_tomorrow_with_charge_kwh: 0.0,
+        };
+        assert_eq!(
+            plan_to_json_value(&rec),
+            json!({
+                "kind": "charge",
+                "strategy": "hold_window",
+                "slot_target_soc_pct": 62,
+                "window": {"start": "23:00", "end": "06:00", "rate": 0.07, "tomorrow": false},
+                "kwh": 5.4,
+                "min_soc_pct": 20.0,
+                "observed_min_soc_pct": 4.0,
+                "after_min_soc_pct": 21.0,
+                "current_soc_pct": 30.0,
+                "rationale": "why",
+                "with_charge_series": [[1_000, 62.0]],
+                "import_tomorrow_with_charge_kwh": 9.1,
+                "export_tomorrow_with_charge_kwh": 0.0,
+                "apply": {
+                    "charge_slot": {
+                        "slot": 1,
+                        "enabled": true,
+                        "start_hour": 23,
+                        "start_minute": 0,
+                        "end_hour": 6,
+                        "end_minute": 0,
+                        "target_soc": 62,
+                        "charge_rate_percent": 100,
+                    },
+                    "timed_charge": {"enabled": true},
+                },
+            })
+        );
     }
 }

@@ -607,12 +607,14 @@ fn apply_model_and_solar_corrections(
     // DTC 3001 field data shows IR(44) rising almost exactly with battery
     // discharge after the charge lock ends; under heavy grid-fed EV/immersion
     // load it can also creep while both PV counters remain zero. On AC-coupled
-    // firmware it is inverter-output-today, not PV-generation-today. The
-    // mirrored per-string counters (or CT authority applied later in poll.rs)
-    // are the valid solar source.
+    // firmware it is inverter-output-today, not PV-generation-today. Gen3
+    // hybrid field data (#338) likewise shows IR(44) rising at dawn before
+    // either per-string energy counter moves, then dropping when we switch
+    // sources at the first PV1 tick. Both families have working per-string
+    // counters; leave the IR(44) fallback for older hybrids that need it.
     if matches!(
         snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
+        DeviceType::ACCoupled | DeviceType::ACCoupledMk2 | DeviceType::Gen3Hybrid
     ) {
         snap.today_solar_kwh = per_string_today;
     }
@@ -1085,12 +1087,10 @@ fn decode_holding_60_119(data: &[u16], snap: &mut InverterSnapshot, raw: &mut Ra
     raw.battery_soc_reserve = snap.battery_reserve as u16;
 
     // Battery charge/discharge limits for DC-coupled hybrids: HR(111/112).
-    // AC-coupled inverters use HR(313/314) from the AC config block instead;
-    // HR(111/112) can read as 0 on AC models and must not overwrite the real limits.
-    if !matches!(
-        snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
-    ) {
+    // AC-coupled inverters and the Gateway use HR(313/314) from the AC config
+    // block instead; HR(111/112) can read as 0 on AC models and must not
+    // overwrite the real limits.
+    if !snap.device_type.uses_ac_limit_registers() {
         snap.charge_rate = get_reg(data, 111 - 60) as u8;
         snap.discharge_rate = get_reg(data, 112 - 60) as u8;
     }
@@ -1229,6 +1229,11 @@ fn decode_holding_240_299(data: &[u16], snap: &mut InverterSnapshot) {
     // clamping.
     let t1 = get_reg(data, 242 - 240) as u8;
     let t2 = get_reg(data, 245 - 240) as u8;
+    // Keep the exact HR 242 too: Force Charge has to raise and later restore
+    // it, and the enabled-guard below hides it while slot 1 is disabled.
+    if snap.device_type.uses_extended_schedule_slots() && data.len() > 242 - 240 {
+        snap.raw_charge_slot_1_target_soc = Some(get_reg(data, 242 - 240));
+    }
     if snap.device_type.uses_three_phase_schedule_slots() {
         // HV/three-phase firmware writes the global "Target SOC" to HR 242
         // (per-slot for slot 1) rather than HR 1111, and the three-phase
@@ -1306,20 +1311,18 @@ fn decode_holding_300_359(data: &[u16], snap: &mut InverterSnapshot) {
     // HR 311: export priority (0=battery, 1=grid, 2=load)
     snap.ac_export_priority = get_reg(data, 311 - 300) as u8;
 
-    // HR 313/314: AC-coupled charge/discharge power percentage limits.
-    // Only AC-coupled inverters expose their real limits here — their DC-hybrid
-    // HR 111/112 registers read as 0 (see decode_holding_60_119). The
+    // HR 313/314: AC-limit-bank charge/discharge power percentage limits.
+    // AC-coupled inverters expose their real limits here — their DC-hybrid
+    // HR 111/112 registers read as 0 (see decode_holding_60_119) — and so does
+    // the Gateway, whose rate GivTCP both writes and reads at HR 313/314. The
     // All-in-One family also polls this block (for EPS / pause / export
     // priority) but keys its real charge/discharge limit off HR 111/112 —
     // confirmed by GivTCP read.py, which uses `battery_charge_limit` (HR 111)
     // for every non-3-phase / non-Gateway model including the AIO. On the AIO
     // HR 313 reads ~100, so copying it unconditionally would overwrite the
     // correct HR 111 value and make the charge-power limit always revert to
-    // max. Gate the copy on actual AC-coupled models only.
-    if matches!(
-        snap.device_type,
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2
-    ) {
+    // max. Gate the copy on `uses_ac_limit_registers`.
+    if snap.device_type.uses_ac_limit_registers() {
         snap.charge_rate = get_reg(data, 313 - 300) as u8;
         snap.discharge_rate = get_reg(data, 314 - 300) as u8;
     }
@@ -1989,6 +1992,11 @@ fn decode_battery_block(data: &[u16], index: usize) -> BatteryModule {
         bms_status_registers,
         bms_status,
         bms_warnings,
+        // IR(105)/IR(106): lifetime discharge/charge energy, deci-kWh
+        // (givenergy-modbus battery.py `e_battery_discharge_total` /
+        // `e_battery_charge_total`).
+        charge_energy_total_kwh: get_reg(data, 106 - 60) as f32 * 0.1,
+        discharge_energy_total_kwh: get_reg(data, 105 - 60) as f32 * 0.1,
     }
 }
 
@@ -2002,6 +2010,60 @@ pub fn decode_battery_block_into(
 ) {
     let module = decode_battery_block(data, block_index);
     snapshot.battery_modules.push(module);
+}
+
+/// Fill the snapshot's lifetime battery charge/discharge totals from the
+/// first LV battery's BMS (IR 105/106), the way GivTCP 3.6 does (#600).
+///
+/// Only single-phase LV models are touched: three-phase/HV and Gateway have
+/// their own lifetime totals in other register banks. Order of preference:
+///
+/// 1. battery #1's BMS totals, when non-zero (a different battery's total is
+///    not the system total, so only module index 0 counts);
+/// 2. whatever the inverter itself already reported (Gen1's IR 180/181);
+/// 3. the previous snapshot's totals, when this cycle has neither. A dropped
+///    BMS read must not publish 0: the sanitizer would reject the apparent
+///    drop in a lifetime counter as corruption on every poll.
+pub(crate) fn apply_lv_bms_lifetime_totals(
+    snapshot: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+) {
+    let device_type = snapshot.device_type;
+    if device_type.uses_hv_battery()
+        || device_type.needs_gateway_input_blocks()
+        || device_type == DeviceType::Ems
+    {
+        return;
+    }
+
+    let bms_totals = snapshot
+        .battery_modules
+        .iter()
+        .find(|module| module.index == 0)
+        .map(|module| {
+            (
+                module.charge_energy_total_kwh,
+                module.discharge_energy_total_kwh,
+            )
+        })
+        .filter(|(charge, discharge)| *charge > 0.0 || *discharge > 0.0);
+
+    if let Some((charge, discharge)) = bms_totals {
+        snapshot.total_charge_kwh = charge;
+        snapshot.total_discharge_kwh = discharge;
+    } else if snapshot.total_charge_kwh == 0.0 && snapshot.total_discharge_kwh == 0.0 {
+        match prev.filter(|prev| prev.device_type == device_type) {
+            Some(prev) => {
+                snapshot.total_charge_kwh = prev.total_charge_kwh;
+                snapshot.total_discharge_kwh = prev.total_discharge_kwh;
+            }
+            None => return,
+        }
+    } else {
+        // The inverter supplied its own totals this cycle (Gen1 IR 180/181).
+        return;
+    }
+    snapshot.total_throughput_kwh = snapshot.total_charge_kwh + snapshot.total_discharge_kwh;
 }
 
 // ===========================================================================
@@ -2544,6 +2606,8 @@ pub fn decode_hv_bmu_block(data: &[u16], index: usize) -> crate::inverter::model
         bms_status_registers: Vec::new(),
         bms_status: Vec::new(),
         bms_warnings: Vec::new(),
+        charge_energy_total_kwh: 0.0,
+        discharge_energy_total_kwh: 0.0,
     }
 }
 
@@ -4308,6 +4372,280 @@ mod tests {
     }
 
     #[test]
+    fn raw_slot_1_target_is_exposed_whether_or_not_the_slot_is_enabled() {
+        for device_type in [
+            DeviceType::Gen3Hybrid,
+            DeviceType::AllInOne6kW,
+            DeviceType::HybridHvGen3,
+            DeviceType::ThreePhase,
+        ] {
+            let mut data = vec![0u16; 60];
+            data[242 - 240] = 30;
+            let mut snapshot = InverterSnapshot {
+                device_type,
+                ..Default::default()
+            };
+
+            decode_holding_240_299(&data, &mut snapshot);
+
+            assert_eq!(
+                snapshot.raw_charge_slot_1_target_soc,
+                Some(30),
+                "{device_type:?}"
+            );
+            assert!(!snapshot.charge_slots[0].enabled, "{device_type:?}");
+        }
+    }
+
+    #[test]
+    fn raw_slot_1_target_keeps_an_unset_zero_distinct_from_unread() {
+        let data = vec![0u16; 60];
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        decode_holding_240_299(&data, &mut snapshot);
+
+        assert_eq!(snapshot.raw_charge_slot_1_target_soc, Some(0));
+    }
+
+    #[test]
+    fn raw_slot_1_target_is_not_set_for_models_without_the_block() {
+        for device_type in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::ACCoupled,
+            DeviceType::Gateway,
+        ] {
+            let mut data = vec![0u16; 60];
+            data[242 - 240] = 30;
+            let mut snapshot = InverterSnapshot {
+                device_type,
+                ..Default::default()
+            };
+
+            decode_holding_240_299(&data, &mut snapshot);
+
+            assert_eq!(
+                snapshot.raw_charge_slot_1_target_soc, None,
+                "{device_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_slot_1_target_is_not_set_from_a_truncated_block() {
+        let mut snapshot = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+
+        decode_holding_240_299(&[0u16; 2], &mut snapshot);
+
+        assert_eq!(snapshot.raw_charge_slot_1_target_soc, None);
+    }
+
+    // ---- LV BMS lifetime battery totals (IR 105/106) ----------------------
+
+    fn module_with_totals(index: usize, charge: f32, discharge: f32) -> BatteryModule {
+        BatteryModule {
+            index,
+            charge_energy_total_kwh: charge,
+            discharge_energy_total_kwh: discharge,
+            ..Default::default()
+        }
+    }
+
+    fn lv_snapshot(device_type: DeviceType, modules: Vec<BatteryModule>) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type,
+            battery_modules: modules,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lv_battery_block_decodes_lifetime_totals_from_ir105_and_ir106() {
+        let mut data = vec![0u16; 60];
+        data[105 - 60] = 12_345; // IR(105) discharge total, deci-kWh
+        data[106 - 60] = 20_000; // IR(106) charge total, deci-kWh
+
+        let module = decode_battery_block(&data, 0);
+
+        assert!((module.discharge_energy_total_kwh - 1_234.5).abs() < 0.01);
+        assert!((module.charge_energy_total_kwh - 2_000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn lv_bms_totals_populate_the_snapshot_on_single_phase_models() {
+        for device_type in [
+            DeviceType::Gen1Hybrid,
+            DeviceType::Gen2Hybrid,
+            DeviceType::Gen3Hybrid,
+            DeviceType::ACCoupled,
+        ] {
+            let mut snap = lv_snapshot(device_type, vec![module_with_totals(0, 2_000.0, 1_234.5)]);
+
+            apply_lv_bms_lifetime_totals(&mut snap, None);
+
+            assert!(
+                (snap.total_charge_kwh - 2_000.0).abs() < 0.01,
+                "{device_type:?}"
+            );
+            assert!(
+                (snap.total_discharge_kwh - 1_234.5).abs() < 0.01,
+                "{device_type:?}"
+            );
+            assert!(
+                (snap.total_throughput_kwh - 3_234.5).abs() < 0.01,
+                "{device_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lv_bms_totals_win_over_the_inverter_alt1_registers() {
+        let mut snap = lv_snapshot(
+            DeviceType::Gen1Hybrid,
+            vec![module_with_totals(0, 2_000.0, 1_000.0)],
+        );
+        snap.total_charge_kwh = 500.0; // from IR(180/181)
+        snap.total_discharge_kwh = 400.0;
+
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+
+        assert!((snap.total_charge_kwh - 2_000.0).abs() < 0.01);
+        assert!((snap.total_discharge_kwh - 1_000.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn zero_bms_totals_fall_back_to_the_inverter_alt1_registers() {
+        let mut snap = lv_snapshot(
+            DeviceType::Gen1Hybrid,
+            vec![module_with_totals(0, 0.0, 0.0)],
+        );
+        snap.total_charge_kwh = 500.0;
+        snap.total_discharge_kwh = 400.0;
+        snap.total_throughput_kwh = 900.0;
+
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+
+        assert_eq!(snap.total_charge_kwh, 500.0);
+        assert_eq!(snap.total_discharge_kwh, 400.0);
+        assert_eq!(snap.total_throughput_kwh, 900.0);
+    }
+
+    #[test]
+    fn only_the_first_battery_feeds_the_snapshot_totals() {
+        let mut snap = lv_snapshot(
+            DeviceType::Gen2Hybrid,
+            vec![
+                module_with_totals(1, 9_000.0, 8_000.0),
+                module_with_totals(0, 2_000.0, 1_000.0),
+            ],
+        );
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+        assert!((snap.total_charge_kwh - 2_000.0).abs() < 0.01);
+        assert!((snap.total_discharge_kwh - 1_000.0).abs() < 0.01);
+
+        // Battery #1 absent (only #2 answered): its totals are not a system total.
+        let mut snap = lv_snapshot(
+            DeviceType::Gen2Hybrid,
+            vec![module_with_totals(1, 9_000.0, 8_000.0)],
+        );
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+        assert_eq!(snap.total_charge_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+    }
+
+    #[test]
+    fn hv_and_gateway_models_keep_their_own_totals() {
+        for device_type in [
+            DeviceType::ThreePhase,
+            DeviceType::ACThreePhase,
+            DeviceType::HybridHvGen3,
+            DeviceType::AllInOneHybrid,
+            DeviceType::AllInOne6kW,
+            DeviceType::Gateway,
+        ] {
+            let mut snap = lv_snapshot(device_type, vec![module_with_totals(0, 2_000.0, 1_000.0)]);
+            snap.total_charge_kwh = 7.0;
+            snap.total_discharge_kwh = 8.0;
+            snap.total_throughput_kwh = 15.0;
+
+            apply_lv_bms_lifetime_totals(&mut snap, None);
+
+            assert_eq!(snap.total_charge_kwh, 7.0, "{device_type:?}");
+            assert_eq!(snap.total_discharge_kwh, 8.0, "{device_type:?}");
+            assert_eq!(snap.total_throughput_kwh, 15.0, "{device_type:?}");
+        }
+    }
+
+    #[test]
+    fn a_bms_dropout_keeps_the_previous_totals_instead_of_publishing_zero() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen2Hybrid,
+            total_charge_kwh: 2_000.0,
+            total_discharge_kwh: 1_000.0,
+            total_throughput_kwh: 3_000.0,
+            ..Default::default()
+        };
+        // Battery #1 did not answer this cycle: no module, inverter totals 0.
+        let mut snap = lv_snapshot(DeviceType::Gen2Hybrid, vec![]);
+
+        apply_lv_bms_lifetime_totals(&mut snap, Some(&prev));
+
+        assert_eq!(snap.total_charge_kwh, 2_000.0);
+        assert_eq!(snap.total_discharge_kwh, 1_000.0);
+        assert_eq!(snap.total_throughput_kwh, 3_000.0);
+    }
+
+    #[test]
+    fn a_bms_dropout_does_not_borrow_totals_from_another_inverter_model() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            total_charge_kwh: 2_000.0,
+            total_discharge_kwh: 1_000.0,
+            ..Default::default()
+        };
+        let mut snap = lv_snapshot(DeviceType::Gen2Hybrid, vec![]);
+
+        apply_lv_bms_lifetime_totals(&mut snap, Some(&prev));
+
+        assert_eq!(snap.total_charge_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+    }
+
+    #[test]
+    fn a_dropout_never_overrides_totals_the_inverter_itself_reported() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::Gen1Hybrid,
+            total_charge_kwh: 2_000.0,
+            total_discharge_kwh: 1_000.0,
+            ..Default::default()
+        };
+        let mut snap = lv_snapshot(DeviceType::Gen1Hybrid, vec![]);
+        snap.total_charge_kwh = 2_001.0; // fresh IR(180/181) reading
+        snap.total_discharge_kwh = 1_001.0;
+
+        apply_lv_bms_lifetime_totals(&mut snap, Some(&prev));
+
+        assert_eq!(snap.total_charge_kwh, 2_001.0);
+        assert_eq!(snap.total_discharge_kwh, 1_001.0);
+    }
+
+    #[test]
+    fn no_bms_and_no_history_leaves_the_totals_at_zero() {
+        let mut snap = lv_snapshot(DeviceType::Gen3Hybrid, vec![]);
+
+        apply_lv_bms_lifetime_totals(&mut snap, None);
+
+        assert_eq!(snap.total_charge_kwh, 0.0);
+        assert_eq!(snap.total_discharge_kwh, 0.0);
+    }
+
+    #[test]
     fn truncated_extended_charge_block_does_not_create_partial_slot() {
         let mut data = vec![0u16; 28];
         // HR 267 is the final slot-10 start register. Its end and target
@@ -4608,6 +4946,99 @@ mod tests {
         assert!((snap.today_consumption_kwh - 4.7).abs() < 0.01);
         assert!((snap.home_energy_today_kwh - 4.7).abs() < 0.01);
         assert!((snap.today_ac_charge_kwh - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn gen3_hybrid_dawn_does_not_switch_from_phantom_ir44_to_pv_strings() {
+        // Issue #338: IR(44) crept to 0.5 kWh while the inverter's PV1/PV2
+        // daily counters and the third-party generated total remained zero.
+        // Once a string reached 0.1 kWh, switching sources made the chart
+        // drop and the History period summary double-counted the first ramp.
+        let mut holding = vec![0u16; 60];
+        holding[0] = 0x2001;
+        holding[21] = 300; // ARM firmware identifies a Gen3 hybrid.
+
+        let decode = |pv1: u16, pv2: u16, aggregate: u16| {
+            let mut input = vec![0u16; 60];
+            input[17] = pv1;
+            input[19] = pv2;
+            input[44] = aggregate;
+            input[26] = 10; // Import is 1.0 kWh throughout.
+            decode_snapshot(&[
+                make_block(RegisterType::Input, 0, 60, "input_0_59", input),
+                make_block(
+                    RegisterType::Holding,
+                    0,
+                    60,
+                    "holding_0_59",
+                    holding.clone(),
+                ),
+            ])
+        };
+
+        let before_sunrise = decode(0, 0, 1);
+        let before_first_tick = decode(0, 0, 5);
+        let first_tick = decode(1, 0, 5);
+        let later = decode(5, 4, 14);
+        for snap in [&before_sunrise, &before_first_tick, &first_tick, &later] {
+            assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+            let per_string = snap.today_pv1_kwh + snap.today_pv2_kwh;
+            assert!((snap.today_solar_kwh - per_string).abs() < 0.01);
+            assert!((snap.today_consumption_kwh - (1.0 + per_string)).abs() < 0.01);
+        }
+        assert_eq!(before_first_tick.today_solar_kwh, 0.0);
+        assert!((first_tick.today_solar_kwh - 0.1).abs() < 0.01);
+        assert!((later.today_solar_kwh - 0.9).abs() < 0.01);
+    }
+
+    #[test]
+    fn gen3_hybrid_uses_available_strings_even_when_ir44_is_unreliable() {
+        // Model correction must also work when the holding block arrives
+        // first, without a configured solar location and after sunset.
+        // PV2-only dawn is significant: IR(19) requires IR(44) corroboration
+        // when the string is dark, but IR(44) must never become the total.
+        let cases = [
+            (0, 0, 5, 0.0),        // False aggregate before either string ticks.
+            (0, 1, 5, 0.1),        // PV2 is first to generate.
+            (1, 0, u16::MAX, 0.1), // Corrupt aggregate must not replace PV1.
+            (3, 4, 7, 0.7),        // Both strings contribute.
+            (5_000, 0, 5, 0.0),    // Corrupt PV1 is not real generation.
+        ];
+        for position in [
+            None,
+            Some(SolarPosition {
+                elevation_deg: -20.0,
+                hour_angle_deg: 120.0, // after sunset, not pre-dawn
+            }),
+        ] {
+            for holding_first in [false, true] {
+                for (pv1, pv2, ir44, expected) in cases {
+                    let mut input = vec![0u16; 60];
+                    input[17] = pv1;
+                    input[19] = pv2;
+                    input[26] = 10; // 1.0 kWh import, to check derived consumption.
+                    input[44] = ir44;
+                    let mut holding = vec![0u16; 60];
+                    holding[0] = 0x2001;
+                    holding[21] = 300;
+                    let input = make_block(RegisterType::Input, 0, 60, "input_0_59", input);
+                    let holding = make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding);
+                    let blocks = if holding_first {
+                        vec![holding, input]
+                    } else {
+                        vec![input, holding]
+                    };
+                    let snap = decode_snapshot_with_solar_position(&blocks, position);
+                    assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+                    assert!(
+                        (snap.today_solar_kwh - expected).abs() < 0.01,
+                        "PV1={pv1} PV2={pv2} IR44={ir44} holding_first={holding_first}: {}",
+                        snap.today_solar_kwh
+                    );
+                    assert!((snap.home_energy_today_kwh - (1.0 + expected)).abs() < 0.01);
+                }
+            }
+        }
     }
 
     #[test]
@@ -5464,6 +5895,141 @@ mod tests {
             "AIO charge limit must come from HR 111, not the AC-config HR 313"
         );
         assert_eq!(snap.discharge_rate, 30);
+    }
+
+    /// Issue #346 was reported on a Gen1 Hybrid. Both DTC routes to Gen1
+    /// (0x1001, and 0x20xx with ARM firmware century 12) must read the limits
+    /// raw from HR 111/112 on the 0-50 scale, ignore any HR 313/314 values, and
+    /// report the 2600 W rating the Control page multiplies by.
+    #[test]
+    fn gen1_hybrid_charge_limits_come_from_hr111_112() {
+        for (dtc, arm_fw) in [(0x1001u16, 0u16), (0x2001, 1234)] {
+            let mut holding_data = vec![0u16; 60];
+            holding_data[0] = dtc;
+            holding_data[21] = arm_fw;
+
+            let mut holding_60_data = vec![0u16; 60];
+            holding_60_data[111 - 60] = 33; // displayed as 66%
+            holding_60_data[112 - 60] = 25; // displayed as 50%
+
+            let mut ac_config = vec![0u16; 60];
+            ac_config[313 - 300] = 100; // must NOT override
+            ac_config[314 - 300] = 100;
+
+            let blocks = vec![
+                make_block(RegisterType::Input, 0, 60, "input_0_59", vec![0; 60]),
+                make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+                make_block(
+                    RegisterType::Holding,
+                    60,
+                    60,
+                    "holding_60_119",
+                    holding_60_data,
+                ),
+                make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+            ];
+            let snap = decode_snapshot(&blocks);
+            assert_eq!(snap.device_type, DeviceType::Gen1Hybrid, "0x{dtc:04x}");
+            assert_eq!(
+                snap.charge_rate, 33,
+                "0x{dtc:04x} charge limit is raw HR 111"
+            );
+            assert_eq!(
+                snap.discharge_rate, 25,
+                "0x{dtc:04x} discharge limit is raw HR 112"
+            );
+            assert_eq!(snap.max_battery_power_w, 2600, "0x{dtc:04x}");
+            assert!(!snap.device_type.uses_direct_charge_limit());
+        }
+    }
+
+    /// The Gateway keeps its charge/discharge limits in the AC-limit bank:
+    /// GivTCP writes them with `set_battery_charge_limit_ac` (HR 313/314) and
+    /// reads them back from `battery_charge_limit_ac`. HR 111/112 must not
+    /// overwrite them.
+    #[test]
+    fn gateway_charge_limits_come_from_hr313_314_not_hr111_112() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x7001; // Gateway
+
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25; // not the Gateway's limit
+        holding_60_data[112 - 60] = 30;
+
+        let mut ac_config = vec![0u16; 60];
+        ac_config[313 - 300] = 80;
+        ac_config[314 - 300] = 70;
+
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+            make_block(RegisterType::Holding, 300, 60, "holding_300_359", ac_config),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::Gateway);
+        assert_eq!(snap.charge_rate, 80, "Gateway charge limit is HR 313");
+        assert_eq!(snap.discharge_rate, 70, "Gateway discharge limit is HR 314");
+    }
+
+    /// Without the AC config block the Gateway's limits stay unset rather than
+    /// being filled from HR 111/112, which is not where the Gateway keeps them.
+    #[test]
+    fn gateway_without_ac_config_block_ignores_hr111_112() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x7001;
+        let mut holding_60_data = vec![0u16; 60];
+        holding_60_data[111 - 60] = 25;
+        holding_60_data[112 - 60] = 30;
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                60,
+                60,
+                "holding_60_119",
+                holding_60_data,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.charge_rate, 0);
+        assert_eq!(snap.discharge_rate, 0);
+    }
+
+    /// AC three-phase (0x60xx) uses the three-phase HR 1000-1079 layout, so
+    /// HR 1002 supersedes the single-phase HR 50 active power rate, and the
+    /// HR 1063 export limit and HR 1078 battery cutoff are decoded too.
+    #[test]
+    fn ac_three_phase_decodes_the_hr1000_high_config_block() {
+        let mut holding_data = vec![0u16; 60];
+        holding_data[0] = 0x6001; // AC three-phase
+        holding_data[50] = 100; // single-phase HR 50 — superseded
+
+        let mut high_config = vec![0u16; 80];
+        high_config[1002 - 1000] = 60;
+        high_config[1063 - 1000] = 36_000; // deci-watts → 3600 W
+        high_config[1078 - 1000] = 80;
+
+        let blocks = vec![
+            make_block(RegisterType::Holding, 0, 60, "holding_0_59", holding_data),
+            make_block(
+                RegisterType::Holding,
+                1000,
+                80,
+                "holding_1000_1079",
+                high_config,
+            ),
+        ];
+        let snap = decode_snapshot(&blocks);
+        assert_eq!(snap.device_type, DeviceType::ACThreePhase);
+        assert_eq!(snap.active_power_rate, 60, "HR 1002 must supersede HR 50");
+        assert_eq!(snap.export_limit_w, 3600);
+        assert_eq!(snap.battery_power_cutoff, 80);
     }
 
     /// The All-in-One discharge limit must come from HR 112, not the AC-config

@@ -28,6 +28,9 @@ import {
   formatForecastXAxisTick,
   forecastExportTitle,
   forecastPlanTitle,
+  chargeTargetReadBack,
+  holdStrategyNote,
+  holdTargetPct,
   forecastStatusMessages,
   forecastXAxisTicks,
   forecastYAxisScale,
@@ -36,13 +39,14 @@ import {
   planAutoApplyTriggerLabel,
   insertChargeStartVertices,
   relabelToStateInstants,
+  minimumSocNote,
   shouldRefetchForecast,
   toBatteryChartData,
   toConsumptionChartData,
   toSolarChartData,
   tomorrowSummary,
 } from '../lib/forecast';
-import type { ForecastData, PlanResponse } from '../lib/forecast';
+import type { ForecastData, PlanResponse, PlanStrategy } from '../lib/forecast';
 import type { InverterSnapshot } from '../lib/types';
 import { useInverterStore } from '../store/useInverterStore';
 
@@ -206,6 +210,7 @@ function forecastChargeSlotMatchesReadback(
     && actual.start_minute === desired.start_minute
     && actual.end_hour === desired.end_hour
     && actual.end_minute === desired.end_minute
+    && chargeTargetReadBack(desired.target_soc, actual.target_soc)
     && snapshot?.enable_charge === true;
 }
 
@@ -298,6 +303,9 @@ export default function ForecastPage() {
   const [minSocSaving, setMinSocSaving] = useState(false);
   const [minSocError, setMinSocError] = useState<string | null>(null);
   const [minSocPct, setMinSocPct] = useState<number>(20);
+  const [planStrategy, setPlanStrategy] = useState<PlanStrategy>('min_soc');
+  const [planStrategySaving, setPlanStrategySaving] = useState(false);
+  const [planStrategyError, setPlanStrategyError] = useState<string | null>(null);
   const [planAutoRefresh, setPlanAutoRefresh] = useState<boolean>(false);
   const [planAutoApply, setPlanAutoApply] = useState<boolean>(false);
   const [planAutoApplyLeadInput, setPlanAutoApplyLeadInput] = useState<string>('30');
@@ -378,6 +386,7 @@ export default function ForecastPage() {
             forecast_plan_auto_refresh?: boolean;
             forecast_plan_auto_apply_enabled?: boolean;
             forecast_plan_auto_apply_lead_minutes?: number;
+            forecast_plan_strategy?: PlanStrategy;
             forecast_charge_efficiency?: number;
             forecast_discharge_efficiency?: number;
           } & Record<string, unknown>;
@@ -391,6 +400,9 @@ export default function ForecastPage() {
       }
       setPlanAutoRefresh(settingsRes.data.forecast_plan_auto_refresh ?? false);
       setPlanAutoApply(settingsRes.data.forecast_plan_auto_apply_enabled ?? false);
+      setPlanStrategy(
+        settingsRes.data.forecast_plan_strategy === 'hold_window' ? 'hold_window' : 'min_soc',
+      );
       if (syncForm) {
         if (settingsRes.data.forecast_min_soc_pct != null) {
           setMinSocPctInput(String(Math.round(settingsRes.data.forecast_min_soc_pct)));
@@ -482,6 +494,24 @@ export default function ForecastPage() {
       setMinSocError(e instanceof Error ? e.message : 'Save failed');
     } finally {
       setMinSocSaving(false);
+    }
+  };
+
+  // Persist the planner strategy (issue #359). The select stays on the
+  // saved value until the save succeeds, so a rejected save never shows a
+  // strategy the planner isn't using.
+  const savePlanStrategy = async (next: PlanStrategy) => {
+    setPlanStrategyError(null);
+    setPlanStrategySaving(true);
+    try {
+      await apiPost('/api/settings', { forecast_plan_strategy: next });
+      setPlanStrategy(next);
+      // Refetch — the plan is recomputed with the new strategy.
+      await load(false);
+    } catch (e) {
+      setPlanStrategyError(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setPlanStrategySaving(false);
     }
   };
 
@@ -643,6 +673,11 @@ export default function ForecastPage() {
   // 23:30–23:59 window landed entirely in the 23:00 bucket's point, so the
   // dashed "if charge enacted" line visibly climbed before the
   // charge-start marker.
+  // Issue #360: explain what a 0% minimum, or one at or below the inverter
+  // reserve, means to the planner beside the input.
+  const reserveNote = minimumSocNote(minSocPct, data.battery?.reserve_soc_pct);
+  const holdNote = planStrategy === 'hold_window' ? holdStrategyNote(snapshot?.device_type) : null;
+  const holdTarget = plan?.recommendation ? holdTargetPct(plan.recommendation) : null;
   const anchoredProjection = data.battery
     ? anchorSeriesAtNow(
         relabelToStateInstants(data.battery.hours),
@@ -779,7 +814,7 @@ export default function ForecastPage() {
   return (
     <div className="flex flex-col gap-3 sm:gap-4 max-w-5xl">
       <div>
-        <h1 className="text-lg font-bold text-text-primary">Forecast</h1>
+        <h1 className="text-lg font-bold text-text-primary">Planner</h1>
         <p
           className="text-xs text-text-secondary"
           data-testid="forecast-attribution"
@@ -890,6 +925,11 @@ export default function ForecastPage() {
               <div className="rounded-lg bg-bg-elevated p-3">
                 <div className="text-[11px] text-text-secondary">Charge</div>
                 <div data-testid="forecast-plan-kwh" className="mt-0.5 text-sm font-semibold text-text-primary">{plan.recommendation.kwh.toFixed(1)} kWh</div>
+                {holdTarget != null && (
+                  <div data-testid="forecast-plan-target" className="text-[11px] text-text-secondary">
+                    to {Math.round(holdTarget)}%, then hold
+                  </div>
+                )}
               </div>
               <div className="rounded-lg bg-bg-elevated p-3">
                 <div className="text-[11px] text-text-secondary">Time</div>
@@ -968,6 +1008,44 @@ export default function ForecastPage() {
               <span aria-hidden className="text-text-secondary transition-transform group-open:rotate-180">⌄</span>
             </summary>
             <div className="border-t border-white/10 px-3 pb-3">
+          {/* Planner strategy (issue #359) — how the overnight charge is
+              sized. Saves immediately and triggers a plan refetch. */}
+          <div className="pt-3 flex flex-col gap-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              <label
+                htmlFor="forecast-plan-strategy"
+                className="text-text-primary text-xs font-sans font-medium"
+              >
+                Charging strategy
+              </label>
+              <select
+                id="forecast-plan-strategy"
+                value={planStrategy}
+                onChange={(e) => void savePlanStrategy(e.target.value as PlanStrategy)}
+                disabled={!data || planStrategySaving}
+                className="bg-bg-surface text-text-primary rounded-lg px-3 py-1.5 text-sm border border-transparent focus:outline-none focus:border-accent disabled:opacity-50"
+                data-testid="forecast-plan-strategy"
+              >
+                <option value="min_soc">Keep a minimum</option>
+                <option value="hold_window">Hold through the cheap window</option>
+              </select>
+              {planStrategyError && (
+                <span data-testid="forecast-plan-strategy-error" className="text-xs text-red-400">
+                  {planStrategyError}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-text-secondary font-sans">
+              {planStrategy === 'hold_window'
+                ? 'Charges to the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house for the rest of the cheap window.'
+                : 'Charges at full rate for just long enough to stay above your minimum, then lets the battery run the house again.'}
+            </p>
+            {holdNote && (
+              <p data-testid="forecast-plan-strategy-note" className="text-[11px] text-amber-300 font-sans">
+                {holdNote}
+              </p>
+            )}
+          </div>
           {/* Planner floor — the planner sizes the overnight charge so the
               battery never dips below this percentage across the forward
               window. Editing saves immediately and triggers a plan refetch. */}
@@ -1005,6 +1083,11 @@ export default function ForecastPage() {
               level until the following cheap period. Lower means less grid import; higher
               keeps more backup in reserve.
             </p>
+            {reserveNote && (
+              <p data-testid="forecast-min-soc-reserve-note" className="text-[11px] text-amber-300 font-sans">
+                {reserveNote}
+              </p>
+            )}
           </div>
           {/* Automatic plan handling — one control for keeping charge slot 1
               in step with the plan: the backend applies the calculated plan

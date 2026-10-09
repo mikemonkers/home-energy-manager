@@ -7,6 +7,10 @@ import {
   truncateSeriesAtNextChargeStart,
   formatForecastXAxisTick,
   forecastPlanTitle,
+  chargeTargetReadBack,
+  holdStrategyNote,
+  holdTargetPct,
+  minimumSocNote,
   planAutoApplyTriggerLabel,
   parseLeadMinutes,
   forecastStatusMessages,
@@ -508,6 +512,23 @@ describe('forecastPlanTitle', () => {
     expect(forecastPlanTitle(charge)).toMatch(/02:00/);
     expect(forecastPlanTitle(charge)).toMatch(/05:00/);
   });
+
+  it('names the target for a hold-through-window plan (issue #359)', () => {
+    const hold: Extract<PlanRecommendation, { kind: 'charge' }> = {
+      ...charge,
+      window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+      kwh: 15,
+      strategy: 'hold_window',
+      slot_target_soc_pct: 75,
+    };
+    expect(forecastPlanTitle(hold)).toBe(
+      'Overnight charge — Tonight 23:00\u201306:00, to 75% then hold',
+    );
+  });
+
+  it('keeps the minimum-SOC headline unchanged', () => {
+    expect(forecastPlanTitle(charge)).toBe('Overnight charge — Tomorrow 02:00\u201305:00, 3.2 kWh');
+  });
 });
 
 describe('shouldRefetchForecast', () => {
@@ -615,5 +636,77 @@ describe('parseLeadMinutes', () => {
     expect(parseLeadMinutes('12.5')).toBeNull();
     expect(parseLeadMinutes('1e2')).toBeNull();
     expect(parseLeadMinutes('abc')).toBeNull();
+  });
+});
+
+describe('minimumSocNote (issue #360)', () => {
+  it('says a 0% minimum never charges from the grid', () => {
+    expect(minimumSocNote(0, 4)).toBe(
+      'At 0% the planner never charges from the grid — the battery runs on solar alone.',
+    );
+    expect(minimumSocNote(0, null)).toMatch(/never charges from the grid/);
+  });
+
+  it('explains a minimum at or below the reserve', () => {
+    expect(minimumSocNote(4, 4)).toBe(
+      'Your inverter keeps a 4% battery reserve, so at this level the planner only charges ' +
+        'when the battery would otherwise run empty and draw from the grid before the next cheap period.',
+    );
+    expect(minimumSocNote(10, 15)).toMatch(/keeps a 15% battery reserve/);
+  });
+
+  it('stays quiet when the minimum is above the reserve', () => {
+    expect(minimumSocNote(20, 4)).toBeNull();
+    expect(minimumSocNote(5, 4)).toBeNull();
+  });
+
+  it('stays quiet without a usable reserve or with the battery paused at 100%', () => {
+    expect(minimumSocNote(4, null)).toBeNull();
+    expect(minimumSocNote(4, undefined)).toBeNull();
+    expect(minimumSocNote(4, Number.NaN)).toBeNull();
+    expect(minimumSocNote(20, 100)).toBeNull();
+  });
+});
+
+describe('hold plans (issue #359 review)', () => {
+  const charge: Extract<PlanRecommendation, { kind: 'charge' }> = {
+    kind: 'charge',
+    window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+    kwh: 15,
+    min_soc_pct: 20,
+    observed_min_soc_pct: 4,
+    after_min_soc_pct: 20,
+    current_soc_pct: 30,
+    rationale: 'why',
+    with_charge_series: [],
+    import_tomorrow_with_charge_kwh: 0,
+    export_tomorrow_with_charge_kwh: 0,
+  };
+
+  it('reads the hold target from a hold plan only', () => {
+    expect(holdTargetPct({ ...charge, strategy: 'hold_window', slot_target_soc_pct: 75 })).toBe(75);
+    expect(holdTargetPct(charge)).toBeNull();
+    // A target without the hold strategy is not presented as a hold.
+    expect(holdTargetPct({ ...charge, slot_target_soc_pct: 75 })).toBeNull();
+    expect(holdTargetPct({ ...charge, strategy: 'hold_window' })).toBeNull();
+    expect(
+      forecastPlanTitle({ ...charge, slot_target_soc_pct: 75 }),
+    ).toBe('Overnight charge — Tonight 23:00\u201306:00, 15.0 kWh');
+  });
+
+  it('only needs a target read back when one below 100 was requested', () => {
+    expect(chargeTargetReadBack(100, 62)).toBe(true);
+    expect(chargeTargetReadBack(75, 75)).toBe(true);
+    expect(chargeTargetReadBack(75, 62)).toBe(false);
+    expect(chargeTargetReadBack(75, undefined)).toBe(false);
+  });
+
+  it('flags the hold as unconfirmed off Gen3', () => {
+    expect(holdStrategyNote('Gen3Hybrid')).toBeNull();
+    expect(holdStrategyNote(undefined)).toBeNull();
+    // Gen 3 Plus takes a different register path from the confirmed Gen 3.
+    for (const device of ['Gen3PlusHybrid', 'Gen2Hybrid', 'ACCoupled', 'AllInOne6kW', 'ThreePhase']) {
+      expect(holdStrategyNote(device)).toMatch(/confirmed on Gen 3/i);
+    }
   });
 });

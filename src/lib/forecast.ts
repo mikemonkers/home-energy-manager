@@ -430,6 +430,9 @@ export function truncateSeriesAtNextChargeStart(
   return series.filter(([timestamp]) => timestamp <= nextStartTimestamp);
 }
 
+/** How the Planner sizes the overnight charge (issue #359). */
+export type PlanStrategy = 'min_soc' | 'hold_window';
+
 export type PlanRecommendation =
   | {
       kind: 'charge';
@@ -462,6 +465,13 @@ export type PlanRecommendation =
       import_tomorrow_with_charge_kwh: number;
       /** Tomorrow's grid export under the recommended plan, kWh. */
       export_tomorrow_with_charge_kwh: number;
+      /** `hold_window` when the slot charges to a target and then holds
+       *  the battery for the rest of the cheap window (issue #359). Absent
+       *  for the minimum-SOC planner. */
+      strategy?: PlanStrategy;
+      /** The hold slot's target SOC, %. Absent for the minimum-SOC planner,
+       *  whose slot always targets 100%. */
+      slot_target_soc_pct?: number;
     }
   | {
       kind: 'no_charge_needed';
@@ -517,10 +527,68 @@ export type PlanResponse = {
   export?: ExportAdvice | null;
 };
 
+/** Note shown under the Minimum battery level input explaining what a
+ *  minimum of 0, or one at or below the inverter's reserve, means to the
+ *  planner (issue #360). */
+export function minimumSocNote(
+  minSocPct: number,
+  reserveSocPct: number | null | undefined,
+): string | null {
+  if (minSocPct <= 0) {
+    return 'At 0% the planner never charges from the grid — the battery runs on solar alone.';
+  }
+  if (reserveSocPct == null || !Number.isFinite(reserveSocPct) || reserveSocPct >= 100) {
+    return null;
+  }
+  if (minSocPct > reserveSocPct) return null;
+  return (
+    `Your inverter keeps a ${Math.round(reserveSocPct)}% battery reserve, so at this level the planner only charges ` +
+    'when the battery would otherwise run empty and draw from the grid before the next cheap period.'
+  );
+}
+
+/** The slot target of a hold-through-window plan, % (issue #359), or null
+ *  for any other plan. Keyed on the strategy: a target alone doesn't make
+ *  a plan a hold. */
+export function holdTargetPct(rec: PlanRecommendation): number | null {
+  if (rec.kind !== 'charge' || rec.strategy !== 'hold_window') return null;
+  return rec.slot_target_soc_pct ?? null;
+}
+
+/** Whether a read-back slot target satisfies the requested one. A request
+ *  of 100 means "no limit", which inverters report in different ways, so
+ *  only an explicit target below 100 has to be read back (issue #359). */
+export function chargeTargetReadBack(
+  desiredTargetSoc: number,
+  actualTargetSoc: number | undefined,
+): boolean {
+  return desiredTargetSoc >= 100 || actualTargetSoc === desiredTargetSoc;
+}
+
+/** Device types where charging to a target and then holding it through
+ *  the slot has been confirmed on real hardware (issue #359). Gen 3 Plus
+ *  writes its target through a different, flag-gated path, so it isn't
+ *  covered by the Gen 3 confirmation. */
+const HOLD_CONFIRMED_DEVICES = new Set(['Gen3Hybrid']);
+
+/** Caveat under the strategy picker on models where the hold behaviour is
+ *  unconfirmed, or null when it's confirmed or the model isn't known yet. */
+export function holdStrategyNote(deviceType: string | undefined): string | null {
+  if (deviceType == null || HOLD_CONFIRMED_DEVICES.has(deviceType)) return null;
+  return (
+    'Holding the battery at its target has only been confirmed on Gen 3 hybrids so far. ' +
+    'On the first night, check the battery stays flat once it reaches the target.'
+  );
+}
+
 /** Short headline for the Plan card. Degrades gracefully per kind. */
 export function forecastPlanTitle(rec: PlanRecommendation): string {
   if (rec.kind === 'charge') {
     const when = rec.window.tomorrow ? 'Tomorrow' : 'Tonight';
+    const holdTarget = holdTargetPct(rec);
+    if (holdTarget != null) {
+      return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, to ${Math.round(holdTarget)}% then hold`;
+    }
     return `Overnight charge — ${when} ${rec.window.start}\u2013${rec.window.end}, ${rec.kwh.toFixed(1)} kWh`;
   }
   if (rec.kind === 'no_charge_needed') {

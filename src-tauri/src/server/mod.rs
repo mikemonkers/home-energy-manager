@@ -94,6 +94,11 @@ fn create_router_at(
             Json(json!({ "ok": false, "error": "Not found" })),
         )
     }
+    // Permissive CORS policy: bind to 0.0.0.0 and allow all origins,
+    // methods, and headers for maximum LAN compatibility (reverse proxies,
+    // containers, Tailscale, etc.). This is a deliberate design decision
+    // per AGENTS.md (General rules) — do not restrict without explicit
+    // instruction.
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -957,14 +962,7 @@ mod tests {
 
     impl TempDist {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "hem-cache-test-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let path = crate::test_util::make_unique_test_dir("cache-test");
             fs::create_dir_all(path.join("assets")).unwrap();
             fs::write(path.join("index.html"), "<!doctype html>").unwrap();
             fs::write(

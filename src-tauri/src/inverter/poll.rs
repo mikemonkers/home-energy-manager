@@ -57,10 +57,9 @@ use crate::server::logs::LogRing;
 use crate::server::ws::ConnectedClients;
 use tokio::sync::{broadcast, oneshot, Mutex, Notify};
 
-use crate::alerts::AlertType;
 use crate::history::HistoryDb;
 use crate::inverter::decoder::decode_snapshot_with_solar_position;
-use crate::inverter::encoder::{ControlCommand, RegisterWrite, WriteOutcome};
+use crate::inverter::encoder::{RegisterWrite, WriteOutcome};
 use crate::inverter::model::{
     BatteryMode, DeviceType, InverterSnapshot, ScheduleSlot, SolarArraySource, SolarArraySummary,
 };
@@ -75,7 +74,6 @@ use crate::inverter::solar_position::calculate_solar_position;
 use crate::inverter::state_machines::{
     build_timed_export_disable_writes, check_adaptive_charge, check_auto_winter_with_outcome,
     check_discharge_floor, check_load_limiter_at, check_temperature_limiter_after_automation,
-    clear_cosy_slot_registers, cosy_slot_register_writes, persist_cosy_active,
     should_repair_timed_export, write_registers_to_inverter, AgileSlotAction,
     AutoWinterWriteOutcome, DischargeControlArbiter, DischargeControlOwner,
 };
@@ -86,7 +84,6 @@ pub use crate::inverter::state_machines::{
 };
 use crate::modbus::client::GatewayPollScope;
 use crate::modbus::client::ModbusClient;
-use crate::modbus::registers::{HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET};
 
 // ---------------------------------------------------------------------------
 // Connection state
@@ -253,6 +250,13 @@ pub struct ForceChargeRevert {
     pub enable_discharge: bool,
     /// The charge target SOC (HR 116 / HR 1111) before force charge.
     pub target_soc: u8,
+    /// Charge slot 1's own target SOC (HR 242) before force charge, on
+    /// 10-slot models only. The inverter stops at the lower of this and the
+    /// global target, so Force Charge raises it to 100 and Stop puts it back.
+    /// `None` (older baselines, other models, or an unset/invalid register)
+    /// means no restore write is emitted.
+    #[serde(default)]
+    pub charge_slot_1_target_soc: Option<u8>,
     /// Battery power mode (HR 27) before force charge: 0 = export, 1 = eco.
     /// `ForceCharge` start writes `HR_BATTERY_POWER_MODE=1`, so on stop we
     /// must restore the pre-value (e.g. 0 for users in Max-Power/Timed
@@ -816,15 +820,11 @@ impl AppState {
 // Poll-cycle decision helpers
 // ---------------------------------------------------------------------------
 
-fn valid_lv_battery_response(data: &[u16]) -> bool {
+pub(crate) fn valid_lv_battery_response(data: &[u16]) -> bool {
     let soc = data.get(100 - 60).copied().unwrap_or(0);
     // SOC 0 is a valid BMS reading at the battery cutoff; the BMS identity
     // and voltage/capacity checks below distinguish an absent module.
     (0..=100).contains(&soc) && validate_battery_bms(data)
-}
-
-fn request_cosy_writes(writes: &[RegisterWrite], arbiter: &mut DischargeControlArbiter) -> bool {
-    !writes.is_empty() && arbiter.request(DischargeControlOwner::TimedCharge)
 }
 
 /// Feed one battery BMS-read outcome into the alert debounce and fire the
@@ -837,7 +837,7 @@ fn request_cosy_writes(writes: &[RegisterWrite], arbiter: &mut DischargeControlA
 /// consecutive failures before the lost-notification fires, and the
 /// restored-notification fires on the first successful read after a
 /// confirmed loss.
-async fn track_battery_conn(
+pub(crate) async fn track_battery_conn(
     state: &Arc<AppState>,
     battery_number: usize,
     slave_addr: u8,
@@ -1000,7 +1000,7 @@ fn merge_external_meters(
     merged
 }
 
-fn record_external_meter_failure(
+pub(crate) fn record_external_meter_failure(
     failures: &mut std::collections::BTreeMap<u8, u8>,
     cached: &mut std::collections::BTreeMap<u8, crate::inverter::model::MeterData>,
     address: u8,
@@ -1029,24 +1029,24 @@ const HV_PROBE_RETRY_INTERVAL_CYCLES: u8 = 5;
 
 /// BCU device addresses are defined as 0x70–0x8F by the reference protocol.
 /// Never let a corrupt BMS count make us probe outside that supported range.
-const HV_MAX_BCU_COUNT: u16 = 0x8F - 0x70 + 1;
+pub(crate) const HV_MAX_BCU_COUNT: u16 = 0x8F - 0x70 + 1;
 
 /// Physical BCU addresses are contiguous from 0x70. A short run of absent
 /// stacks therefore ends discovery early when a corrupt count overstates the
 /// number of stacks, while still allowing normal multi-stack systems through.
 const HV_MAX_CONSECUTIVE_MISSING_BCU_PROBES: u8 = 3;
 
-fn hv_bcu_probe_offsets(raw_count: u16) -> Vec<u8> {
+pub(crate) fn hv_bcu_probe_offsets(raw_count: u16) -> Vec<u8> {
     (0..raw_count.min(HV_MAX_BCU_COUNT))
         .map(|offset| offset as u8)
         .collect()
 }
 
-fn hv_bcu_probe_should_stop(consecutive_missing: u8) -> bool {
+pub(crate) fn hv_bcu_probe_should_stop(consecutive_missing: u8) -> bool {
     consecutive_missing >= HV_MAX_CONSECUTIVE_MISSING_BCU_PROBES
 }
 
-fn should_probe_hv_stacks(
+pub(crate) fn should_probe_hv_stacks(
     known_device_type: Option<DeviceType>,
     hv_probe_done: bool,
     hv_probe_attempted: bool,
@@ -1064,7 +1064,7 @@ fn should_probe_hv_stacks(
 
 /// Convert one HV discovery result into the existing one-shot completion flag.
 /// Kept separate so retry semantics can be pinned by a focused unit test.
-fn hv_probe_completed(detected_stacks: &[(u8, u8)]) -> bool {
+pub(crate) fn hv_probe_completed(detected_stacks: &[(u8, u8)]) -> bool {
     !detected_stacks.is_empty()
 }
 
@@ -1103,6 +1103,753 @@ fn lock_snapshot_device_identity(
         };
     }
 }
+/// What one poll's decoded HR(0)/ARM firmware says about the model, compared
+/// with what this session has already confirmed. Drives detection logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectionObservation {
+    /// First poll that mapped to a real model.
+    Identified,
+    /// Nothing confirmed yet and the decoded code is unknown (or HR(0) read 0).
+    Unidentified { raw_dtc: u16 },
+    /// Matches the confirmed model and code.
+    Stable,
+    /// Decoded type differs from the confirmed one (typically corrupt ARM FW
+    /// flipping a 0x20xx hybrid generation). The confirmed type is kept.
+    TypeDrift,
+    /// Same type, different raw HR(0) code (e.g. the 0x81xx rating digit).
+    /// The confirmed code is kept.
+    CodeDrift,
+}
+
+fn observe_model_detection(
+    confirmed: Option<(DeviceType, &str)>,
+    decoded_type: DeviceType,
+    decoded_code: &str,
+) -> DetectionObservation {
+    match confirmed {
+        None => match decoded_type {
+            DeviceType::Unknown(_) => DetectionObservation::Unidentified {
+                raw_dtc: u16::from_str_radix(decoded_code, 16).unwrap_or(0),
+            },
+            _ => DetectionObservation::Identified,
+        },
+        Some((known_type, _)) if known_type != decoded_type => DetectionObservation::TypeDrift,
+        Some((_, known_code)) if !known_code.eq_ignore_ascii_case(decoded_code) => {
+            DetectionObservation::CodeDrift
+        }
+        Some(_) => DetectionObservation::Stable,
+    }
+}
+
+/// The captured baseline of a bounded force action: when its slot closes and
+/// which inverter it describes.
+struct ForceBaselineIdentity<'a> {
+    slot_end_ms: Option<i64>,
+    device_type: DeviceType,
+    inverter_serial: &'a str,
+}
+
+/// What the poll loop does about a bounded force action whose slot may have
+/// closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForceAutoRevertDecision {
+    /// No baseline, no slot end, the slot is still open, or a restoration is
+    /// already awaiting confirmation (failed attempts are re-queued by
+    /// `retry_stalled_force_restorations` after a quiet interval, not here).
+    NotDue,
+    /// The slot closed but a higher-priority owner holds the discharge-control
+    /// domain this cycle.
+    DeferredByOwner,
+    /// The baseline provably belongs to a different inverter: release it
+    /// rather than write it onto hardware it never described.
+    ReleaseForeignBaseline,
+    /// The baseline's identity cannot be verified this cycle: keep it and try
+    /// again on a later one.
+    WithholdUnidentifiable,
+    /// Write the captured baseline back.
+    Restore,
+}
+
+/// Decide whether a bounded Force Charge / Force Discharge should now be
+/// reverted. The arbiter request is made only once a revert is actually due
+/// (it records the request for the rest of the cycle), and its outcome comes
+/// before the identity check, exactly as the two auto-revert blocks always did.
+fn decide_force_auto_revert(
+    baseline: Option<ForceBaselineIdentity<'_>>,
+    now_ms: i64,
+    restoration_pending: bool,
+    arbiter: &mut DischargeControlArbiter,
+    snapshot: &InverterSnapshot,
+) -> ForceAutoRevertDecision {
+    let Some(baseline) = baseline else {
+        return ForceAutoRevertDecision::NotDue;
+    };
+    let expired = baseline.slot_end_ms.is_some_and(|end| now_ms >= end);
+    if !expired || restoration_pending {
+        return ForceAutoRevertDecision::NotDue;
+    }
+    if !arbiter.request(DischargeControlOwner::ManualForce) {
+        return ForceAutoRevertDecision::DeferredByOwner;
+    }
+    if force_baseline_matches_inverter(
+        Some(snapshot),
+        baseline.device_type,
+        baseline.inverter_serial,
+    ) {
+        ForceAutoRevertDecision::Restore
+    } else if force_baseline_belongs_to_other_inverter(
+        Some(snapshot),
+        baseline.device_type,
+        baseline.inverter_serial,
+    ) {
+        ForceAutoRevertDecision::ReleaseForeignBaseline
+    } else {
+        ForceAutoRevertDecision::WithholdUnidentifiable
+    }
+}
+
+/// Force Charge auto-revert.
+///
+/// A bounded external Force Charge also owns a temporary schedule window. Once
+/// it closes, restore the captured charge flags, target, mode, and schedule
+/// using the same durable ownership/readback path as an explicit Stop.
+async fn run_force_charge_auto_revert(
+    state: &Arc<AppState>,
+    client: &mut ModbusClient,
+    snapshot: &InverterSnapshot,
+    arbiter: &mut DischargeControlArbiter,
+    write_gap: Duration,
+) {
+    let _force_action_guard = state.force_action_lock.lock().await;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let revert = state.force_charge_revert.lock().await.clone();
+    let restoration_pending = state.force_charge_restoration.lock().await.is_some();
+    let decision = decide_force_auto_revert(
+        revert.as_ref().map(|r| ForceBaselineIdentity {
+            slot_end_ms: r.force_charge_slot_end_ms,
+            device_type: r.device_type,
+            inverter_serial: &r.inverter_serial,
+        }),
+        now_ms,
+        restoration_pending,
+        arbiter,
+        snapshot,
+    );
+    let Some(revert) = revert else {
+        return;
+    };
+    match decision {
+        ForceAutoRevertDecision::NotDue => {}
+        ForceAutoRevertDecision::DeferredByOwner => {
+            tracing::debug!(
+                owner = ?arbiter.selected_owner(),
+                "Force Charge auto-revert deferred by a higher-priority owner"
+            );
+        }
+        ForceAutoRevertDecision::ReleaseForeignBaseline => {
+            tracing::warn!(
+                captured = %revert.inverter_serial,
+                "Force Charge auto-revert withheld: the captured inverter is not connected"
+            );
+            state.force_charge_revert.lock().await.take();
+            if let Err(error) = state.command_ledger.complete_restoration("force_charge") {
+                tracing::warn!("Failed to release Force Charge ownership: {error}");
+            }
+        }
+        ForceAutoRevertDecision::WithholdUnidentifiable => {
+            tracing::debug!(
+                "Force Charge auto-revert withheld: the captured inverter is not identifiable"
+            );
+        }
+        ForceAutoRevertDecision::Restore => {
+            *state.force_charge_restoration.lock().await = Some(ForceRestorationRequest {
+                requested_at_ms: now_ms,
+                device_type: snapshot.device_type,
+                inverter_serial: snapshot.inverter_serial.clone(),
+                firmware_version: snapshot.firmware_version.clone(),
+            });
+            if let Err(error) = state
+                .command_ledger
+                .hold_restoration_ownership("force_charge")
+            {
+                tracing::warn!("Could not hold Force Charge restoration ownership: {error}");
+            }
+            let writes =
+                crate::server::api::build_force_charge_stop_writes(snapshot.device_type, &revert);
+            for write in writes {
+                match client.write_register(write.address, write.value).await {
+                    Ok(()) => tracing::info!(
+                        "Force Charge auto-revert: wrote reg {} = {}",
+                        write.address,
+                        write.value
+                    ),
+                    Err(error) => tracing::error!(
+                        "Force Charge auto-revert: write reg {} failed: {error}",
+                        write.address
+                    ),
+                }
+                tokio::time::sleep(write_gap).await;
+            }
+        }
+    }
+}
+
+/// Force Discharge auto-revert (issue #129).
+///
+/// When Force Discharge is started with a bounded duration
+/// (`POST /api/control/force-discharge {"minutes": N}`), the API handler
+/// records the slot's end time in
+/// `force_discharge_revert.force_discharge_slot_end_ms`. When that time passes
+/// the inverter stops discharging (the slot window has closed) but the
+/// force-discharge flags remain set: HR 27 = 0 (export), HR 59 = 1
+/// (enable_discharge), HR 96 = 0 (charge off), HR 20 = 0 (charge target off).
+/// The battery is effectively paused - it won't charge from solar and won't
+/// discharge. Without this auto-revert, the user must manually click Eco.
+///
+/// Each poll cycle checks whether the slot has expired. If so the revert is
+/// kept (retaining ownership so a subsequent explicit Stop still retries) and
+/// the restoration writes go out over the live Modbus client, as for the
+/// explicit Stop button. Only the FIRST attempt is initiated here; failed
+/// attempts are re-queued by `retry_stalled_force_restorations` after a quiet
+/// interval. Re-initiating every cycle would advance the freshness barrier
+/// past every snapshot and confirmation could never succeed.
+///
+/// Returns the new value for the caller's `discharge_control_may_override_pause`
+/// when this step decides it (`Some(false)` when the baseline was withheld or
+/// released, `Some(true)` when restoration writes were sent), else `None`.
+async fn run_force_discharge_auto_revert(
+    state: &Arc<AppState>,
+    client: &mut ModbusClient,
+    snapshot: &InverterSnapshot,
+    arbiter: &mut DischargeControlArbiter,
+    write_gap: Duration,
+) -> Option<bool> {
+    let _force_action_guard = state.force_action_lock.lock().await;
+    let now_ms = chrono::Local::now().timestamp_millis();
+    let revert = state.force_discharge_revert.lock().await.clone();
+    let restoration_pending = state.force_discharge_restoration.lock().await.is_some();
+    // Ownership is retained until a causally newer snapshot confirms every
+    // restoration write, so failed writes retry on a later poll instead of
+    // losing the baseline permanently. The identity rule is the explicit
+    // Stop's: a provably-foreign baseline is released instead of being written
+    // onto hardware it never described; an unverifiable one is withheld.
+    let decision = decide_force_auto_revert(
+        revert.as_ref().map(|r| ForceBaselineIdentity {
+            slot_end_ms: r.force_discharge_slot_end_ms,
+            device_type: r.device_type,
+            inverter_serial: &r.inverter_serial,
+        }),
+        now_ms,
+        restoration_pending,
+        arbiter,
+        snapshot,
+    );
+    let revert = revert?;
+    match decision {
+        ForceAutoRevertDecision::NotDue => None,
+        ForceAutoRevertDecision::DeferredByOwner => {
+            tracing::debug!(
+                owner = ?arbiter.selected_owner(),
+                "Force discharge auto-revert deferred by a higher-priority owner"
+            );
+            None
+        }
+        ForceAutoRevertDecision::ReleaseForeignBaseline => {
+            tracing::warn!(
+                captured = %revert.inverter_serial,
+                "Force discharge auto-revert withheld: the captured inverter is not connected"
+            );
+            state.force_discharge_revert.lock().await.take();
+            if let Err(error) = state.command_ledger.complete_restoration("force_discharge") {
+                tracing::warn!("Failed to release Force Discharge ownership: {error}");
+            }
+            Some(false)
+        }
+        ForceAutoRevertDecision::WithholdUnidentifiable => {
+            tracing::debug!(
+                "Force discharge auto-revert withheld: the captured inverter is not identifiable"
+            );
+            Some(false)
+        }
+        ForceAutoRevertDecision::Restore => {
+            *state.force_discharge_restoration.lock().await = Some(ForceRestorationRequest {
+                requested_at_ms: now_ms,
+                device_type: snapshot.device_type,
+                inverter_serial: snapshot.inverter_serial.clone(),
+                firmware_version: snapshot.firmware_version.clone(),
+            });
+            let writes = crate::server::api::build_force_discharge_stop_writes(
+                snapshot.device_type,
+                &snapshot.firmware_version,
+                &revert,
+            );
+            if writes.is_empty() {
+                return None;
+            }
+            for w in &writes {
+                match client.write_register(w.address, w.value).await {
+                    Ok(()) => tracing::info!(
+                        "Force discharge auto-revert: wrote reg {} = {}",
+                        w.address,
+                        w.value
+                    ),
+                    Err(e) => tracing::error!(
+                        "Force discharge auto-revert: write reg {} failed: {e}",
+                        w.address
+                    ),
+                }
+                tokio::time::sleep(write_gap).await;
+            }
+            Some(true)
+        }
+    }
+}
+
+/// Which optional register blocks this cycle actually read. Optional blocks
+/// are polled by device type and can individually time out, so the values they
+/// feed must be carried forward from the previous snapshot when absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OptionalBlocksPresent {
+    ac_config: bool,
+    extended_slots: bool,
+    three_phase_high_config: bool,
+    three_phase_config: bool,
+    three_phase_fault: bool,
+    ems_plant: bool,
+    gateway_discharge_detail: bool,
+    gateway_serial: bool,
+}
+
+impl OptionalBlocksPresent {
+    fn from_blocks(blocks: &[crate::modbus::client::BlockRead]) -> Self {
+        use crate::modbus::registers as reg;
+        let has = |expected: &reg::RegisterBlock| {
+            blocks.iter().any(|b| {
+                b.block.register_type == expected.register_type
+                    && b.block.start == expected.start
+                    && b.block.count == expected.count
+            })
+        };
+        Self {
+            ac_config: has(&reg::AC_CONFIG_BLOCK),
+            extended_slots: has(&reg::EXTENDED_SLOTS_BLOCK),
+            three_phase_high_config: has(&reg::THREE_PHASE_HIGH_CONFIG_BLOCK),
+            three_phase_config: has(&reg::THREE_PHASE_CONFIG_BLOCK),
+            three_phase_fault: has(&reg::THREE_PHASE_INPUT_BLOCK_6),
+            ems_plant: has(&reg::EMS_PLANT_HOLDING_BLOCK),
+            gateway_discharge_detail: has(&reg::GATEWAY_INPUT_BLOCK_3),
+            gateway_serial: has(&reg::GATEWAY_INPUT_BLOCK_5),
+        }
+    }
+}
+
+/// The 60-register blocks that match the dongle memory-leak fingerprint (the
+/// dongle served its own TCP memory instead of register values).
+fn suspicious_blocks(
+    blocks: &[crate::modbus::client::BlockRead],
+) -> impl Iterator<Item = &crate::modbus::client::BlockRead> {
+    blocks
+        .iter()
+        .filter(|b| b.block.start % 60 == 0 && b.block.count == 60 && is_block_suspicious(&b.data))
+}
+
+/// Keep the previous values for everything an absent optional block would have
+/// supplied, so a single skipped read does not flash zeros in the UI.
+fn carry_forward_absent_blocks(
+    snapshot: &mut InverterSnapshot,
+    prev: Option<&InverterSnapshot>,
+    present: &OptionalBlocksPresent,
+) {
+    let _ = carry_forward_optional_block_values(
+        snapshot,
+        prev,
+        present.ac_config,
+        present.extended_slots,
+        present.three_phase_config,
+        present.ems_plant,
+    );
+    let _ = carry_forward_three_phase_high_config_values(
+        snapshot,
+        prev,
+        present.three_phase_high_config,
+    );
+    let _ = carry_forward_three_phase_fault_block_values(snapshot, prev, present.three_phase_fault);
+    if snapshot.device_type == DeviceType::Gateway {
+        if let Some(p) = prev {
+            if !present.gateway_discharge_detail {
+                snapshot.per_aio_discharge_today_kwh = p.per_aio_discharge_today_kwh;
+            }
+            if !present.gateway_serial {
+                snapshot.per_aio_serial = p.per_aio_serial.clone();
+            }
+        }
+    }
+}
+
+/// What the poll loop should do about the model once it has been identified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelDetectionPlan {
+    /// Read slave address the detected model operates on.
+    preferred_slave: u8,
+    /// That differs from the address currently in use.
+    slave_changed: bool,
+    /// Re-poll straight away with the model-specific blocks.
+    should_repoll: bool,
+    /// Three-phase models read 15+ blocks per cycle and need a longer
+    /// inter-request delay so the dongle's slow processor keeps up.
+    longer_inter_request_delay: bool,
+    /// The model polls at least one optional block on a fast cycle.
+    has_model_specific_blocks: bool,
+}
+
+fn plan_model_detection(device_type: DeviceType, current_slave: u8) -> ModelDetectionPlan {
+    let preferred_slave = device_type.preferred_read_slave_address();
+    ModelDetectionPlan {
+        preferred_slave,
+        slave_changed: preferred_slave != current_slave,
+        should_repoll: should_repoll_after_model_detection(device_type, current_slave),
+        longer_inter_request_delay: device_type.needs_three_phase_input_blocks(),
+        has_model_specific_blocks: !crate::modbus::client::preview_model_specific_blocks(
+            &device_type,
+            GatewayPollScope::Fast,
+        )
+        .is_empty(),
+    }
+}
+
+/// Whether [`ModelIdentity::identify`] wants the cycle repeated at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentifyOutcome {
+    /// The model was just identified and needs a different slave address or
+    /// extra blocks: re-read immediately rather than a full interval later.
+    RepollNow,
+    Continue,
+}
+
+/// The model this session has confirmed, and what has already been reported
+/// about it. Per connection: a reconnect starts from scratch.
+#[derive(Debug, Default)]
+struct ModelIdentity {
+    device_type: Option<DeviceType>,
+    /// Raw HR(0) code (hex) the model was confirmed from. The exact 0x81xx
+    /// code carries the 6/8/10 kW rating, so it is locked along with the type.
+    code: Option<String>,
+    /// Unidentified HR(0) values already reported, so a persistently unknown
+    /// model - or one that flaps between codes - logs once per value rather
+    /// than on every poll or transition.
+    reported_unidentified: std::collections::BTreeSet<u16>,
+}
+
+impl ModelIdentity {
+    /// Confirmed type and code, once both are known.
+    fn confirmed(&self) -> Option<(DeviceType, &str)> {
+        self.device_type.zip(self.code.as_deref())
+    }
+
+    /// Run once per decoded cycle: log what detection saw, confirm a newly
+    /// identified model (switching slave address / delay on `client` as the
+    /// model needs), and lock the snapshot to the confirmed type so a corrupt
+    /// register can't flip the displayed model on a later poll.
+    fn identify(
+        &mut self,
+        snapshot: &mut InverterSnapshot,
+        client: &mut ModbusClient,
+    ) -> IdentifyOutcome {
+        let observation = observe_model_detection(
+            self.confirmed(),
+            snapshot.device_type,
+            &snapshot.device_type_code,
+        );
+        let observed_dtc = u16::from_str_radix(&snapshot.device_type_code, 16).unwrap_or(0);
+        let observed_arm_fw: u16 = snapshot.firmware_version.parse().unwrap_or(0);
+        match observation {
+            DetectionObservation::Identified => {
+                let trace = DeviceType::detection_trace(observed_dtc, observed_arm_fw);
+                tracing::info!(
+                    raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
+                    firmware = %snapshot.firmware_version,
+                    dsp_fw = %snapshot.dsp_firmware_version,
+                    serial = %snapshot.inverter_serial,
+                    matched = ?trace.matched,
+                    base_type = ?trace.base,
+                    arm_refinement_applicable = trace.arm_refinement_applicable,
+                    refined_type = ?trace.refined,
+                    slave = client.slave_address(),
+                    "Model detection: HR(0)/ARM firmware decoded"
+                );
+                if trace.matched == crate::inverter::model::DtcMatch::PrefixFallback {
+                    tracing::warn!(
+                        raw_dtc = %format_args!("{:#06X}", trace.raw_dtc),
+                        device_type = ?trace.refined,
+                        "Model detection: HR(0) is not a known code - classified by family prefix only"
+                    );
+                }
+                return self.confirm(snapshot, client);
+            }
+            DetectionObservation::Unidentified { raw_dtc } => {
+                if self.reported_unidentified.insert(raw_dtc) {
+                    if raw_dtc == 0 {
+                        tracing::debug!(
+                            slave = client.slave_address(),
+                            "Model detection: HR(0) read as 0x0000 (empty or failed read) - model not identified yet"
+                        );
+                    } else {
+                        tracing::warn!(
+                            raw_dtc = %format_args!("{:#06X}", raw_dtc),
+                            firmware = %snapshot.firmware_version,
+                            serial = %snapshot.inverter_serial,
+                            slave = client.slave_address(),
+                            "Model detection: unrecognised HR(0) device type code - model-aware polling stays off (corrupt read, or an unsupported product)"
+                        );
+                    }
+                }
+            }
+            DetectionObservation::TypeDrift => {
+                tracing::debug!(
+                    confirmed = ?self.device_type,
+                    confirmed_code = ?self.code,
+                    decoded = ?snapshot.device_type,
+                    raw_dtc = %format_args!("{:#06X}", observed_dtc),
+                    arm_fw = observed_arm_fw,
+                    "Model detection: decoded type differs from confirmed model - keeping confirmed value"
+                );
+            }
+            DetectionObservation::CodeDrift => {
+                tracing::debug!(
+                    confirmed_code = ?self.code,
+                    raw_dtc = %format_args!("{:#06X}", observed_dtc),
+                    "Model detection: HR(0) code differs from confirmed code - keeping confirmed value"
+                );
+            }
+            DetectionObservation::Stable => {}
+        }
+
+        // Lock the device type to prevent dongle register corruption
+        // (especially HR(21) arm_firmware_version) from flipping the displayed
+        // model on a subsequent poll. Once identified, the snapshot always
+        // carries the cached type - the decoder still runs for the raw DTC and
+        // firmware string, but the refinement result is ignored in favour of
+        // the known-good detection.
+        if let Some(cached_type) = self.device_type {
+            if snapshot.device_type != cached_type {
+                snapshot.device_type = cached_type;
+                snapshot.device_type_display = cached_type.display_name().to_string();
+            }
+        }
+        IdentifyOutcome::Continue
+    }
+
+    /// First poll that mapped to a real model: announce the poll plan, apply
+    /// the slave address / delay the model needs, and remember it.
+    fn confirm(
+        &mut self,
+        snapshot: &InverterSnapshot,
+        client: &mut ModbusClient,
+    ) -> IdentifyOutcome {
+        // Name the actual blocks the model-aware poll will read on the next
+        // cycle. For a Gateway this is the lean HR-only standard set + the full
+        // IR 1600-1859 bank + EMS plant holding; `extra_poll_blocks()` is empty
+        // for Gateway (its blocks are added in
+        // `model_specific_blocks_in_poll_order`), so the old `extra_blocks=[]`
+        // log line misled users into thinking detection hadn't changed the
+        // poll plan.
+        let standard_blocks_next: Vec<&'static str> =
+            crate::modbus::client::preview_standard_blocks(Some(&snapshot.device_type), None)
+                .iter()
+                .map(|b| b.name)
+                .collect();
+        let model_specific_blocks_next: Vec<&'static str> =
+            crate::modbus::client::preview_model_specific_blocks(
+                &snapshot.device_type,
+                GatewayPollScope::Detail,
+            )
+            .iter()
+            .map(|b| b.name)
+            .collect();
+        tracing::info!(
+            device_type = ?snapshot.device_type,
+            standard_blocks = ?standard_blocks_next,
+            model_specific_blocks = ?model_specific_blocks_next,
+            "Device model identified - enabling model-aware polling"
+        );
+
+        let plan = plan_model_detection(snapshot.device_type, client.slave_address());
+        if plan.slave_changed {
+            tracing::info!(
+                from = client.slave_address(),
+                to = plan.preferred_slave,
+                "Switching operational read slave address for detected model"
+            );
+            client.set_slave(plan.preferred_slave);
+        }
+        if plan.longer_inter_request_delay {
+            tracing::info!(
+                "Three-phase model detected - increasing inter-request delay to {}ms",
+                ModbusClient::INTER_REQUEST_DELAY_3PH.as_millis()
+            );
+            client.set_inter_request_delay(ModbusClient::INTER_REQUEST_DELAY_3PH);
+        }
+
+        self.device_type = Some(snapshot.device_type);
+        self.code = Some(snapshot.device_type_code.clone());
+
+        // The first detection poll is intentionally minimal: it discovers the
+        // model, then immediately re-polls with the model-specific slave
+        // address and optional blocks (AC HR300-359, Gen3 HR240-299, Gateway
+        // IR 1600-1859). Without this, model-specific registers can lag a full
+        // poll interval behind detection.
+        if plan.should_repoll {
+            tracing::info!(
+                slave_changed = plan.slave_changed,
+                has_model_specific_blocks = plan.has_model_specific_blocks,
+                "Model-specific poll enabled - re-reading immediately"
+            );
+            IdentifyOutcome::RepollNow
+        } else {
+            IdentifyOutcome::Continue
+        }
+    }
+}
+
+/// After this many consecutive cycles whose blocks match the dongle
+/// memory-leak fingerprint, the dongle's app processor is assumed stuck and a
+/// fresh TCP session is forced.
+const MAX_SUSPICIOUS_CYCLES: u8 = 6;
+
+/// What one poll cycle produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CycleOutcome {
+    /// The read completed (a snapshot was published, or the cycle was
+    /// deliberately skipped as fingerprint-suspicious).
+    poll_ok: bool,
+    /// Sanitization changed the data, so the cycle should be repeated at once.
+    sanitized: bool,
+    /// The TCP session is dead.
+    connection_lost: bool,
+    /// A block matched the dongle memory-leak fingerprint; nothing was
+    /// decoded or broadcast.
+    block_suspicious: bool,
+}
+
+impl CycleOutcome {
+    const FINGERPRINT: Self = Self {
+        poll_ok: true,
+        sanitized: true,
+        connection_lost: false,
+        block_suspicious: true,
+    };
+    const CONNECTION_LOST: Self = Self {
+        poll_ok: false,
+        sanitized: false,
+        connection_lost: true,
+        block_suspicious: false,
+    };
+    const TRANSIENT_FAILURE: Self = Self {
+        poll_ok: false,
+        sanitized: false,
+        connection_lost: false,
+        block_suspicious: false,
+    };
+
+    const fn published(sanitized: bool) -> Self {
+        Self {
+            poll_ok: true,
+            sanitized,
+            connection_lost: false,
+            block_suspicious: false,
+        }
+    }
+}
+
+/// What the poll loop does after a cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CycleStep {
+    /// Leave the inner loop and reconnect.
+    Reconnect,
+    /// A fingerprint cycle: re-read immediately, nothing was published.
+    RepollSuspicious,
+    /// A transient failure: back off briefly, then try again.
+    RetryAfterBackoff,
+    /// Sanitization corrected the data: re-read immediately.
+    RepollSanitized,
+    /// A clean cycle: sleep for the configured interval.
+    WaitForInterval,
+}
+
+/// Decide what follows a poll cycle, updating the fingerprint streak and the
+/// reconnect controller. A fingerprint cycle never decoded real register data,
+/// so it must not reset the streak (Review H2: it used to, which made the
+/// forced reconnect unreachable).
+fn decide_after_cycle(
+    outcome: CycleOutcome,
+    consecutive_suspicious: &mut u8,
+    reconnect: &mut ReconnectController,
+    now: Instant,
+) -> CycleStep {
+    if !outcome.poll_ok {
+        // A failed poll breaks the flap recovery streak.
+        reconnect.note_poll_failed();
+        if outcome.connection_lost {
+            return CycleStep::Reconnect;
+        }
+        // Transient timeout: once the sustained-timeout threshold is reached
+        // (counted by the controller) disconnect instead of hammering a wedged
+        // dongle until the OS sends an RST.
+        if reconnect.note_transient_timeout() {
+            return CycleStep::Reconnect;
+        }
+        return CycleStep::RetryAfterBackoff;
+    }
+
+    if outcome.block_suspicious {
+        *consecutive_suspicious += 1;
+        if *consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
+            tracing::warn!(
+                suspicious = *consecutive_suspicious,
+                max = MAX_SUSPICIOUS_CYCLES,
+                "Persistent fingerprint corruption - forcing reconnect"
+            );
+            return CycleStep::Reconnect;
+        }
+        tracing::warn!(
+            suspicious = *consecutive_suspicious,
+            max = MAX_SUSPICIOUS_CYCLES,
+            "Dongle memory-leak corruption detected - skipping broadcast, re-polling immediately"
+        );
+        return CycleStep::RepollSuspicious;
+    }
+    *consecutive_suspicious = 0;
+
+    // Fresh, sanitized data reached the UI/history. Resets the sustained-timeout
+    // streak, marks the session productive, restarts the flap data-starvation
+    // clock, and - if a flap is engaged - advances the stand-down count.
+    reconnect.note_good_poll(now);
+
+    if outcome.sanitized {
+        CycleStep::RepollSanitized
+    } else {
+        CycleStep::WaitForInterval
+    }
+}
+
+/// Advance the external-meter retry cadence after a productive cycle: the
+/// counter ticks while retries remain, and also while the first scan found
+/// nothing, so a configured-but-slow meter is retried every
+/// `METER_RETRY_INTERVAL` cycles.
+fn tick_meter_retry_cadence(
+    meter_cycle_since_last: &mut u8,
+    meter_probe_done: bool,
+    meter_retry_count: u8,
+    no_meters_detected: bool,
+) {
+    if meter_probe_done && meter_retry_count > 0 && meter_retry_count < METER_MAX_RETRIES {
+        *meter_cycle_since_last += 1;
+    }
+    if meter_probe_done && meter_retry_count == 0 && no_meters_detected {
+        *meter_cycle_since_last += 1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main poll loop
 // ---------------------------------------------------------------------------
@@ -2193,9 +2940,7 @@ async fn settings_update_blocking<F>(update: F) -> Result<(), String>
 where
     F: FnOnce(&mut crate::settings::Settings) + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || crate::settings::Settings::update(update).map(|_| ()))
-        .await
-        .map_err(|error| format!("settings worker failed: {error}"))?
+    crate::settings::Settings::update_async(update).await
 }
 
 /// Store the decoded snapshot as the latest, broadcast it to WebSocket
@@ -2370,10 +3115,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
             .load(std::sync::atomic::Ordering::Relaxed),
     );
     let mut last_discovery_time: Option<Instant> = None;
-    // After this many consecutive failures, trigger auto-discovery.
-    const DISCOVERY_AFTER_FAILURES: u32 = 5;
-    // Minimum interval between auto-discovery scans.
-    const DISCOVERY_COOLDOWN: Duration = Duration::from_secs(300);
 
     loop {
         // ---- Manual reconnect request? ----
@@ -2590,7 +3331,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 //
                 // Resets to 0 on any successful poll.
                 let mut consecutive_suspicious: u8 = 0;
-                const MAX_SUSPICIOUS_CYCLES: u8 = 6;
 
                 // Grace period: for the first few reads after connect, skip
                 // delta sanitization. The dongle can return plausible-but-wrong
@@ -2610,8 +3350,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 let mut delta_corrections = DeltaCorrectionCounts::default();
                 let mut suspect_counts = ConsecutiveSuspectCounts::default();
                 let mut rate_release_counts = RateReleaseCounts::default();
-                let mut known_device_type: Option<crate::inverter::model::DeviceType> = None;
-                let mut known_device_type_code: Option<String> = None;
+                let mut identity = ModelIdentity::default();
                 let mut detected_meters: Vec<u8> = Vec::new();
                 // Battery slave addresses already announced this session, so
                 // "Battery #N detected" is logged once (INFO) per address
@@ -2634,10 +3373,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // probe. Each entry is (bcu_offset, num_modules). Empty discovery
                 // remains retryable so a transient startup timeout cannot hide the
                 // battery for the rest of the TCP session.
-                let mut detected_hv_stacks: Vec<(u8, u8)> = Vec::new();
-                let mut hv_probe_done = false;
-                let mut hv_probe_attempted = false;
-                let mut hv_probe_cycles_since_last: u8 = 0;
+                let mut hv_stacks = crate::inverter::battery_reads::HvStacks::default();
 
                 // Tracks which Cosy slot index was last preloaded into the
                 // inverter's charge slot registers. Only re-writes when the
@@ -2661,6 +3397,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // Whether we already warned that the inverter clock is
                 // unavailable (once per connection, not once per poll).
                 let mut inverter_time_fallback_logged = false;
+                // Whether we already warned that the inverter clock is out
+                // (once per connection, not once per poll).
+                let mut inverter_clock_skew_logged = false;
                 // A reconnect makes the HR59 re-arm detector's evidence
                 // ambiguous — any register state may predate the reconnect.
                 // Reset it to Idle so stale evidence can't classify the
@@ -2763,9 +3502,9 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     // responses (including duplicate write ACKs) are silently
                     // dropped during the read cycle. No explicit flush needed.
 
-                    let (poll_ok, sanitized, connection_lost, block_suspicious) = async {
+                    let outcome = async {
                         let gateway_scope = gateway_poll_scope(
-                            known_device_type,
+                            identity.device_type,
                             gateway_detail_poll_countdown,
                         );
                         // Prefill the device type from the persisted serial on
@@ -2773,18 +3512,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                         // confirmed a model) so a known-Gateway startup can
                         // skip the wide IR 0-59 / IR 180-183 standard blocks.
                         // Model-specific blocks are still gated on the
-                        // confirmed `known_device_type` (set on the cycle
+                        // confirmed `identity.device_type` (set on the cycle
                         // after detection), so the decoder always gets a
                         // clean chance to confirm or override the prefill.
                         let prefilled_device_type: Option<DeviceType> =
-                            if known_device_type.is_none() {
+                            if identity.device_type.is_none() {
                                 device_type_from_serial(&settings.serial)
                             } else {
                                 None
                             };
                         match client
                             .read_all_with_extras(
-                                known_device_type.as_ref(),
+                                identity.device_type.as_ref(),
                                 prefilled_device_type.as_ref(),
                                 gateway_scope,
                             )
@@ -2871,18 +3610,14 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // memory-leak corruption fingerprint. If the dongle serves
                                 // its own TCP/IP memory instead of register values, the
                                 // entire poll cycle is suspect - trigger a re-poll.
-                                let block_suspicious = blocks
-                                    .iter()
-                                    .any(|b| b.block.start % 60 == 0 && b.block.count == 60 && is_block_suspicious(&b.data));
-                                if block_suspicious {
-                                    for br in &blocks {
-                                        if br.block.start % 60 == 0 && br.block.count == 60 && is_block_suspicious(&br.data) {
-                                            tracing::warn!(
-                                                block = br.block.name,
-                                                start = br.block.start,
-                                                "Block matched dongle memory-leak fingerprint - re-polling",
-                                            );
-                                        }
+                                let mut fingerprint_hits = suspicious_blocks(&blocks).peekable();
+                                if fingerprint_hits.peek().is_some() {
+                                    for br in fingerprint_hits {
+                                        tracing::warn!(
+                                            block = br.block.name,
+                                            start = br.block.start,
+                                            "Block matched dongle memory-leak fingerprint - re-polling",
+                                        );
                                     }
                                     // Skip decode and broadcast entirely — the
                                     // registers are the dongle's own TCP memory.
@@ -2891,159 +3626,21 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // counter on the very cycle it should have
                                     // accumulated, and the force-reconnect path
                                     // was unreachable. The counter now lives in
-                                    // the caller (see the poll_ok match below).
-                                    return (true, true, false, true);
+                                    // the caller (see `decide_after_cycle`).
+                                    return CycleOutcome::FINGERPRINT;
                                 }
-                                let has_ac_config_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 300
-                                        && b.block.count == 60
-                                });
-                                let has_extended_slots_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 240
-                                        && b.block.count == 60
-                                });
-                                let has_three_phase_high_config_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 1000
-                                        && b.block.count == 80
-                                });
-                                let has_three_phase_config_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 1080
-                                        && b.block.count == 45
-                                });
-                                let has_three_phase_fault_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
-                                        && b.block.start == 1300
-                                        && b.block.count == 60
-                                });
-                                let has_ems_plant_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Holding
-                                        && b.block.start == 2040
-                                        && b.block.count == 36
-                                });
-                                let has_gateway_discharge_detail_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
-                                        && b.block.start == 1720
-                                        && b.block.count == 60
-                                });
-                                let has_gateway_serial_block = blocks.iter().any(|b| {
-                                    b.block.register_type == crate::modbus::registers::RegisterType::Input
-                                        && b.block.start == 1831
-                                        && b.block.count == 29
-                                });
+                                let present = OptionalBlocksPresent::from_blocks(&blocks);
 
-                                // Cache the device type for subsequent polls.
-                                // This enables model-aware polling (extra blocks).
-                                // 'Unknown(0)' means we haven't identified the model yet.
-                                let is_new_model = known_device_type.is_none()
-                                    && !matches!(snapshot.device_type, crate::inverter::model::DeviceType::Unknown(_));
-                                if is_new_model {
-                                    // Name the actual blocks the model-aware poll
-                                    // will read on the next cycle. For a Gateway
-                                    // this is the lean HR-only standard set + the
-                                    // full IR 1600-1859 bank + EMS plant holding;
-                                    // `extra_poll_blocks()` is empty for Gateway
-                                    // (its blocks are added in
-                                    // `model_specific_blocks_in_poll_order`), so
-                                    // the old `extra_blocks=[]` log line misled
-                                    // users into thinking detection hadn't changed
-                                    // the poll plan.
-                                    let standard_blocks_next: Vec<&'static str> =
-                                        crate::modbus::client::preview_standard_blocks(
-                                            Some(&snapshot.device_type),
-                                            None,
-                                        )
-                                        .iter()
-                                        .map(|b| b.name)
-                                        .collect();
-                                    let model_specific_blocks_next: Vec<&'static str> =
-                                        crate::modbus::client::preview_model_specific_blocks(
-                                            &snapshot.device_type,
-                                            GatewayPollScope::Detail,
-                                        )
-                                        .iter()
-                                        .map(|b| b.name)
-                                        .collect();
-                                    tracing::info!(
-                                        device_type = ?snapshot.device_type,
-                                        standard_blocks = ?standard_blocks_next,
-                                        model_specific_blocks = ?model_specific_blocks_next,
-                                        "Device model identified - enabling model-aware polling"
-                                    );
-                                    let preferred_slave = snapshot.device_type.preferred_read_slave_address();
-                                    let slave_changed = preferred_slave != client.slave_address();
-                                    let should_repoll = should_repoll_after_model_detection(
-                                        snapshot.device_type,
-                                        client.slave_address(),
-                                    );
-                                    if slave_changed {
-                                        tracing::info!(
-                                            from = client.slave_address(),
-                                            to = preferred_slave,
-                                            "Switching operational read slave address for detected model"
-                                        );
-                                        client.set_slave(preferred_slave);
-                                    }
-
-                                    // Three-phase models read 15+ blocks per cycle and
-                                    // need a longer inter-request delay to avoid
-                                    // overwhelming the dongle's slow processor.
-                                    if snapshot.device_type.needs_three_phase_input_blocks() {
-                                        tracing::info!(
-                                            "Three-phase model detected - increasing inter-request delay to {}ms",
-                                            ModbusClient::INTER_REQUEST_DELAY_3PH.as_millis()
-                                        );
-                                        client.set_inter_request_delay(
-                                            ModbusClient::INTER_REQUEST_DELAY_3PH,
-                                        );
-                                    }
-
-                                    let has_model_specific_blocks = !crate::modbus::client::preview_model_specific_blocks(
-                                        &snapshot.device_type,
-                                        GatewayPollScope::Fast,
-                                    )
-                                    .is_empty();
-                                    known_device_type = Some(snapshot.device_type);
-                                    known_device_type_code =
-                                        Some(snapshot.device_type_code.clone());
-
-                                    // The first detection poll is intentionally minimal: it discovers
-                                    // the model, then immediately re-polls with the model-specific
-                                    // slave address and optional blocks (AC HR300-359, Gen3 HR240-299,
-                                    // Gateway IR 1600-1859). Without this, model-specific registers
-                                    // can lag a full poll interval behind detection.
-                                    if should_repoll {
-                                        tracing::info!(
-                                            slave_changed,
-                                            has_model_specific_blocks,
-                                            "Model-specific poll enabled - re-reading immediately"
-                                        );
-                                        return (true, true, false, false);
-                                    }
-
-                                } else if let Some(cached_type) = known_device_type {
-                                    // Lock the device type to prevent dongle register corruption
-                                    // (especially HR(21) arm_firmware_version) from flipping the
-                                    // displayed model on a subsequent poll. Once identified, the
-                                    // snapshot always carries the cached type - the decoder still
-                                    // runs for the raw DTC and firmware string, but the refinement
-                                    // result is ignored in favour of the known-good detection.
-                                    if snapshot.device_type != cached_type {
-                                        tracing::debug!(
-                                            decoded = ?snapshot.device_type,
-                                            cached = ?cached_type,
-                                            "Device type mismatch - locking to cached value"
-                                        );
-                                        snapshot.device_type = cached_type;
-                                        snapshot.device_type_display = cached_type.display_name().to_string();
-                                    }
+                                // Confirm the model on first sight (enabling model-aware
+                                // polling) and lock the snapshot to it afterwards.
+                                if identity.identify(&mut snapshot, &mut client)
+                                    == IdentifyOutcome::RepollNow
+                                {
+                                    return CycleOutcome::published(true);
                                 }
 
                                 if should_probe_external_meters(
-                                    known_device_type,
+                                    identity.device_type,
                                     meter_probe_done,
                                     snapshot.enable_ammeter,
                                     snapshot.meter_type,
@@ -3172,8 +3769,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // DTC. The exact 0x81xx code carries its 6/8/10 kW rating, so
                                 // allowing a later corrupt HR(0) through would lower valid power
                                 // ceilings even though the displayed DeviceType remained locked.
-                                if let (Some(kdt), Some(code)) =
-                                    (known_device_type, known_device_type_code.as_deref())
+                                if let Some((kdt, code)) = identity.confirmed()
                                 {
                                     lock_snapshot_device_identity(&mut snapshot, kdt, code);
                                 }
@@ -3188,476 +3784,54 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // --- Battery BMS module reads ---
                                 //
                                 // Two distinct battery protocols exist in the GivEnergy
-                                // ecosystem (per givenergy-modbus model/hv_bcu.py and GivTCP):
-                                //
-                                //   LV packs:     BMS at 0x32 (battery #1) + 0x33-0x37, IR 60-119
-                                //   HV stacks:    BCU at 0x70+i (cluster) + BMU at 0x50+m, IR 60-119
-                                //
-                                // HV stackable batteries (e.g. GIV-BAT-3.4-HV modules) do NOT
-                                // answer at 0x32. Device type decides which path runs.
-                                // Batteryless devices (Gateway, EMS, PvInverter) skip entirely
-                                // - they have no directly-attached battery to probe.
-                                if known_device_type.is_some_and(|dt| dt.is_batteryless()) {
-                                    // Batteryless device (Gateway / EMS / PvInverter):
-                                    // no directly-attached battery to probe. The Gateway
-                                    // aggregation bank decoder populates battery fields;
-                                    // EMS/PvInverter have none.
-                                } else {
-                                let is_hv = known_device_type
-                                    .map(|dt| dt.uses_hv_battery())
-                                    .unwrap_or(false);
-                                if is_hv {
-                                    // --- HV battery: BCU cluster read ---
-                                    //
-                                    // Discover the BCU layout via the BMS at 0xA0. Once a
-                                    // usable layout is found, read each stack's cluster block
-                                    // every cycle. Empty attempts remain retryable on a slow
-                                    // cadence so startup timeouts recover without adding a BMS
-                                    // timeout to every poll.
-                                    if hv_probe_attempted && !hv_probe_done {
-                                        hv_probe_cycles_since_last =
-                                            hv_probe_cycles_since_last.saturating_add(1);
-                                    }
-                                    if should_probe_hv_stacks(
-                                        known_device_type,
-                                        hv_probe_done,
-                                        hv_probe_attempted,
-                                        hv_probe_cycles_since_last,
-                                    ) {
-                                        hv_probe_attempted = true;
-                                        hv_probe_cycles_since_last = 0;
-                                        tracing::info!("Probing for HV battery BCU stacks...");
-                                        let mut found: Vec<(u8, u8)> = Vec::new();
-                                        // BMS at 0xA0 reports the number of BCUs at IR(61).
-                                        match client
-                                            .read_registers_at_slave(
-                                                crate::modbus::registers::HV_BMS_ADDRESS,
-                                                crate::modbus::framer::RegisterType::Input,
-                                                60,
-                                                5,
-                                            )
-                                            .await
-                                        {
-                                            Ok(bms) => {
-                                                let raw_num_bcus = *bms.get(1).unwrap_or(&0);
-                                                let bcu_offsets = hv_bcu_probe_offsets(raw_num_bcus);
-                                                if raw_num_bcus > HV_MAX_BCU_COUNT {
-                                                    tracing::warn!(
-                                                        raw_num_bcus,
-                                                        max_supported = HV_MAX_BCU_COUNT,
-                                                        "BMS reported an invalid HV BCU count; capping probe"
-                                                    );
-                                                }
-                                                tracing::info!(
-                                                    num_bcus = bcu_offsets.len(),
-                                                    "BMS reports {} HV BCU stack(s) after validation",
-                                                    bcu_offsets.len()
-                                                );
-                                                let mut consecutive_missing = 0;
-                                                for offset in bcu_offsets {
-                                                    // Each BCU's IR(64) holds its module count.
-                                                    let bcu_addr = crate::modbus::registers::
-                                                        HV_BCU_BASE_ADDRESS.wrapping_add(offset);
-                                                    let present = match client
-                                                        .read_registers_at_slave(
-                                                            bcu_addr,
-                                                            crate::modbus::framer::RegisterType::Input,
-                                                            60,
-                                                            60,
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(data)
-                                                            if crate::inverter::decoder::
-                                                                validate_hv_bcu(&data) =>
-                                                        {
-                                                            let cluster =
-                                                                crate::inverter::decoder::
-                                                                    decode_hv_bcu_cluster(&data);
-                                                            tracing::info!(
-                                                                bcu_offset = offset,
-                                                                modules = cluster.number_of_modules,
-                                                                version = %cluster.pack_software_version,
-                                                                "HV BCU at 0x{bcu_addr:02X} - {} modules",
-                                                                cluster.number_of_modules
-                                                            );
-                                                            found.push((
-                                                                offset,
-                                                                cluster.number_of_modules as u8,
-                                                            ));
-                                                            true
-                                                        }
-                                                        Ok(_) => {
-                                                            tracing::debug!(
-                                                                bcu_offset = offset,
-                                                                "BCU 0x{bcu_addr:02X} probe: invalid version - no stack"
-                                                            );
-                                                            false
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::debug!(
-                                                                bcu_offset = offset,
-                                                                "BCU 0x{bcu_addr:02X} probe: no response: {e}"
-                                                            );
-                                                            false
-                                                        }
-                                                    };
-                                                    if present {
-                                                        consecutive_missing = 0;
-                                                    } else {
-                                                        consecutive_missing += 1;
-                                                        if hv_bcu_probe_should_stop(consecutive_missing) {
-                                                            tracing::debug!(
-                                                                bcu_offset = offset,
-                                                                consecutive_missing,
-                                                                "Stopping HV BCU probe after consecutive missing stacks"
-                                                            );
-                                                            break;
-                                                        }
-                                                    }
-                                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "BMS 0xA0 probe failed: {e} - falling back to direct BCU 0x70 probe"
-                                                );
-                                                // Fallback: probe BCU 0x70 directly (single-stack
-                                                // installs where the BMS aggregation isn't exposed).
-                                                if let Ok(data) = client
-                                                    .read_registers_at_slave(
-                                                        crate::modbus::registers::HV_BCU_BASE_ADDRESS,
-                                                        crate::modbus::framer::RegisterType::Input,
-                                                        60,
-                                                        60,
-                                                    )
-                                                    .await
-                                                {
-                                                    if crate::inverter::decoder::validate_hv_bcu(&data)
-                                                    {
-                                                        let cluster =
-                                                            crate::inverter::decoder::
-                                                                decode_hv_bcu_cluster(&data);
-                                                        found.push((0, cluster.number_of_modules as u8));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        detected_hv_stacks = found;
-                                        hv_probe_done = hv_probe_completed(&detected_hv_stacks);
-                                        if detected_hv_stacks.is_empty() {
-                                            tracing::info!("No HV battery BCU stacks detected");
-                                        } else {
-                                            tracing::info!(
-                                                "Detected {} HV BCU stack(s): {:?}",
-                                                detected_hv_stacks.len(),
-                                                detected_hv_stacks
-                                            );
-                                        }
-                                    }
-
-                                    // Read each detected stack's cluster block this cycle.
-                                    for &(offset, _modules) in &detected_hv_stacks {
-                                        let bcu_addr = crate::modbus::registers::HV_BCU_BASE_ADDRESS
-                                            .wrapping_add(offset);
-                                        match client
-                                            .read_registers_at_slave(
-                                                bcu_addr,
-                                                crate::modbus::framer::RegisterType::Input,
-                                                60,
-                                                60,
-                                            )
-                                            .await
-                                        {
-                                            Ok(data)
-                                                if crate::inverter::decoder::validate_hv_bcu(&data) =>
-                                            {
-                                                let cluster =
-                                                    crate::inverter::decoder::decode_hv_bcu_cluster(
-                                                        &data,
-                                                    );
-                                                tracing::debug!(
-                                                    bcu_offset = offset,
-                                                    voltage = cluster.battery_voltage,
-                                                    current = cluster.battery_current,
-                                                    modules = cluster.number_of_modules,
-                                                    "HV BCU cluster read OK"
-                                                );
-                                                if hv_cluster.is_none() {
-                                                    hv_cluster = Some(cluster);
-                                                }
-                                            }
-                                            Ok(_) => {
-                                                tracing::debug!(
-                                                    bcu_offset = offset,
-                                                    "HV BCU 0x{bcu_addr:02X} read: invalid version"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    bcu_offset = offset,
-                                                    "HV BCU 0x{bcu_addr:02X} read failed: {e}"
-                                                );
-                                            }
-                                        }
-                                    }
-
-                                    // --- HV battery: BMU per-module cell reads ---
-                                    //
-                                    // Each BMU (device 0x50+m) exposes one module's
-                                    // cell-level data for the Battery page. The read base
-                                    // shifts by 120*bcu_offset so the returned slice
-                                    // always starts at v_cell_01 (per GivTCP's read
-                                    // convention; givenergy-modbus resolves the same
-                                    // layout via the BMU stride within a BCU).
-                                    let mut module_index: usize = 0;
-                                    for &(offset, num_modules) in &detected_hv_stacks {
-                                        let base = 60u16 + 120u16 * offset as u16;
-                                        for bmu_num in 0..num_modules {
-                                            let bmu_addr = crate::modbus::registers::
-                                                HV_BMU_BASE_ADDRESS.wrapping_add(bmu_num);
-                                            match client
-                                                .read_registers_at_slave(
-                                                    bmu_addr,
-                                                    crate::modbus::framer::RegisterType::Input,
-                                                    base,
-                                                    60,
-                                                )
-                                                .await
-                                            {
-                                                Ok(data)
-                                                    if crate::inverter::decoder::
-                                                        validate_hv_bmu(&data) =>
-                                                {
-                                                    let module = crate::inverter::decoder::
-                                                        decode_hv_bmu_block(&data, module_index);
-                                                    tracing::debug!(
-                                                        bcu_offset = offset,
-                                                        bmu = bmu_num,
-                                                        module = module_index,
-                                                        cells = module.cell_voltages.len(),
-                                                        voltage = module.voltage,
-                                                        "HV BMU read OK"
-                                                    );
-                                                    snapshot.battery_modules.push(module);
-                                                }
-                                                Ok(_) => {
-                                                    tracing::debug!(
-                                                        bcu_offset = offset,
-                                                        bmu = bmu_num,
-                                                        "HV BMU 0x{bmu_addr:02X}: invalid serial - not present"
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::debug!(
-                                                        bcu_offset = offset,
-                                                        bmu = bmu_num,
-                                                        "HV BMU 0x{bmu_addr:02X}: no response: {e}"
-                                                    );
-                                                }
-                                            }
-                                            module_index += 1;
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
-                                        }
-                                    }
-
-                                    // HV BMU modules do not expose a per-module SOC register
-                                    // (confirmed against GivTCP's hvbmu.py - the BMU bank is
-                                    // cell voltages, cell temps and serial only). The BCU
-                                    // cluster reports the stack-wide SOC spread and per-module
-                                    // Ah capacity, which we backfill onto each module so the
-                                    // Battery page shows a sensible non-zero per-module SOC
-                                    // and capacity instead of 0%.
-                                    if let Some(cluster) = &hv_cluster {
-                                        crate::inverter::decoder::backfill_hv_module_fields(
-                                            &mut snapshot.battery_modules,
-                                            cluster,
-                                        );
-                                    }
-                                } else {
-                                    // --- LV battery: BMS pack reads ---
-                                    //
-                                    // Per givenergy-modbus reference, LV batteries expose BMS
-                                    // data on the inverter's IR 60-119 at device address 0x32
-                                    // (battery #1) and additional batteries at 0x33, 0x34, ... 0x37.
-                                    // Battery #1 IR 60-119 is NOT part of the standard poll
-                                    // blocks (those only read IR 0-59), so we issue a separate
-                                    // read here. Additional batteries also need separate reads
-                                    // at their own device addresses.
-
-                                    // Read battery #1 BMS (device 0x32, IR 60-119).
-                                    // Do not use the model-specific operational read address
-                                    // here: AC/Gen1 switch to 0x31 and newer models use 0x11,
-                                    // while the first LV battery BMS cache remains exposed at
-                                    // 0x32.
-                                    match client
-                                        .read_registers_at_slave(
-                                            0x32,
-                                            crate::modbus::framer::RegisterType::Input,
-                                            60,
-                                            60,
+                                // ecosystem (see `battery_reads`): LV packs answer at 0x32+,
+                                // HV stacks via BCU 0x70+ / BMU 0x50+. Device type decides
+                                // which path runs; batteryless devices (Gateway, EMS,
+                                // PvInverter) skip entirely - the Gateway aggregation bank
+                                // decoder populates their battery fields, EMS/PvInverter
+                                // have none.
+                                if !identity.device_type.is_some_and(|dt| dt.is_batteryless()) {
+                                    if identity.device_type.is_some_and(|dt| dt.uses_hv_battery()) {
+                                        hv_cluster = crate::inverter::battery_reads::read_hv_battery(
+                                            &mut client,
+                                            &mut hv_stacks,
+                                            identity.device_type,
+                                            &mut snapshot,
+                                            crate::inverter::battery_reads::DEVICE_READ_PACE,
                                         )
-                                        .await
-                                    {
-                                        Ok(data) => {
-                                            let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
-                                            if valid_lv_battery_response(&data) {
-                                                crate::inverter::decoder::decode_battery_block_into(
-                                                    &data, 0, &mut snapshot, "",
-                                                );
-                                                tracing::debug!("Battery #1 BMS read OK");
-                                                track_battery_conn(
-                                                    &state, 1, 0x32, true,
-                                                ).await;
-
-                                                // Override SOC with BMS module SOC (IR 100) only when
-                                                // When inverter IR(59) returns 0 (corrupted), calculate
-                                                // aggregate SOC from capacity-weighted average of all
-                                                // battery modules.
-                                                // Note: full aggregate is computed below after all
-                                                // additional batteries are read.
-                                                if snapshot.soc == 0 && !snapshot.battery_modules.is_empty() {
-                                                    if let Some(bms) = snapshot.battery_modules.first() {
-                                                        if bms.soc > 0 && bms.soc <= 99 {
-                                                            snapshot.soc = bms.soc;
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                tracing::debug!(
-                                                    "Battery #1 BMS data invalid: SOC={soc}"
-                                                );
-                                                track_battery_conn(
-                                                    &state, 1, 0x32, false,
-                                                ).await;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!("Battery #1 BMS read skipped: {e}");
-                                            track_battery_conn(
-                                                &state, 1, 0x32, false,
-                                            ).await;
-                                        }
+                                        .await;
+                                    } else {
+                                        crate::inverter::battery_reads::read_lv_batteries(
+                                            &mut client,
+                                            &state,
+                                            &mut snapshot,
+                                            &mut known_battery_addrs,
+                                        )
+                                        .await;
                                     }
-
-                                    // Probe additional LV batteries (device addresses 0x33-0x37)
-                                    for (i, &addr) in crate::modbus::registers::LV_BATTERY_ADDRESSES
-                                        .iter()
-                                        .enumerate()
-                                    {
-                                        match client.read_registers_at_slave(
-                                            addr,
-                                            crate::modbus::framer::RegisterType::Input,
-                                            60,
-                                            60,
-                                        ).await {
-                                            Ok(data) => {
-                                                let soc = *data.get(100 - 60).unwrap_or(&0) as u8;
-                                                if valid_lv_battery_response(&data) {
-                                                    crate::inverter::decoder::decode_battery_block_into(
-                                                        &data, i + 1, &mut snapshot, "",
-                                                    );
-                                                    track_battery_conn(
-                                                        &state, i + 2, addr, true,
-                                                    ).await;
-                                                    if !known_battery_addrs.contains(&addr) {
-                                                        tracing::info!(
-                                                            "Battery #{} detected at addr 0x{:02X} (SOC={}%)",
-                                                            i + 2, addr, soc
-                                                        );
-                                                        known_battery_addrs.push(addr);
-                                                    } else {
-                                                        tracing::debug!(
-                                                            "Battery #{} at addr 0x{:02X} (SOC={}%)",
-                                                            i + 2, addr, soc
-                                                        );
-                                                    }
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Battery addr 0x{:02X}: SOC={} - not present",
-                                                        addr, soc
-                                                    );
-                                                    // Known battery answering with invalid data —
-                                                    // count it as a failed read only for addresses
-                                                    // we have seen answer before.
-                                                    if known_battery_addrs.contains(&addr) {
-                                                        track_battery_conn(
-                                                            &state, i + 2, addr, false,
-                                                        ).await;
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    "Battery addr 0x{:02X}: no response: {e}",
-                                                    addr
-                                                );
-                                                if known_battery_addrs.contains(&addr) {
-                                                    track_battery_conn(
-                                                        &state, i + 2, addr, false,
-                                                    ).await;
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
                                 }
 
                                 // --- External CT meter reads ---
                                 // Read all previously detected meters on every poll cycle.
                                 // If a meter stops responding, we skip it silently.
-                                for &addr in &detected_meters {
-                                    match client.read_registers_at_slave(
-                                        addr,
-                                        crate::modbus::framer::RegisterType::Input,
-                                        60,
-                                        30,
-                                    ).await {
-                                        Ok(data) => {
-                                            let meter =
-                                                crate::inverter::decoder::decode_meter_data(&data, addr);
-                                            cached_external_meters.insert(addr, meter);
-                                            external_meter_failures.remove(&addr);
-                                        }
-                                        Err(e) => {
-                                            record_external_meter_failure(
-                                                &mut external_meter_failures,
-                                                &mut cached_external_meters,
-                                                addr,
-                                            );
-                                            tracing::debug!(
-                                                "Meter addr 0x{addr:02X}: read failed: {e}",
-                                            );
-                                        }
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(100)).await;
-                                }
+                                crate::inverter::battery_reads::read_external_meters(
+                                    &mut client,
+                                    &detected_meters,
+                                    &mut cached_external_meters,
+                                    &mut external_meter_failures,
+                                    crate::inverter::battery_reads::DEVICE_READ_PACE,
+                                )
+                                .await;
                                 snapshot.meters = merge_external_meters(
                                     std::mem::take(&mut snapshot.meters),
                                     &detected_meters,
                                     &cached_external_meters,
                                 );
 
-                                // If inverter IR(59) was 0, recalculate SOC from
-                                // capacity-weighted average of ALL battery modules
-                                // (now that additional batteries have been read).
-                                if snapshot.soc == 0 && snapshot.battery_modules.len() > 1 {
-                                    let total_cap: f32 = snapshot
-                                        .battery_modules.iter().map(|m| m.capacity_ah).sum();
-                                    let total_rem: f32 = snapshot
-                                        .battery_modules.iter().map(|m| m.remaining_capacity_ah).sum();
-                                    if total_cap > 0.0 {
-                                        let agg = (total_rem / total_cap * 100.0).round() as u8;
-                                        snapshot.soc = agg.min(100);
-                                        tracing::debug!(
-                                            "Inverter SOC was 0 - aggregate from {} modules: {}%",
-                                            snapshot.battery_modules.len(),
-                                            snapshot.soc
-                                        );
-                                    }
-                                }
+                                // If inverter IR(59) was 0, recalculate SOC from the
+                                // capacity-weighted average of ALL battery modules (now
+                                // that additional batteries have been read).
+                                crate::inverter::battery_reads::apply_aggregate_soc(&mut snapshot);
 
                                 // Override battery temperature from BMS data for all
                                 // device types (IR(56) is frequently garbage - #48).
@@ -3701,36 +3875,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // as such made Gateway installs re-poll
                                     // back-to-back with no sleep (~10× the
                                     // intended poll rate).
+                                    crate::inverter::decoder::apply_lv_bms_lifetime_totals(
+                                        &mut snapshot,
+                                        prev.as_ref(),
+                                    );
                                     let s = sanitize_snapshot(&mut snapshot, prev.as_ref(), in_grace, &mut pending_mode, &mut delta_corrections, &mut suspect_counts, &mut rate_release_counts);
-                                    let _ = carry_forward_optional_block_values(
-                                        &mut snapshot,
-                                        prev.as_ref(),
-                                        has_ac_config_block,
-                                        has_extended_slots_block,
-                                        has_three_phase_config_block,
-                                        has_ems_plant_block,
-                                    );
-                                    let _ = carry_forward_three_phase_high_config_values(
-                                        &mut snapshot,
-                                        prev.as_ref(),
-                                        has_three_phase_high_config_block,
-                                    );
-                                    let _ = carry_forward_three_phase_fault_block_values(
-                                        &mut snapshot,
-                                        prev.as_ref(),
-                                        has_three_phase_fault_block,
-                                    );
-                                    if snapshot.device_type == DeviceType::Gateway {
-                                        if let Some(p) = prev.as_ref() {
-                                            if !has_gateway_discharge_detail_block {
-                                                snapshot.per_aio_discharge_today_kwh =
-                                                    p.per_aio_discharge_today_kwh;
-                                            }
-                                            if !has_gateway_serial_block {
-                                                snapshot.per_aio_serial = p.per_aio_serial.clone();
-                                            }
-                                        }
-                                    }
+                                    carry_forward_absent_blocks(&mut snapshot, prev.as_ref(), &present);
                                     let mods = prev.as_ref().map(|p| p.battery_modules.clone());
                                     (s, mods)
                                 };
@@ -3800,6 +3950,28 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         "Automation: inverter clock unavailable — falling back to host local time"
                                     );
                                     inverter_time_fallback_logged = true;
+                                }
+                                // The inverter resets its Today counters at
+                                // midnight by its own clock, so a wrong clock
+                                // makes them reset at the wrong time. Diagnostic
+                                // only: nothing is corrected automatically.
+                                let clock_skew =
+                                    crate::inverter::state_machines::inverter_clock_skew_minutes(
+                                        &snapshot.inverter_time,
+                                        host_now.naive_local(),
+                                    );
+                                if crate::inverter::state_machines::clock_skew_warning_due(
+                                    clock_skew,
+                                    inverter_clock_skew_logged,
+                                ) {
+                                    tracing::warn!(
+                                        inverter_time = %snapshot.inverter_time,
+                                        host_time = %host_now.format("%Y-%m-%d %H:%M:%S"),
+                                        skew_minutes = clock_skew.unwrap_or_default(),
+                                        "Inverter clock is out by {} minutes - its Today energy counters will reset at the wrong time. Use Sync Time to correct it.",
+                                        clock_skew.unwrap_or_default()
+                                    );
+                                    inverter_clock_skew_logged = true;
                                 }
                                 // ---- Auto winter mode ----
                                 {
@@ -3948,431 +4120,28 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                // ---- Forecast plan auto-refresh (issue #283) ----
-                                // The plan is deliberately sized for ONE charge
-                                // cycle, but the inverter treats an applied charge
-                                // slot as a nightly recurring schedule. Shortly
-                                // before each cheap period, re-compute the plan
-                                // from the live SOC and forecast, then rewrite —
-                                // or clear — charge slot 1 so the inverter never
-                                // repeats a stale duration on later nights.
-                                //
-                                // Rate-limit contract (CODE_REVIEW.md Major 2):
-                                // the plan's duration maths assumes the inverter
-                                // charges at its hardware maximum, so every
-                                // refresh batch re-writes the charge-limit
-                                // register (via `PLAN_CHARGE_RATE_PERCENT` below)
-                                // — the "100% for the planned duration" promise
-                                // is re-asserted on each refresh, not just the
-                                // first night. A manual Control-page rate change
-                                // or an Octopus/Cosy automation that lowers the
-                                // limit after the refresh still wins until the
-                                // next refresh re-asserts it.
-                                // While the auto-apply trigger is enabled it
-                                // supersedes the fixed auto-refresh: exactly one
-                                // machine write of charge slot 1 per day, at the
-                                // user's lead time, with a notification.
-                                if poll_settings.forecast_plan_auto_refresh
-                                    && !poll_settings.forecast_plan_auto_apply_enabled
-                                {
-                                    let now = chrono::Local::now();
-                                    let adaptive_owns_rate = poll_settings.adaptive_charge_enabled
-                                        || poll_settings.adaptive_charge_saved_limit.is_some();
-                                    let last =
-                                        *state.forecast_plan_refresh_date.lock().await;
-                                    let due = crate::forecast::refresh::
-                                        plan_refresh_due_with_adaptive(
-                                            now,
-                                            last,
-                                            poll_settings.import_tariff_config.as_ref(),
-                                            adaptive_owns_rate,
-                                        );
-                                    if due {
-                                        let (weather_enabled, coords) = {
-                                            let ws = state.weather.lock().await;
-                                            (
-                                                ws.config.enabled,
-                                                ws.config.latitude.zip(ws.config.longitude),
-                                            )
-                                        };
-                                        let history = state.history.lock().await.clone();
-                                        let live_snapshot = snapshot.clone();
-                                        // Shallow clone (CODE_REVIEW.md Minor 5):
-                                        // the planner only reads a read-only subset
-                                        // of settings (import tariff, forecast_*,
-                                        // weather coords) — nested fields like
-                                        // `timed_export_schedule` are never
-                                        // touched, so a deep clone would be wasted
-                                        // work. Keep this comment if new fields are
-                                        // added to the planner's inputs.
-                                        let refresh_settings = poll_settings.clone();
-                                        // SQLite reads + a 72 h simulation — keep
-                                        // them off the poll task, same as the
-                                        // settings persistence above.
-                                        let planned = tokio::task::spawn_blocking(
-                                            move || {
-                                                let forecast = crate::forecast::build_forecast_payload(
-                                                    &crate::forecast::ForecastInputs {
-                                                        db: history.as_deref(),
-                                                        settings: &refresh_settings,
-                                                        snapshot: Some(&live_snapshot),
-                                                        weather_enabled,
-                                                        weather_coords: coords,
-                                                        now,
-                                                    },
-                                                );
-                                                crate::server::api::compute_plan_recommendation(
-                                                    &forecast,
-                                                    &refresh_settings,
-                                                    Some(&live_snapshot),
-                                                    now.timestamp(),
-                                                )
-                                            },
-                                        )
-                                        .await;
-                                        // Mark today done regardless of the outcome
-                                        // shape so a persistent failure can't turn
-                                        // into a per-poll write storm.
-                                        *state.forecast_plan_refresh_date.lock().await =
-                                            Some(now.date_naive());
-                                        match planned {
-                                            Ok(rec) => {
-                                                let action =
-                                                    crate::forecast::refresh::plan_refresh_action(&rec);
-                                                match action {
-                                                    crate::forecast::refresh::PlanRefreshAction::WriteSlot {
-                                                        start_hhmm,
-                                                        end_hhmm,
-                                                    } => {
-                                                        match crate::server::api::build_charge_slot_writes(
-                                                            snapshot.device_type,
-                                                            1,
-                                                            true,
-                                                            start_hhmm,
-                                                            end_hhmm,
-                                                            crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
-                                                            Some(crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT),
-                                                        ) {
-                                                            Ok(writes) => {
-                                                                tracing::info!(
-                                                                    start = start_hhmm,
-                                                                    end = end_hhmm,
-                                                                    kwh = format!("{:.2}", rec_kwh(&rec)),
-                                                                    "Forecast plan refresh: rewriting charge slot 1 for tonight's cheap period"
-                                                                );
-                                                                // Route through the shared write
-                                                                // pump (CODE_REVIEW.md Major 1)
-                                                                // instead of writing inline: the
-                                                                // pump serialises the ~1.5 s Modbus
-                                                                // round-trips off the read path, so
-                                                                // the poll loop keeps broadcasting
-                                                                // snapshots while the slot writes
-                                                                // drain on the next cycle.
-                                                                crate::server::api::queue_writes(
-                                                                    &state, writes,
-                                                                )
-                                                                .await;
-                                                            }
-                                                            Err(e) => tracing::warn!(
-                                                                "Forecast plan refresh: could not encode slot writes: {e}"
-                                                            ),
-                                                        }
-                                                    }
-                                                    crate::forecast::refresh::PlanRefreshAction::ClearSlot => {
-                                                        match crate::server::api::build_charge_slot_writes(
-                                                            snapshot.device_type,
-                                                            1,
-                                                            false,
-                                                            0,
-                                                            0,
-                                                            crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
-                                                            None,
-                                                        ) {
-                                                            Ok(writes) => {
-                                                                tracing::info!(
-                                                                    "Forecast plan refresh: fresh plan needs no charge — clearing charge slot 1"
-                                                                );
-                                                                crate::server::api::queue_writes(
-                                                                    &state, writes,
-                                                                )
-                                                                .await;
-                                                            }
-                                                            Err(e) => tracing::warn!(
-                                                                "Forecast plan refresh: could not encode slot clear: {e}"
-                                                            ),
-                                                        }
-                                                    }
-                                                    crate::forecast::refresh::PlanRefreshAction::None => {
-                                                        tracing::debug!(
-                                                            "Forecast plan refresh: no plan available this cycle"
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("Forecast plan refresh failed: {e}")
-                                            }
-                                        }
-                                    } else if adaptive_owns_rate
-                                        && crate::forecast::refresh::plan_refresh_due(
-                                            now,
-                                            last,
-                                            poll_settings.import_tariff_config.as_ref(),
-                                        )
-                                    {
-                                        // The refresh would be due but Adaptive
-                                        // Charge owns the charge-limit register —
-                                        // warn once per day (tracked separately so
-                                        // disabling Adaptive later in the same
-                                        // lead window still lets the refresh fire)
-                                        // instead of silently skipping on every
-                                        // poll (CODE_REVIEW.md Major 3).
-                                        let mut warned =
-                                            state.forecast_plan_refresh_warned.lock().await;
-                                        if *warned != Some(now.date_naive()) {
-                                            *warned = Some(now.date_naive());
-                                            tracing::warn!(
-                                                "Forecast plan auto-refresh is enabled but Adaptive Charge owns the charge rate — skipping tonight's slot rewrite"
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // ---- Forecast plan auto-apply (user-configured trigger) ----
-                                // Every day, the configured number of minutes before the
-                                // cheap charging tariff window begins, re-compute the plan
-                                // from the live SOC and forecast, apply it to charge slot 1
-                                // exactly as the Forecast page's Apply button would, and
-                                // notify the user through the alert channels. While this is
-                                // enabled it supersedes the fixed nightly auto-refresh
-                                // above, so charge slot 1 gets exactly one machine write
-                                // per day — at the user's lead time, with a notification.
-                                if poll_settings.forecast_plan_auto_apply_enabled {
-                                    let now = chrono::Local::now();
-                                    let adaptive_owns_rate = poll_settings.adaptive_charge_enabled
-                                        || poll_settings.adaptive_charge_saved_limit.is_some();
-                                    let last = *state.forecast_plan_apply_date.lock().await;
-                                    let decision = crate::forecast::refresh::
-                                        plan_auto_apply_decision_with_adaptive(
-                                            now,
-                                            last,
-                                            poll_settings.import_tariff_config.as_ref(),
-                                            poll_settings.forecast_plan_auto_apply_lead_minutes,
-                                            adaptive_owns_rate,
-                                        );
-                                    match decision {
-                                        crate::forecast::refresh::PlanApplyDecision::NotDue {
-                                            reason,
-                                        } => {
-                                            // Would-be-due but Adaptive Charge owns the
-                                            // charge-limit register — warn + notify once
-                                            // per day instead of on every poll. Gated on
-                                            // the apply actually being due (same shape as
-                                            // the auto-refresh block's warning above):
-                                            // without that gate an Adaptive user with no
-                                            // cheap window near would get a false alarm
-                                            // every single day.
-                                            if adaptive_owns_rate
-                                                && crate::forecast::refresh::
-                                                    plan_auto_apply_adaptive_warning_due(
-                                                        now,
-                                                        last,
-                                                        poll_settings.import_tariff_config.as_ref(),
-                                                        poll_settings.forecast_plan_auto_apply_lead_minutes,
-                                                    )
-                                            {
-                                                let mut warned =
-                                                    state.forecast_plan_apply_warned.lock().await;
-                                                if *warned != Some(now.date_naive()) {
-                                                    *warned = Some(now.date_naive());
-                                                    tracing::warn!(
-                                                        "Forecast plan auto-apply is enabled but Adaptive Charge owns the charge rate — skipping tonight's apply"
-                                                    );
-                                                    crate::alerts::send_plan_notification(
-                                                        &state,
-                                                        &crate::alerts::build_plan_unavailable_message(
-                                                            "Adaptive Charge owns the charge rate, so tonight's charging is left to it",
-                                                        ),
-                                                    )
-                                                    .await;
-                                                }
-                                            } else {
-                                                tracing::debug!(
-                                                    reason,
-                                                    "Forecast plan auto-apply standing down"
-                                                );
-                                            }
-                                        }
-                                        crate::forecast::refresh::PlanApplyDecision::Due { .. } => {
-                                            let (weather_enabled, coords) = {
-                                                let ws = state.weather.lock().await;
-                                                (
-                                                    ws.config.enabled,
-                                                    ws.config.latitude.zip(ws.config.longitude),
-                                                )
-                                            };
-                                            let history = state.history.lock().await.clone();
-                                            let live_snapshot = snapshot.clone();
-                                            // Shallow clone, same rationale as the
-                                            // auto-refresh above: the planner reads only
-                                            // a read-only subset of settings.
-                                            let apply_settings = poll_settings.clone();
-                                            let planned = tokio::task::spawn_blocking(
-                                                move || {
-                                                    let forecast = crate::forecast::build_forecast_payload(
-                                                        &crate::forecast::ForecastInputs {
-                                                            db: history.as_deref(),
-                                                            settings: &apply_settings,
-                                                            snapshot: Some(&live_snapshot),
-                                                            weather_enabled,
-                                                            weather_coords: coords,
-                                                            now,
-                                                        },
-                                                    );
-                                                    crate::server::api::compute_plan_recommendation(
-                                                        &forecast,
-                                                        &apply_settings,
-                                                        Some(&live_snapshot),
-                                                        now.timestamp(),
-                                                    )
-                                                },
-                                            )
-                                            .await;
-                                            // Mark today done regardless of the outcome
-                                            // shape so a persistent failure can't turn
-                                            // into a per-poll write/notification storm.
-                                            *state.forecast_plan_apply_date.lock().await =
-                                                Some(now.date_naive());
-                                            match planned {
-                                                Ok(rec) => {
-                                                    let tomorrow = matches!(
-                                                        &rec,
-                                                        crate::forecast::planner::PlanRecommendation::Charge { window, .. } if window.tomorrow
-                                                    );
-                                                    let action = crate::forecast::refresh::plan_refresh_action(&rec);
-                                                    match action {
-                                                        crate::forecast::refresh::PlanRefreshAction::WriteSlot {
-                                                            start_hhmm,
-                                                            end_hhmm,
-                                                        } => {
-                                                            match crate::server::api::build_charge_slot_writes(
-                                                                snapshot.device_type,
-                                                                1,
-                                                                true,
-                                                                start_hhmm,
-                                                                end_hhmm,
-                                                                crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
-                                                                Some(crate::forecast::refresh::PLAN_CHARGE_RATE_PERCENT),
-                                                            ) {
-                                                                Ok(writes) => {
-                                                                    tracing::info!(
-                                                                        start = start_hhmm,
-                                                                        end = end_hhmm,
-                                                                        kwh = format!("{:.2}", rec_kwh(&rec)),
-                                                                        "Forecast plan auto-apply: writing charge slot 1 for the cheap tariff window"
-                                                                    );
-                                                                    crate::server::api::queue_writes(
-                                                                        &state, writes,
-                                                                    )
-                                                                    .await;
-                                                                    crate::alerts::send_plan_notification(
-                                                                        &state,
-                                                                        &crate::alerts::build_plan_applied_message(
-                                                                            start_hhmm,
-                                                                            end_hhmm,
-                                                                            rec_kwh(&rec),
-                                                                            tomorrow,
-                                                                        ),
-                                                                    )
-                                                                    .await;
-                                                                }
-                                                                Err(e) => {
-                                                                    tracing::warn!(
-                                                                        "Forecast plan auto-apply: could not encode slot writes: {e}"
-                                                                    );
-                                                                    crate::alerts::send_plan_notification(
-                                                                        &state,
-                                                                        &crate::alerts::build_plan_unavailable_message(
-                                                                            "the charge slot could not be encoded for this inverter",
-                                                                        ),
-                                                                    )
-                                                                    .await;
-                                                                }
-                                                            }
-                                                        }
-                                                        crate::forecast::refresh::PlanRefreshAction::ClearSlot => {
-                                                            match crate::server::api::build_charge_slot_writes(
-                                                                snapshot.device_type,
-                                                                1,
-                                                                false,
-                                                                0,
-                                                                0,
-                                                                crate::forecast::refresh::SLOT_TARGET_SOC_NONE,
-                                                                None,
-                                                            ) {
-                                                                Ok(writes) => {
-                                                                    tracing::info!(
-                                                                        "Forecast plan auto-apply: fresh plan needs no charge — clearing charge slot 1"
-                                                                    );
-                                                                    crate::server::api::queue_writes(
-                                                                        &state, writes,
-                                                                    )
-                                                                    .await;
-                                                                    crate::alerts::send_plan_notification(
-                                                                        &state,
-                                                                        &crate::alerts::build_plan_cleared_message(),
-                                                                    )
-                                                                    .await;
-                                                                }
-                                                                Err(e) => {
-                                                                    tracing::warn!(
-                                                                        "Forecast plan auto-apply: could not encode slot clear: {e}"
-                                                                    );
-                                                                    crate::alerts::send_plan_notification(
-                                                                        &state,
-                                                                        &crate::alerts::build_plan_unavailable_message(
-                                                                            "the charge slot could not be cleared for this inverter",
-                                                                        ),
-                                                                    )
-                                                                    .await;
-                                                                }
-                                                            }
-                                                        }
-                                                        crate::forecast::refresh::PlanRefreshAction::None => {
-                                                            let reason = match &rec {
-                                                                crate::forecast::planner::PlanRecommendation::NoPlan { reason } => {
-                                                                    reason.clone()
-                                                                }
-                                                                _ => "no plan available".to_string(),
-                                                            };
-                                                            tracing::debug!(
-                                                                reason,
-                                                                "Forecast plan auto-apply: no plan available this cycle"
-                                                            );
-                                                            crate::alerts::send_plan_notification(
-                                                                &state,
-                                                                &crate::alerts::build_plan_unavailable_message(&reason),
-                                                            )
-                                                            .await;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Forecast plan auto-apply failed: {e}"
-                                                    );
-                                                    crate::alerts::send_plan_notification(
-                                                        &state,
-                                                        &crate::alerts::build_plan_unavailable_message(
-                                                            "the plan computation failed",
-                                                        ),
-                                                    )
-                                                    .await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                // ---- Forecast plan auto-refresh / auto-apply (issue #283) ----
+                                // Keep charge slot 1 matched to a freshly computed plan
+                                // shortly before each cheap period. Auto-apply (with its
+                                // notification) supersedes the fixed nightly refresh, so
+                                // the slot gets one machine write per day. The due-checks,
+                                // the plan-to-writes translation and the once-a-day
+                                // Adaptive Charge warnings are in `forecast_plan`.
+                                let plan_now = chrono::Local::now();
+                                crate::inverter::forecast_plan::run_plan_refresh(
+                                    &state,
+                                    &poll_settings,
+                                    &snapshot,
+                                    plan_now,
+                                )
+                                .await;
+                                crate::inverter::forecast_plan::run_plan_auto_apply(
+                                    &state,
+                                    &poll_settings,
+                                    &snapshot,
+                                    plan_now,
+                                )
+                                .await;
 
                                 // ---- Solar arrays (issue #110) ----
                                 // Stamp the per-array "% of max" summary from
@@ -4534,234 +4303,27 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 // the current snapshot cannot yet reflect one of these writes.
                                 let mut discharge_control_may_override_pause = false;
 
-                                // ---- Force Charge auto-revert ----
-                                //
-                                // A bounded external Force Charge also owns a
-                                // temporary schedule window. Once it closes,
-                                // restore the captured charge flags, target,
-                                // mode, and schedule using the same durable
-                                // ownership/readback path as an explicit Stop.
+                                // ---- Force Charge / Force Discharge auto-revert ----
+                                // Bounded force actions restore their captured baseline
+                                // once the slot closes (see the functions' docs).
+                                run_force_charge_auto_revert(
+                                    &state,
+                                    &mut client,
+                                    &snapshot,
+                                    &mut discharge_arbiter,
+                                    write_gap,
+                                )
+                                .await;
+                                if let Some(may_override) = run_force_discharge_auto_revert(
+                                    &state,
+                                    &mut client,
+                                    &snapshot,
+                                    &mut discharge_arbiter,
+                                    write_gap,
+                                )
+                                .await
                                 {
-                                    let _force_action_guard = state.force_action_lock.lock().await;
-                                    let now_ms = chrono::Utc::now().timestamp_millis();
-                                    let revert_guard = state.force_charge_revert.lock().await;
-                                    let expired = revert_guard
-                                        .as_ref()
-                                        .and_then(|revert| revert.force_charge_slot_end_ms)
-                                        .is_some_and(|end| now_ms >= end);
-                                    let restoration_pending = state
-                                        .force_charge_restoration
-                                        .lock()
-                                        .await
-                                        .is_some();
-                                    if expired
-                                        && !restoration_pending
-                                        && discharge_arbiter
-                                            .request(DischargeControlOwner::ManualForce)
-                                    {
-                                        let revert = revert_guard.clone();
-                                        drop(revert_guard);
-                                        if let Some(revert) = revert {
-                                            if !force_baseline_matches_inverter(
-                                                Some(&snapshot),
-                                                revert.device_type,
-                                                &revert.inverter_serial,
-                                            ) {
-                                                if force_baseline_belongs_to_other_inverter(
-                                                    Some(&snapshot),
-                                                    revert.device_type,
-                                                    &revert.inverter_serial,
-                                                ) {
-                                                    tracing::warn!(
-                                                        captured = %revert.inverter_serial,
-                                                        "Force Charge auto-revert withheld: the captured inverter is not connected"
-                                                    );
-                                                    state.force_charge_revert.lock().await.take();
-                                                    if let Err(error) = state
-                                                        .command_ledger
-                                                        .complete_restoration("force_charge")
-                                                    {
-                                                        tracing::warn!(
-                                                            "Failed to release Force Charge ownership: {error}"
-                                                        );
-                                                    }
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Force Charge auto-revert withheld: the captured inverter is not identifiable"
-                                                    );
-                                                }
-                                            } else {
-                                                *state.force_charge_restoration.lock().await =
-                                                    Some(ForceRestorationRequest {
-                                                        requested_at_ms: now_ms,
-                                                        device_type: snapshot.device_type,
-                                                        inverter_serial: snapshot.inverter_serial.clone(),
-                                                        firmware_version: snapshot.firmware_version.clone(),
-                                                    });
-                                                if let Err(error) = state
-                                                    .command_ledger
-                                                    .hold_restoration_ownership("force_charge")
-                                                {
-                                                    tracing::warn!(
-                                                        "Could not hold Force Charge restoration ownership: {error}"
-                                                    );
-                                                }
-                                                let writes = crate::server::api::build_force_charge_stop_writes(
-                                                    snapshot.device_type,
-                                                    &revert,
-                                                );
-                                                for write in writes {
-                                                    match client
-                                                        .write_register(write.address, write.value)
-                                                        .await
-                                                    {
-                                                        Ok(()) => tracing::info!(
-                                                            "Force Charge auto-revert: wrote reg {} = {}",
-                                                            write.address,
-                                                            write.value
-                                                        ),
-                                                        Err(error) => tracing::error!(
-                                                            "Force Charge auto-revert: write reg {} failed: {error}",
-                                                            write.address
-                                                        ),
-                                                    }
-                                                    tokio::time::sleep(write_gap).await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // ---- Force Discharge auto-revert (issue #129) ----
-                                //
-                                // When Force Discharge is started with a bounded duration
-                                // (`POST /api/control/force-discharge {"minutes": N}`), the API
-                                // handler records the slot's end time in
-                                // `force_discharge_revert.force_discharge_slot_end_ms`. When
-                                // that time passes, the inverter stops discharging (the slot
-                                // window has closed) but the force-discharge flags remain
-                                // set: HR 27 = 0 (export), HR 59 = 1 (enable_discharge),
-                                // HR 96 = 0 (charge off), HR 20 = 0 (charge target off).
-                                // The battery is effectively paused — it won't charge from
-                                // solar and won't discharge. Without this auto-revert, the
-                                // user must manually click Eco to recover.
-                                //
-                                // Each poll cycle checks if the slot has expired. If so, we
-                                // keep the revert (retaining ownership so a subsequent explicit
-                                // Stop still retries) and queue the restoration writes via the
-                                // live Modbus client (same path as the explicit Stop button).
-                                // Only the FIRST attempt is initiated here; failed attempts are
-                                // re-queued by `retry_stalled_force_restorations` after a quiet
-                                // interval. Re-initiating every cycle would advance the
-                                // freshness barrier past every snapshot and confirmation
-                                // could never succeed.
-                                {
-                                    let _force_action_guard = state.force_action_lock.lock().await;
-                                    let now_ms = chrono::Local::now().timestamp_millis();
-                                    let revert_guard = state.force_discharge_revert.lock().await;
-                                    let expired = revert_guard
-                                        .as_ref()
-                                        .and_then(|r| r.force_discharge_slot_end_ms)
-                                        .is_some_and(|end| now_ms >= end);
-                                    let restoration_pending = state
-                                        .force_discharge_restoration
-                                        .lock()
-                                        .await
-                                        .is_some();
-
-                                    if expired
-                                        && !restoration_pending
-                                        && discharge_arbiter
-                                            .request(DischargeControlOwner::ManualForce)
-                                    {
-                                        // Retain ownership until a causally newer
-                                        // snapshot confirms every restoration
-                                        // write. Failed writes therefore retry on
-                                        // a later poll instead of losing the
-                                        // baseline permanently.
-                                        let revert = revert_guard.clone();
-                                        drop(revert_guard);
-                                        if let Some(r) = revert {
-                                            // Second automatic writer of a captured
-                                            // baseline: same identity rule as the
-                                            // explicit Stop. A provably-foreign
-                                            // baseline is released instead of being
-                                            // written onto hardware it never
-                                            // described; an unverifiable one is
-                                            // withheld for a later cycle.
-                                            if !force_baseline_matches_inverter(
-                                                Some(&snapshot),
-                                                r.device_type,
-                                                &r.inverter_serial,
-                                            ) {
-                                                if force_baseline_belongs_to_other_inverter(
-                                                    Some(&snapshot),
-                                                    r.device_type,
-                                                    &r.inverter_serial,
-                                                ) {
-                                                    tracing::warn!(
-                                                        captured = %r.inverter_serial,
-                                                        "Force discharge auto-revert withheld: the captured inverter is not connected"
-                                                    );
-                                                    state.force_discharge_revert.lock().await.take();
-                                                    if let Err(error) = state
-                                                        .command_ledger
-                                                        .complete_restoration("force_discharge")
-                                                    {
-                                                        tracing::warn!(
-                                                            "Failed to release Force Discharge ownership: {error}"
-                                                        );
-                                                    }
-                                                } else {
-                                                    tracing::debug!(
-                                                        "Force discharge auto-revert withheld: the captured inverter is not identifiable"
-                                                    );
-                                                }
-                                                // Skip the write; ownership is either
-                                                // released (foreign) or retained
-                                                // (unverifiable) for the next cycle.
-                                                discharge_control_may_override_pause = false;
-                                            } else {
-                                            *state.force_discharge_restoration.lock().await =
-                                                Some(ForceRestorationRequest {
-                                                    requested_at_ms: now_ms,
-                                                    device_type: snapshot.device_type,
-                                                    inverter_serial: snapshot.inverter_serial.clone(),
-                                                    firmware_version: snapshot.firmware_version.clone(),
-                                                });
-                                            let writes = crate::server::api::build_force_discharge_stop_writes(
-                                                snapshot.device_type,
-                                                &snapshot.firmware_version,
-                                                &r,
-                                            );
-                                            if !writes.is_empty() {
-                                                discharge_control_may_override_pause = true;
-                                                for w in &writes {
-                                                    match client.write_register(w.address, w.value).await {
-                                                        Ok(()) => tracing::info!(
-                                                            "Force discharge auto-revert: wrote reg {} = {}",
-                                                            w.address, w.value
-                                                        ),
-                                                        Err(e) => tracing::error!(
-                                                            "Force discharge auto-revert: write reg {} failed: {e}",
-                                                            w.address
-                                                        ),
-                                                    }
-                                                    tokio::time::sleep(write_gap).await;
-                                                }
-                                            }
-                                            }
-                                        }
-                                    } else if expired && !restoration_pending {
-                                        tracing::debug!(
-                                            owner = ?discharge_arbiter.selected_owner(),
-                                            "Force discharge auto-revert deferred by a higher-priority owner"
-                                        );
-                                    }
-                                    // (expired && restoration_pending): the first
-                                    // attempt is awaiting confirmation; failed attempts
-                                    // are re-queued by `retry_stalled_force_restorations`
-                                    // in publish_snapshot after the quiet interval.
+                                    discharge_control_may_override_pause = may_override;
                                 }
 
                                 // ---- Timed Export state machine ----
@@ -4856,7 +4418,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                             &te_config,
                                             &mut te_state,
                                             minute_of_day,
-                                            known_device_type.unwrap_or_default(),
+                                            identity.device_type.unwrap_or_default(),
                                             last_timed_export_write_outcome,
                                             te_rearm.is_observing(),
                                         );
@@ -4946,7 +4508,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                                     &te_config,
                                                     &mut te_state_fallback,
                                                     minute_of_day,
-                                                    known_device_type.unwrap_or_default(),
+                                                    identity.device_type.unwrap_or_default(),
                                                     crate::inverter::state_machines::TimedExportWriteOutcome::NoneIssued,
                                                     false,
                                                 );
@@ -5072,227 +4634,33 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 }
                                 // ---- Cosy charging mode ----
                                 //
-                                // Writes Cosy slot schedules into the inverter's own charge slot
-                                // registers so the inverter follows the schedule independently.
-                                //
-                                // When a Cosy slot is ACTIVE: writes the current slot times +
-                                // enable_charge + target SOC to the inverter.
-                                //
-                                // When no Cosy slot is active: preloads the NEXT upcoming slot's
-                                // times into the inverter registers (with enable_charge=0) so the
-                                // inverter has the schedule ready. If there's no next slot, clears
-                                // the registers.
-                                //
-                                // This means if the app crashes, the inverter already has the
-                                // correct schedule loaded and can act on it.
+                                // Writes Cosy slot schedules into the inverter's own charge
+                                // slot registers so it follows them independently: drive the
+                                // active slot, otherwise preload the next one (see `cosy`).
                                 if discharge_arbiter
                                     .can_request(DischargeControlOwner::TimedCharge)
                                 {
-                                    let settings = &poll_settings;
-                                    let now_minutes = inverter_minute;
-
-                                    // Check if we're inside any enabled cosy slot. When cosy mode is
-                                    // disabled, treat as "not in slot" so any lingering cosy_active
-                                    // flag gets cleared on the next poll (otherwise the inverter stays
-                                    // force-charging after switching away from Cosy mode).
-                                    let current_slot = if settings.cosy_enabled {
-                                        settings.cosy_slots.iter().enumerate().find(|(_, s)| s.enabled && s.contains_minutes(now_minutes))
-                                    } else {
-                                        None
-                                    };
-                                    let in_slot = current_slot.is_some();
-
-                                    let cosy_active = state.cosy_active.lock().await;
-                                    if in_slot && !*cosy_active {
-                                        // ---- Entering a cosy slot ----
-                                        // Write the active slot's times into the inverter's charge
-                                        // slot registers and enable charging.
-                                        let (slot_idx, cosy_slot) = current_slot.unwrap();
-                                        tracing::info!(
-                                            "Cosy: entering slot {} ({}:{:02}-{}:{:02}), target SOC {}%",
-                                            slot_idx,
-                                            cosy_slot.start_hour, cosy_slot.start_minute,
-                                            cosy_slot.end_hour, cosy_slot.end_minute,
-                                            cosy_slot.target_soc
-                                        );
-                                        drop(cosy_active);
-
-                                        let writes = cosy_slot_register_writes(
-                                            cosy_slot, snapshot.device_type, true,
-                                        );
-                                        if request_cosy_writes(&writes, &mut discharge_arbiter) {
-                                            let ok = write_registers_to_inverter(
-                                                &mut client, &writes, "Cosy enter",
-                                            )
-                                            .await;
-
-                                            if ok {
-                                                *state.cosy_active.lock().await = true;
-                                                persist_cosy_active(true);
-                                                // Mark the preloaded slot as stale since we're now active.
-                                                cosy_last_preloaded_slot = None;
-                                            } else {
-                                                tracing::warn!("Cosy: enter writes failed - will retry on next poll");
-                                            }
-                                        }
-                                    } else if *cosy_active && !in_slot {
-                                        // ---- Exiting a cosy slot ----
-                                        // Disable charging and preload the next upcoming slot's
-                                        // times (or clear if no next slot).
-                                        tracing::info!("Cosy: exiting slot, restoring Eco mode");
-                                        drop(cosy_active);
-
-                                        // First, disable charge and charge target.
-                                        let mut writes = vec![
-                                            RegisterWrite { address: HR_ENABLE_CHARGE, value: 0 },
-                                            RegisterWrite { address: HR_ENABLE_CHARGE_TARGET, value: 0 },
-                                        ];
-                                        // For three-phase models, also clear force flags —
-                                        // except the discharge flag, which belongs to the
-                                        // higher-priority Timed Export machine while it
-                                        // owns the current window (issue #289 priority:
-                                        // scheduled Timed Export outranks Timed Charge).
-                                        if snapshot.device_type.uses_three_phase_schedule_slots() {
-                                            use crate::modbus::registers::{
-                                                HR_3PH_FORCE_CHARGE_ENABLE,
-                                                HR_3PH_AC_CHARGE_ENABLE,
-                                                HR_3PH_FORCE_DISCHARGE_ENABLE,
-                                            };
-                                            writes.push(RegisterWrite { address: HR_3PH_FORCE_CHARGE_ENABLE, value: 0 });
-                                            writes.push(RegisterWrite { address: HR_3PH_AC_CHARGE_ENABLE, value: 0 });
-                                            if !timed_export_owns_discharge {
-                                                writes.push(RegisterWrite { address: HR_3PH_FORCE_DISCHARGE_ENABLE, value: 0 });
-                                            }
-                                        }
-                                        // Restore eco mode and clear enable_discharge to
-                                        // match CosyExit behaviour — but only when Timed
-                                        // Export does not own the discharge-control
-                                        // registers this cycle. A lower-priority
-                                        // automation must not cancel an active export
-                                        // window (code-review finding: Cosy/Agile
-                                        // executed after Timed Export and overwrote
-                                        // its mode, enable flag and slots).
-                                        if !timed_export_owns_discharge {
-                                            // Restore eco mode.
-                                            use crate::modbus::registers::HR_BATTERY_POWER_MODE;
-                                            writes.push(RegisterWrite { address: HR_BATTERY_POWER_MODE, value: 1 });
-                                            // Also clear enable_discharge to match CosyExit behaviour.
-                                            use crate::modbus::registers::HR_ENABLE_DISCHARGE;
-                                            writes.push(RegisterWrite { address: HR_ENABLE_DISCHARGE, value: 0 });
-                                        } else {
-                                            tracing::debug!(
-                                                "Cosy: deferring Eco restore — Timed Export owns the current window"
-                                            );
-                                        }
-
-                                        // Now preload the next upcoming slot's times (with
-                                        // enable_charge=0 so the inverter doesn't act on it yet).
-                                        if settings.cosy_enabled {
-                                            let next = crate::settings::find_next_cosy_slot(
-                                                now_minutes, &settings.cosy_slots,
-                                            );
-                                            if let Some((next_idx, next_slot, minutes_until)) = next {
-                                                tracing::info!(
-                                                    "Cosy: preloading next slot {} ({}:{:02}-{}:{:02}) in {} min",
-                                                    next_idx,
-                                                    next_slot.start_hour, next_slot.start_minute,
-                                                    next_slot.end_hour, next_slot.end_minute,
-                                                    minutes_until
-                                                );
-                                                writes.extend(cosy_slot_register_writes(
-                                                    next_slot, snapshot.device_type, false,
-                                                ));
-                                            } else {
-                                                tracing::info!("Cosy: no upcoming slot - clearing charge slot registers");
-                                                writes.extend(clear_cosy_slot_registers(snapshot.device_type));
-                                            }
-                                        } else {
-                                            // Cosy mode was disabled while active - clear registers.
-                                            writes.extend(clear_cosy_slot_registers(snapshot.device_type));
-                                        }
-
-                                        if discharge_arbiter
-                                            .request(DischargeControlOwner::TimedCharge)
-                                        {
-                                            let ok = write_registers_to_inverter(
-                                                &mut client, &writes, "Cosy exit",
-                                            )
-                                            .await;
-
-                                            if ok {
-                                                *state.cosy_active.lock().await = false;
-                                                persist_cosy_active(false);
-                                                // Update the preloaded tracker to the next slot (or None).
-                                                cosy_last_preloaded_slot = if settings.cosy_enabled {
-                                                    crate::settings::find_next_cosy_slot(
-                                                        now_minutes, &settings.cosy_slots,
-                                                    ).map(|(idx, _, _)| idx)
-                                                } else {
-                                                    None
-                                                };
-                                            } else {
-                                                tracing::warn!("Cosy: exit writes failed - will retry on next poll");
-                                            }
-                                        }
-                                    } else if !in_slot && !*cosy_active {
-                                        // ---- Idle: ensure the next upcoming slot is preloaded ----
-                                        // Only re-writes when the "next upcoming slot" index changes
-                                        // (e.g. after a slot ends or on first poll after connect).
-                                        drop(cosy_active);
-                                        if settings.cosy_enabled {
-                                            let next = crate::settings::find_next_cosy_slot(
-                                                now_minutes, &settings.cosy_slots,
-                                            );
-                                            let next_idx = next.as_ref().map(|(idx, _, _)| *idx);
-                                            // Only write when the next slot changes or on first poll.
-                                            if next_idx != cosy_last_preloaded_slot {
-                                                if let Some((next_idx, next_slot, minutes_until)) = next {
-                                                    tracing::info!(
-                                                        "Cosy: preloading next slot {} ({}:{:02}-{}:{:02}) in {} min",
-                                                        next_idx,
-                                                        next_slot.start_hour, next_slot.start_minute,
-                                                        next_slot.end_hour, next_slot.end_minute,
-                                                        minutes_until
-                                                    );
-                                                    let writes = cosy_slot_register_writes(
-                                                        next_slot, snapshot.device_type, false,
-                                                    );
-                                                    if request_cosy_writes(
-                                                        &writes,
-                                                        &mut discharge_arbiter,
-                                                    ) {
-                                                        let ok = write_registers_to_inverter(
-                                                            &mut client, &writes, "Cosy preload",
-                                                        )
-                                                        .await;
-                                                        if ok {
-                                                            cosy_last_preloaded_slot = Some(next_idx);
-                                                        }
-                                                    }
-                                                } else {
-                                                    // No upcoming slot - clear registers if they were set.
-                                                    if cosy_last_preloaded_slot.is_some() {
-                                                        tracing::info!("Cosy: no upcoming slot - clearing charge slot registers");
-                                                        let writes = clear_cosy_slot_registers(snapshot.device_type);
-                                                        if discharge_arbiter
-                                                            .request(DischargeControlOwner::TimedCharge)
-                                                        {
-                                                            let ok = write_registers_to_inverter(
-                                                                &mut client, &writes, "Cosy clear",
-                                                            )
-                                                            .await;
-                                                            if ok {
-                                                                cosy_last_preloaded_slot = None;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // Already in an active cosy slot - nothing to do.
-                                        drop(cosy_active);
-                                    }
+                                    let cosy_active = *state.cosy_active.lock().await;
+                                    let step = crate::inverter::cosy::plan_cosy_step(
+                                        &crate::inverter::cosy::CosyInputs {
+                                            enabled: poll_settings.cosy_enabled,
+                                            slots: &poll_settings.cosy_slots,
+                                            now_minutes: inverter_minute,
+                                            cosy_active,
+                                            last_preloaded: cosy_last_preloaded_slot,
+                                            timed_export_owns_discharge,
+                                            device_type: snapshot.device_type,
+                                        },
+                                    );
+                                    crate::inverter::cosy::run_cosy_step(
+                                        step,
+                                        &state,
+                                        &mut client,
+                                        &mut discharge_arbiter,
+                                        &mut cosy_last_preloaded_slot,
+                                        crate::inverter::cosy::COSY_WRITE_GAP,
+                                    )
+                                    .await;
                                 }
 
                                 // ---- Agile Octopus mode ----
@@ -5330,92 +4698,33 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         // the poll (tokio Mutex is not re-entrant).
                                         let current_price = {
                                             let prices = state.cached_agile_prices.lock().await;
-                                            prices
-                                                .iter()
-                                                .find(|s| {
-                                                    now_ts >= s.valid_from && now_ts < s.valid_to
-                                                })
-                                                .map(|s| s.pence)
+                                            crate::inverter::agile::price_at(&prices, now_ts)
                                         };
 
                                         let price = if current_price.is_some() {
                                             current_price
                                         } else {
-                                            // Cache miss - fetch fresh prices from Octopus API.
-                                            // Anchor to the start of TODAY (UTC) so the response always
-                                            // includes the current slot. The Agile endpoint returns
-                                            // results newest-first, so a bare page_size=48 returns
-                                            // tomorrow's slots once they're published (~1pm) and the
-                                            // current slot drops out of the window - which silently
-                                            // leaves the state machine Idle and never discharges.
-                                            let region = settings.agile_region.clone();
+                                            // Cache miss - fetch fresh prices from Octopus API
+                                            // (anchored to the start of today so the current slot
+                                            // is always in the response).
                                             let today =
                                                 chrono::Utc::now().format("%Y-%m-%d").to_string();
-                                            // Configurable base URL: defaults to the real Octopus
-                                            // endpoint; tests and self-hosters can override via
-                                            // `settings.agile_api_base_url` to point at a local mock
-                                            // server or mirror.
-                                            let base = if settings.agile_api_base_url.is_empty() {
-                                                "https://api.octopus.energy".to_string()
-                                            } else {
-                                                settings.agile_api_base_url.clone()
-                                            };
-                                            let url = format!(
-                                                "{base}/v1/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-{region}/standard-unit-rates/?period_from={today}T00:00:00Z&page_size=96"
+                                            let url = crate::inverter::agile::agile_rates_url(
+                                                &settings.agile_api_base_url,
+                                                &settings.agile_region,
+                                                &today,
                                             );
-                                                let fetch_result = tokio::task::spawn_blocking(move || -> Result<Vec<PriceSlot>, String> {
-                                                // Bounded request: an unreachable/slow price source
-                                                // (e.g. the real Octopus API when a test/self-host
-                                                // points us back at the default) must never stall the
-                                                // poll loop for ureq's default connect timeout. No
-                                                // idle keep-alive connections: tests spin up throwaway
-                                                // mock Octopus servers and close() them per test, and a
-                                                // lingering pooled connection would hang the close.
-                                                let agent = ureq::Agent::config_builder()
-                                                    .timeout_global(Some(Duration::from_secs(10)))
-                                                    .max_idle_connections(0)
-                                                    .max_idle_connections_per_host(0)
-                                                    .build();
-                                                let mut resp = ureq::Agent::new_with_config(agent)
-                                                    .get(&url)
-                                                    .call()
-                                                    .map_err(|e| format!("HTTP error: {e}"))?;
-                                                let body = resp.body_mut().read_to_string()
-                                                    .map_err(|e| format!("read error: {e}"))?;
-                                                let json: serde_json::Value = serde_json::from_str(&body)
-                                                    .map_err(|e| format!("JSON error: {e}"))?;
-                                                let results = json["results"]
-                                                    .as_array()
-                                                    .ok_or_else(|| "missing results".to_string())?;
-                                                let mut slots: Vec<PriceSlot> = results
-                                                    .iter()
-                                                    .filter_map(|r| {
-                                                        let pence = r["value_inc_vat"].as_f64()?;
-                                                        let from = r["valid_from"].as_str()?;
-                                                        let to = r["valid_to"].as_str()?;
-                                                        let from_ts = chrono::DateTime::parse_from_rfc3339(from).ok()?.timestamp();
-                                                        let to_ts = chrono::DateTime::parse_from_rfc3339(to).ok()?.timestamp();
-                                                        Some(PriceSlot { pence, valid_from: from_ts, valid_to: to_ts })
-                                                    })
-                                                    .collect();
-                                                crate::inverter::state_machines::sort_price_slots_newest_first(
-                                                    &mut slots,
-                                                );
-                                                Ok(slots)
-                                            }).await;
+                                            let fetch_result = tokio::task::spawn_blocking(move || {
+                                                crate::inverter::agile::fetch_agile_rates(&url)
+                                            })
+                                            .await;
 
                                             match fetch_result {
                                                 Ok(Ok(fresh)) => {
                                                     let mut prices =
                                                         state.cached_agile_prices.lock().await;
                                                     *prices = fresh;
-                                                    prices
-                                                        .iter()
-                                                        .find(|s| {
-                                                            now_ts >= s.valid_from
-                                                                && now_ts < s.valid_to
-                                                        })
-                                                        .map(|s| s.pence)
+                                                    crate::inverter::agile::price_at(&prices, now_ts)
                                                 }
                                                 Ok(Err(e)) => {
                                                     tracing::warn!("Agile: failed to fetch prices: {e}");
@@ -5470,17 +4779,13 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     // charge actions clobber HR27 / the
                                     // three-phase discharge enable on some
                                     // models. Defer entirely for this poll.
-                                    let action = if !discharge_arbiter
-                                        .can_request(DischargeControlOwner::Agile)
-                                    {
-                                        tracing::debug!(
-                                            owner = ?discharge_arbiter.selected_owner(),
-                                            "Agile: deferring — another discharge-control owner won this cycle"
-                                        );
-                                        AgileSlotAction::Defer
-                                    } else {
-                                        action
-                                    };
+                                    // Ownership arbitration (issue #289): while another owner
+                                    // (e.g. a scheduled Timed Export window) holds the
+                                    // discharge-control domain, Agile defers entirely.
+                                    let action = crate::inverter::agile::defer_if_outranked(
+                                        action,
+                                        discharge_arbiter,
+                                    );
 
                                     // Convert the action into register writes.
                                     let agile_enables_discharge =
@@ -5500,66 +4805,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         scope,
                                         &action,
                                     );
-                                    let cmd = match &action {
-                                        AgileSlotAction::Charge {
-                                            start_hhmm,
-                                            end_hhmm,
-                                            target_soc,
-                                        } => {
-                                            tracing::info!(
-                                                "Agile: cheap window, charging {start_hhmm:04}–{end_hhmm:04} to {target_soc}%"
-                                            );
-                                            if use_3ph {
-                                                ControlCommand::ThreePhaseAgileChargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                    target_soc: *target_soc,
-                                                }
-                                            } else {
-                                                ControlCommand::AgileChargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                    target_soc: *target_soc,
-                                                }
-                                            }
-                                        }
-                                        AgileSlotAction::Discharge { start_hhmm, end_hhmm } => {
-                                            tracing::info!(
-                                                "Agile: expensive window, discharging (export) {start_hhmm:04}–{end_hhmm:04}"
-                                            );
-                                            if use_3ph {
-                                                ControlCommand::ThreePhaseAgileDischargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                }
-                                            } else {
-                                                ControlCommand::AgileDischargeSlot {
-                                                    start_hhmm: *start_hhmm,
-                                                    end_hhmm: *end_hhmm,
-                                                }
-                                            }
-                                        }
-                                        AgileSlotAction::Defer => {
-                                            // Cosy or auto-winter owns this side. Don't
-                                            // touch the inverter. Logged at debug only
-                                            // because this fires every poll during a
-                                            // cosy slot.
-                                            tracing::debug!("Agile: deferring (cosy/auto-winter owns charge side)");
-                                            // Use a no-op command — the skip_writes guard
-                                            // below prevents this from being written.
-                                            ControlCommand::AgileClearActiveSlot
-                                        }
-                                        AgileSlotAction::Idle => {
-                                            // Mid-band price, out-of-scope mode, or no
-                                            // price data. Disarm any preloaded slot.
-                                            tracing::debug!("Agile: idle, clearing active slot");
-                                            if use_3ph {
-                                                ControlCommand::ThreePhaseAgileClearActiveSlot
-                                            } else {
-                                                ControlCommand::AgileClearActiveSlot
-                                            }
-                                        }
-                                    };
+                                    let cmd = crate::inverter::agile::agile_command(&action, use_3ph);
 
                                     if !skip_writes
                                         && discharge_arbiter
@@ -5771,256 +5017,70 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                     }
                                 }
 
-                                // ---- Email alerts ----
+                                // ---- Alerts ----
                                 //
-                                // Evaluate the sanitized snapshot against user-
-                                // configured thresholds and send email via Brevo
-                                // if any alerts are triggered (debounced).
-                                //
-                                // System-level battery voltage mismatch
-                                // (issue #272, breaker-trip case): the
-                                // transition is computed inside the alert
-                                // block below (where the debounce is locked)
-                                // and notified after it (where the config
-                                // lock is free for the senders).
-                                let mut mismatch_transition =
-                                    crate::alerts::BatteryConnTransition::default();
-                                let mut mismatch_suppressed = false;
-                                let mut mismatch_inverter_v: f32 = 0.0;
-                                let mut mismatch_module_v: Option<f32> = None;
-                                {
-                                    let settings_cfg = state.alert_config.lock().await;
-                                    let config = settings_cfg.clone();
-                                    if config.enabled {
-                                        tracing::debug!(
-                                            "Alerts: evaluating (grid_loss={}, batt_over_temp={}, soc={})",
-                                            snapshot.grid_loss,
-                                            snapshot.battery_over_temp,
-                                            snapshot.soc,
-                                        );
-                                        let triggered =
-                                            crate::alerts::evaluate_alerts(&snapshot, &config);
-                                        let mut debounce =
-                                            state.alert_debounce.lock().await;
-
-                                        // Register-corruption defence for the inverter's
-                                        // hardware battery warning flag (IR 57). The raw
-                                        // flag is fed into the debounce's consecutive-read
-                                        // counter every cycle; the BatteryOverTemp alert
-                                        // is only kept if the flag has now read `true` for
-                                        // BATTERY_WARNING_CONFIRM_CYCLES cycles in a row.
-                                        // This prevents a single transient garbage read on
-                                        // IR(57) from firing a spurious warning (e.g. the
-                                        // reported 21.5°C over-temp false positive), while
-                                        // still allowing a genuine sustained warning
-                                        // through regardless of the configured °C limit.
-                                        let confirmed =
-                                            debounce.confirm_battery_warning(
-                                                snapshot.battery_over_temp
-                                                    && config.battery_over_temp_enabled,
-                                            );
-                                        // Precision defence for the solar-clipping
-                                        // alert: feed this cycle's "solar above the
-                                        // configured ceiling" flag into a
-                                        // consecutive-read counter. The alert only
-                                        // survives if solar has been over the
-                                        // ceiling for SOLAR_CLIPPING_CONFIRM_CYCLES
-                                        // cycles, so a momentary cloud-edge spike
-                                        // does not fire it.
-                                        let clipping_confirmed =
-                                            debounce.confirm_solar_clipping(
-                                                config.solar_clipping_enabled
-                                                    && config.solar_clipping_ceiling_w > 0
-                                                    && snapshot.solar_power
-                                                        > config.solar_clipping_ceiling_w as i32,
-                                            );
-                                        // System-level battery voltage mismatch
-                                        // (issue #272, breaker-trip case): feed
-                                        // the inverter-vs-BMS mismatch flag
-                                        // through the debounce's consecutive-
-                                        // cycle counter. Only fed when the
-                                        // Battery Connection Lost alert is
-                                        // enabled, so a disabled alert cannot
-                                        // accumulate a streak. Suppressed when
-                                        // the per-battery detector already
-                                        // confirmed a loss (its notifications
-                                        // have fired for this episode).
-                                        let module_voltages: Vec<f32> = snapshot
-                                            .battery_modules
-                                            .iter()
-                                            .map(|m| m.voltage)
-                                            .collect();
-                                        let mismatch =
-                                            config.battery_connection_lost_enabled
-                                                && crate::alerts::battery_voltage_mismatch(
-                                                    snapshot.battery_voltage,
-                                                    &module_voltages,
-                                                );
-                                        let transition = debounce
-                                            .confirm_battery_voltage_mismatch(mismatch);
-                                        let any_conn_lost =
-                                            debounce.any_battery_connection_lost();
-                                        mismatch_transition = transition;
-                                        mismatch_suppressed = (transition.lost
-                                            || transition.restored)
-                                            && any_conn_lost;
-                                        if transition.lost || transition.restored {
-                                            mismatch_inverter_v = snapshot.battery_voltage;
-                                            mismatch_module_v = crate::alerts::healthiest_module_voltage(
-                                                &module_voltages,
-                                            );
-                                        }
-                                        let confirmed_triggered: Vec<AlertType> = triggered
-                                            .iter()
-                                            .copied()
-                                            .filter(|a| match *a {
-                                                AlertType::BatteryOverTemp => confirmed,
-                                                AlertType::SolarClipping => clipping_confirmed,
-                                                _ => true,
-                                            })
-                                            .collect();
-                                        let triggered = confirmed_triggered;
-                                        if !triggered.is_empty() {
-                                            tracing::warn!("Alerts: triggered={:?}", triggered);
-                                        }
-                                        let (to_send, suppressed): (Vec<_>, Vec<_>) = triggered
-                                            .iter()
-                                            .copied()
-                                            .partition(|a| debounce.should_fire(*a, config.cooldown_minutes));
-                                        if !suppressed.is_empty() {
-                                            tracing::warn!(
-                                                "Alerts: {:?} triggered but suppressed by cooldown",
-                                                suppressed
-                                            );
-                                        }
-                                        // Detect alerts that were previously active but have
-                                        // now returned to normal.
-                                        let cleared = debounce.extract_cleared(&triggered);
-                                        drop(debounce);
-
-                                        // Send "problem cleared" notifications
-                                        if !cleared.is_empty() {
-                                            let text = crate::alerts::build_cleared_message(
-                                                &snapshot, &cleared,
-                                            );
-                                            let token = config.telegram_bot_token.clone();
-                                            let chat_id = config.telegram_chat_id.clone();
-                                            let ntfy_text = text.clone();
-                                            let pushover_text = text.clone();
-                                            let cleared_names = cleared
-                                                .iter()
-                                                .map(|a| a.human_name())
-                                                .collect::<Vec<_>>()
-                                                .join(", ");
-
-                                            if !token.is_empty() && !chat_id.is_empty() {
-                                                tokio::task::spawn_blocking(move || {
-                                                    match crate::alerts::send_telegram_message(
-                                                        &token,
-                                                        &chat_id,
-                                                        &text,
-                                                    ) {
-                                                        Ok(()) => tracing::warn!(
-                                                            "Cleared alert sent: {cleared_names}"
-                                                        ),
-                                                        Err(e) => tracing::warn!(
-                                                            "Failed to send cleared alert: {e}"
-                                                        ),
-                                                    }
-                                                });
-                                            }
-
-                                            let ntfy_topic = config.ntfy_topic.clone();
-                                            let ntfy_server = config.ntfy_server.clone();
-                                            tokio::task::spawn_blocking(move || {
-                                                if ntfy_topic.is_empty() {
-                                                    return;
-                                                }
-                                                match crate::alerts::send_ntfy_message(
-                                                    &ntfy_topic,
-                                                    &ntfy_server,
-                                                    &ntfy_text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!("ntfy cleared alert sent"),
-                                                    Err(e) => tracing::warn!("ntfy cleared alert failed: {e}"),
-                                                }
-                                            });
-
-                                            let pushover_token = config.pushover_app_token.clone();
-                                            let pushover_user = config.pushover_user_key.clone();
-                                            tokio::task::spawn_blocking(move || {
-                                                if pushover_token.is_empty()
-                                                    || pushover_user.is_empty()
-                                                {
-                                                    return;
-                                                }
-                                                match crate::alerts::send_pushover_message(
-                                                    &pushover_token,
-                                                    &pushover_user,
-                                                    &pushover_text,
-                                                ) {
-                                                    Ok(()) => tracing::warn!(
-                                                        "Pushover cleared alert sent"
-                                                    ),
-                                                    Err(e) => tracing::warn!(
-                                                        "Pushover cleared alert failed: {e}"
-                                                    ),
-                                                }
-                                            });
-                                        }
-
-                                        if !to_send.is_empty() {
-                                            let text = crate::alerts::build_alert_message(
-                                                &snapshot, &to_send,
-                                            );
-                                            let alert_types = to_send.clone();
-                                            let alert_config = config.clone();
-                                            let debounce = state.alert_debounce.clone();
-                                            tokio::spawn(async move {
-                                                let delivered = crate::alerts::dispatch_alert_text(
-                                                    &alert_config,
-                                                    &text,
-                                                    "alert",
-                                                )
-                                                .await;
-                                                let mut debounce = debounce.lock().await;
-                                                debounce.record_delivery(&alert_types, delivered);
-                                            });
-                                        }
-                                    }
-                                    drop(settings_cfg);
+                                // Evaluate the sanitized snapshot against the user's
+                                // thresholds (with the debounce's consecutive-read
+                                // confirmation and cooldown), then notify. Evaluation is
+                                // pure (`evaluate_alert_cycle`); only the senders do I/O.
+                                let alert_config = state.alert_config.lock().await.clone();
+                                let alert_cycle = {
+                                    let mut debounce = state.alert_debounce.lock().await;
+                                    crate::alerts::evaluate_alert_cycle(
+                                        &snapshot,
+                                        &alert_config,
+                                        &mut debounce,
+                                    )
+                                };
+                                crate::alerts::notify_cleared_alerts(
+                                    &alert_config,
+                                    &snapshot,
+                                    &alert_cycle.cleared,
+                                );
+                                if !alert_cycle.to_send.is_empty() {
+                                    let text = crate::alerts::build_alert_message(
+                                        &snapshot,
+                                        &alert_cycle.to_send,
+                                    );
+                                    tokio::spawn(crate::alerts::deliver_triggered_alerts(
+                                        state.alert_debounce.clone(),
+                                        alert_config,
+                                        text,
+                                        alert_cycle.to_send,
+                                    ));
                                 }
 
                                 // ---- Battery voltage mismatch notifications ----
-                                // (issue #272, breaker-trip case). Sent after the
-                                // alert block so the config lock is free for the
-                                // senders. Suppressed when the per-battery
-                                // detector already fired for this episode.
-                                if (mismatch_transition.lost || mismatch_transition.restored)
-                                    && !mismatch_suppressed
-                                {
-                                    if let Some(module_v) = mismatch_module_v {
-                                        if mismatch_transition.lost {
+                                // (issue #272, breaker-trip case). Sent after the alert
+                                // evaluation; already suppressed when the per-battery
+                                // detector fired for this episode.
+                                if let Some(notice) = alert_cycle.mismatch {
+                                    match notice.kind {
+                                        crate::alerts::MismatchKind::Lost => {
                                             tracing::warn!(
                                                 "Battery voltage mismatch: inverter \
-                                                 {mismatch_inverter_v:.1} V vs module \
-                                                 {module_v:.1} V — DC path fault \
-                                                 suspected (breaker?)"
+                                                 {:.1} V vs module \
+                                                 {:.1} V — DC path fault \
+                                                 suspected (breaker?)",
+                                                notice.inverter_voltage,
+                                                notice.module_voltage,
                                             );
                                             crate::alerts::send_battery_voltage_mismatch_notification(
                                                 &state,
-                                                mismatch_inverter_v,
-                                                module_v,
+                                                notice.inverter_voltage,
+                                                notice.module_voltage,
                                             )
                                             .await;
-                                        } else {
+                                        }
+                                        crate::alerts::MismatchKind::Restored => {
                                             tracing::info!(
                                                 "Battery voltage mismatch resolved: \
-                                                 inverter back to {mismatch_inverter_v:.1} V"
+                                                 inverter back to {:.1} V",
+                                                notice.inverter_voltage,
                                             );
                                             crate::alerts::send_battery_voltage_mismatch_restored_notification(
                                                 &state,
-                                                mismatch_inverter_v,
+                                                notice.inverter_voltage,
                                             )
                                             .await;
                                         }
@@ -6028,108 +5088,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                 }
 
                                 // ---- Daily consumption report ----
-                                {
-                                    let settings_cfg = state.alert_config.lock().await;
-                                    let config = settings_cfg.clone();
-                                    drop(settings_cfg);
-
-                                    if config.daily_report_enabled && config.enabled {
-                                        let today = chrono::Local::now().date_naive();
-                                        let mut last_sent = state.last_report_date.lock().await;
-                                        // Only send if we have sent a report before.
-                                        // Don't send on startup - last_sent starts as None.
-                                        if let Some(sent_date) = *last_sent {
-                                            if sent_date < today {
-                                                let now = chrono::Local::now();
-                                                let minutes_since_midnight =
-                                                    now.hour() * 60 + now.minute();
-                                                let send_minutes = config.daily_report_hour as u32 * 60
-                                                    + config.daily_report_minute as u32;
-
-                                                if minutes_since_midnight >= send_minutes {
-                                                    let yesterday = today
-                                                        .checked_sub_signed(
-                                                            chrono::Duration::days(1),
-                                                        )
-                                                        .unwrap_or(today);
-                                                    let db_guard = state.history.lock().await;
-                                                    let db = db_guard.clone();
-                                                    drop(db_guard);
-
-                                                    if let Some(db) = db {
-                                                        let report = tokio::task::spawn_blocking(move || {
-                                                            let rows = db.get_readings_for_date(yesterday)?;
-                                                            let date_str = yesterday
-                                                                .format("%A %d %B %Y")
-                                                                .to_string();
-                                                            let Some(body) = crate::alerts::report::
-                                                                generate_daily_report_html(&rows, &date_str)
-                                                            else {
-                                                                return Ok(None);
-                                                            };
-                                                            let settings = crate::settings::Settings::load();
-                                                            let caption = crate::alerts::report::
-                                                                generate_daily_summary_text(
-                                                                    &rows,
-                                                                    &date_str,
-                                                                    &settings,
-                                                                )
-                                                                .unwrap_or_default();
-                                                            Ok(Some((
-                                                                caption,
-                                                                format!("hem-report-{yesterday}.html"),
-                                                                body,
-                                                            )))
-                                                        })
-                                                        .await
-                                                        .map_err(|error| {
-                                                            format!("daily report worker failed: {error}")
-                                                        })
-                                                        .and_then(|result| result);
-
-                                                        match report {
-                                                            Ok(Some((caption, filename, body))) => {
-                                                                let token = config.telegram_bot_token.clone();
-                                                                let chat_id = config.telegram_chat_id.clone();
-                                                                tokio::task::spawn_blocking(move || {
-                                                                    // Caption uses intentional <b>/<i> tags from
-                                                                    // generate_daily_summary_text, so we keep HTML
-                                                                    // parse_mode here (unlike the support-bundle
-                                                                    // caption, which is plain text).
-                                                                    match crate::alerts::send_telegram_document(
-                                                                        &token,
-                                                                        &chat_id,
-                                                                        &caption,
-                                                                        &filename,
-                                                                        body.as_bytes(),
-                                                                        Some("HTML"),
-                                                                    ) {
-                                                                        Ok(()) => tracing::warn!("Daily report sent"),
-                                                                        Err(e) => tracing::warn!(
-                                                                            "Failed to send daily report: {e}"
-                                                                        ),
-                                                                    }
-                                                                });
-                                                                *last_sent = Some(today);
-                                                            }
-                                                            Ok(None) => {
-                                                                tracing::debug!(
-                                                                    "Daily report: insufficient data for {yesterday}",
-                                                                );
-                                                                *last_sent = Some(today);
-                                                            }
-                                                            Err(e) => {
-                                                                tracing::warn!(
-                                                                    "Failed to query history for daily report: {e}"
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                crate::inverter::daily_report::run_daily_report(
+                                    &state,
+                                    chrono::Local::now(),
+                                    crate::inverter::daily_report::send_daily_report_telegram,
+                                )
+                                .await;
 
                                 // Reflect the (possibly updated) cosy_active flag
                                 // AFTER the cosy state machine has run. Without this,
@@ -6147,7 +5111,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 
                                 publish_snapshot(&state, snapshot).await;
 
-                                (true, sanitized, false, false)
+                                CycleOutcome::published(sanitized)
                             }
                             Err(e) => {
                                 if e.is_hard_failure() {
@@ -6157,7 +5121,7 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         error = %e,
                                         "TCP connection lost — reconnecting"
                                     );
-                                    (false, false, true, false)
+                                    CycleOutcome::CONNECTION_LOST
                                 } else {
                                     // Timeout — the dongle is slow but the
                                     // TCP socket is fine.
@@ -6168,91 +5132,46 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                                         error = %e,
                                         "Poll read failed (transient) — continuing"
                                     );
-                                    (false, false, false, false)
+                                    CycleOutcome::TRANSIENT_FAILURE
                                 }
                             }
                         }
                     }.await;
 
-                    match poll_ok {
-                        true => {
-                            // Review H2: a fingerprint cycle never decoded
-                            // real register data, so it must NOT reset the
-                            // streak — it accumulates here and forces a
-                            // reconnect once the threshold is crossed. (The
-                            // old code reset the counter at the top of this
-                            // arm on the suspicious cycle itself, making the
-                            // reconnect path dead code.)
-                            if block_suspicious {
-                                consecutive_suspicious += 1;
-                                if consecutive_suspicious >= MAX_SUSPICIOUS_CYCLES {
-                                    tracing::warn!(
-                                        suspicious = consecutive_suspicious,
-                                        max = MAX_SUSPICIOUS_CYCLES,
-                                        "Persistent fingerprint corruption - forcing reconnect"
-                                    );
-                                    break;
-                                }
-                                tracing::warn!(
-                                    suspicious = consecutive_suspicious,
-                                    max = MAX_SUSPICIOUS_CYCLES,
-                                    "Dongle memory-leak corruption detected - skipping broadcast, re-polling immediately"
-                                );
-                                continue;
-                            }
-                            consecutive_suspicious = 0;
-                            // Fresh, sanitized data reached the UI/history.
-                            // Resets the sustained-timeout streak, marks the
-                            // session productive, restarts the flap
-                            // data-starvation clock, and — if a flap is
-                            // engaged — advances the stand-down count.
-                            reconnect.note_good_poll(Instant::now());
-                            // Tick the meter retry cadence counter.
-                            if meter_probe_done
-                                && meter_retry_count > 0
-                                && meter_retry_count < METER_MAX_RETRIES
-                            {
-                                meter_cycle_since_last += 1;
-                            }
-                            // If the first scan found nothing and ammeter is
-                            // expected, start the retry cadence.
-                            if meter_probe_done
-                                && meter_retry_count == 0
-                                && detected_meters.is_empty()
-                            {
-                                meter_cycle_since_last += 1;
-                            }
-
-                            // Sanitization was applied - corrupted register data
-                            // detected. Re-poll immediately instead of waiting
-                            // for the next interval, so the frontend gets a
-                            // fresh reading as soon as possible.
-                            if sanitized {
-                                tracing::debug!("Corrupted data detected - re-reading immediately");
-                                continue;
-                            }
-                        }
-                        false => {
-                            // A failed poll breaks the flap recovery streak.
-                            reconnect.note_poll_failed();
-                            if connection_lost {
-                                break;
-                            }
-                            // Transient timeout — read_blocks_resilient already
-                            // retried the failed block. Count it and, once the
-                            // sustained-timeout threshold is reached (handled by
-                            // the controller), disconnect to force a reconnect
-                            // instead of hammering a wedged dongle until the OS
-                            // sends an RST.
-                            if reconnect.note_transient_timeout() {
-                                break;
-                            }
-                            // Sleep briefly then continue to the next poll cycle.
+                    let step = decide_after_cycle(
+                        outcome,
+                        &mut consecutive_suspicious,
+                        &mut reconnect,
+                        Instant::now(),
+                    );
+                    match step {
+                        CycleStep::Reconnect => break,
+                        CycleStep::RepollSuspicious => continue,
+                        CycleStep::RetryAfterBackoff => {
+                            // Transient timeout - read_blocks_resilient already
+                            // retried the failed block. Sleep briefly, then
+                            // continue to the next poll cycle.
                             tracing::debug!(
                                 "Poll read failed (transient) — sleeping before next cycle"
                             );
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             continue;
+                        }
+                        CycleStep::RepollSanitized | CycleStep::WaitForInterval => {
+                            tick_meter_retry_cadence(
+                                &mut meter_cycle_since_last,
+                                meter_probe_done,
+                                meter_retry_count,
+                                detected_meters.is_empty(),
+                            );
+                            // Sanitization was applied - corrupted register data
+                            // detected. Re-poll immediately instead of waiting
+                            // for the next interval, so the frontend gets a
+                            // fresh reading as soon as possible.
+                            if step == CycleStep::RepollSanitized {
+                                tracing::debug!("Corrupted data detected - re-reading immediately");
+                                continue;
+                            }
                         }
                     }
 
@@ -6375,11 +5294,12 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                 // in case its IP changed (DHCP renewal, etc.). If exactly one
                 // alternative inverter is found, auto-switch to it.
                 consecutive_connect_failures = consecutive_connect_failures.wrapping_add(1);
-                let should_discover = !settings.disable_auto_discovery
-                    && consecutive_connect_failures >= DISCOVERY_AFTER_FAILURES
-                    && last_discovery_time.is_none_or(|t| t.elapsed() >= DISCOVERY_COOLDOWN);
-
-                if should_discover {
+                if crate::inverter::auto_discovery::discovery_due(
+                    settings.disable_auto_discovery,
+                    consecutive_connect_failures,
+                    last_discovery_time,
+                    Instant::now(),
+                ) {
                     last_discovery_time = Some(Instant::now());
                     tracing::warn!(
                         "Auto-discovery: {} consecutive failures to reach {}:{}. Scanning LAN...",
@@ -6392,63 +5312,18 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
                     let inverters =
                         crate::inverter::discovery::scan_multiple_subnets(&subnets).await;
 
-                    // Filter out the configured host (it's clearly not responding).
-                    let candidates: Vec<_> = inverters
-                        .iter()
-                        .filter(|inv| inv.ip != settings.host)
-                        .collect();
-
-                    match candidates.len() {
-                        0 => {
-                            tracing::warn!(
-                                "Auto-discovery: no alternative inverters found on LAN ({}:{} unreachable). Dongle may be powered off or network changed.",
-                                settings.host,
-                                settings.port
-                            );
-                        }
-                        1 => {
-                            let new = &candidates[0];
-                            tracing::warn!(
-                                "Auto-discovery: found alternative inverter at {}:{}. Auto-switching from {}:{}.",
-                                new.ip, new.port, settings.host, settings.port
-                            );
-
-                            // Persist the new host to disk so it survives restart.
-                            let new_host = new.ip.clone();
-                            let new_port = new.port;
-                            if let Err(e) = settings_update_blocking(move |s| {
-                                s.host = new_host;
-                                s.port = new_port;
-                            })
-                            .await
-                            {
-                                tracing::warn!("Auto-discovery: failed to persist new host: {e}");
-                            }
-
-                            // Update in-memory settings + bump version so the
-                            // next loop iteration picks up the new host.
-                            let mut poll_settings = state.settings.lock().await;
-                            poll_settings.host = new.ip.clone();
-                            poll_settings.port = new.port;
-                            poll_settings.version = poll_settings.version.wrapping_add(1);
-                            drop(poll_settings);
-
-                            // Reset counters so we try the new host immediately
-                            // with a fresh TCP connect, not a stale backoff.
-                            consecutive_connect_failures = 0;
-                            reconnect.reset_connect_backoff();
-                        }
-                        n => {
-                            let alts: Vec<_> = candidates
-                                .iter()
-                                .map(|i| format!("{}:{}", i.ip, i.port))
-                                .collect();
-                            tracing::warn!(
-                                "Auto-discovery: found {} alternative inverters — ambiguous, not auto-switching: {}",
-                                n,
-                                alts.join(", ")
-                            );
-                        }
+                    if crate::inverter::auto_discovery::apply_discovery(
+                        &state,
+                        &settings.host,
+                        settings.port,
+                        &inverters,
+                    )
+                    .await
+                    {
+                        // Reset counters so we try the new host immediately with
+                        // a fresh TCP connect, not a stale backoff.
+                        consecutive_connect_failures = 0;
+                        reconnect.reset_connect_backoff();
                     }
                 }
             }
@@ -6530,14 +5405,6 @@ pub(crate) async fn run_poll_loop(state: Arc<AppState>) {
 /// output picks up a few watts of the inverter's own standby draw, and
 /// that must not surface as overnight "generation" (issue #273).
 pub(crate) const SOLAR_METER_NOISE_THRESHOLD_W: u32 = 20;
-
-/// The plan's AC kWh ask, for auto-refresh log lines.
-fn rec_kwh(rec: &crate::forecast::planner::PlanRecommendation) -> f64 {
-    match rec {
-        crate::forecast::planner::PlanRecommendation::Charge { kwh, .. } => *kwh,
-        _ => 0.0,
-    }
-}
 
 /// Stamp the settings-derived solar-array fields (`solar_arrays`,
 /// `pv1_pct`, `pv2_pct`) onto a snapshot. Extracted from the poll loop so
@@ -7134,30 +6001,6 @@ mod tests {
 
         assert!(!valid_lv_battery_response(&[0; 60]));
         assert!(!valid_lv_battery_response(&[0; 20]));
-    }
-
-    #[test]
-    fn invalid_cosy_slot_cannot_create_an_applyable_write_batch() {
-        let slot = crate::settings::CosySlot {
-            enabled: true,
-            start_hour: 25,
-            start_minute: 0,
-            end_hour: 2,
-            end_minute: 0,
-            target_soc: 80,
-        };
-        let writes = cosy_slot_register_writes(&slot, DeviceType::Gen2Hybrid, true);
-        assert!(writes.is_empty());
-        let mut arbiter = DischargeControlArbiter::default();
-        let mut cosy_active = false;
-        let mut cosy_last_preloaded_slot = None;
-        if request_cosy_writes(&writes, &mut arbiter) {
-            cosy_active = true;
-            cosy_last_preloaded_slot = Some(0);
-        }
-        assert!(!cosy_active);
-        assert_eq!(cosy_last_preloaded_slot, None);
-        assert_eq!(arbiter.selected_owner(), None);
     }
 
     /// CODE_REVIEW.md BLOCKER: the durable stop-pending marker drives
@@ -8587,7 +7430,7 @@ mod tests {
     fn cosy_active_seeds_from_persisted_flag() {
         crate::test_util::with_isolated_config_dir(|| {
             // Persist cosy_active_persisted=true to settings.
-            persist_cosy_active(true);
+            crate::inverter::state_machines::persist_cosy_active(true);
             let state = AppState::new();
             let seeded = *state.cosy_active.blocking_lock();
 
@@ -8596,6 +7439,1546 @@ mod tests {
                 "AppState::new should seed cosy_active from cosy_active_persisted"
             );
         });
+    }
+
+    // -------------------------------------------------------------------
+    // decide_force_auto_revert
+    // -------------------------------------------------------------------
+
+    fn gen2_snapshot(serial: &str) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial.to_string(),
+            firmware_version: "400".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn baseline(slot_end_ms: Option<i64>, serial: &str) -> Option<ForceBaselineIdentity<'_>> {
+        Some(ForceBaselineIdentity {
+            slot_end_ms,
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial,
+        })
+    }
+
+    const REVERT_NOW_MS: i64 = 1_000_000;
+
+    /// Run the decision against a fresh arbiter, returning both results.
+    fn decide(
+        baseline: Option<ForceBaselineIdentity<'_>>,
+        restoration_pending: bool,
+        snapshot: &InverterSnapshot,
+    ) -> (ForceAutoRevertDecision, DischargeControlArbiter) {
+        let mut arbiter = DischargeControlArbiter::default();
+        let decision = decide_force_auto_revert(
+            baseline,
+            REVERT_NOW_MS,
+            restoration_pending,
+            &mut arbiter,
+            snapshot,
+        );
+        (decision, arbiter)
+    }
+
+    #[test]
+    fn force_revert_is_not_due_without_a_baseline() {
+        let (decision, arbiter) = decide(None, false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(arbiter.selected_owner(), None, "must not claim the domain");
+    }
+
+    #[test]
+    fn force_revert_is_not_due_for_an_unbounded_action() {
+        let (decision, arbiter) = decide(baseline(None, "SN1"), false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(arbiter.selected_owner(), None);
+    }
+
+    #[test]
+    fn force_revert_waits_while_the_slot_is_open() {
+        let (decision, arbiter) = decide(
+            baseline(Some(REVERT_NOW_MS + 1), "SN1"),
+            false,
+            &gen2_snapshot("SN1"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(
+            arbiter.selected_owner(),
+            None,
+            "an open slot must not claim the domain"
+        );
+    }
+
+    #[test]
+    fn force_revert_is_due_exactly_at_the_slot_end() {
+        let (decision, _) = decide(
+            baseline(Some(REVERT_NOW_MS), "SN1"),
+            false,
+            &gen2_snapshot("SN1"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::Restore);
+    }
+
+    #[test]
+    fn force_revert_is_not_repeated_while_a_restoration_is_pending() {
+        // Re-initiating every cycle would advance the freshness barrier past
+        // every snapshot, so confirmation could never succeed.
+        let (decision, arbiter) = decide(baseline(Some(0), "SN1"), true, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::NotDue);
+        assert_eq!(arbiter.selected_owner(), None);
+    }
+
+    #[test]
+    fn force_revert_restores_when_the_baseline_matches_and_claims_the_domain() {
+        let (decision, arbiter) = decide(baseline(Some(0), "SN1"), false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::Restore);
+        assert_eq!(
+            arbiter.selected_owner(),
+            Some(DischargeControlOwner::ManualForce)
+        );
+    }
+
+    #[test]
+    fn force_revert_defers_to_a_safety_owner() {
+        let mut arbiter = DischargeControlArbiter::default();
+        assert!(arbiter.request(DischargeControlOwner::Safety));
+        let decision = decide_force_auto_revert(
+            baseline(Some(0), "SN1"),
+            REVERT_NOW_MS,
+            false,
+            &mut arbiter,
+            &gen2_snapshot("SN1"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::DeferredByOwner);
+        assert_eq!(
+            arbiter.selected_owner(),
+            Some(DischargeControlOwner::Safety)
+        );
+    }
+
+    #[test]
+    fn force_revert_outranks_lower_priority_owners() {
+        for lower in [
+            DischargeControlOwner::Agile,
+            DischargeControlOwner::TimedCharge,
+            DischargeControlOwner::TimedExport,
+            DischargeControlOwner::ManualMode,
+            DischargeControlOwner::ExplicitPause,
+        ] {
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(lower);
+            let decision = decide_force_auto_revert(
+                baseline(Some(0), "SN1"),
+                REVERT_NOW_MS,
+                false,
+                &mut arbiter,
+                &gen2_snapshot("SN1"),
+            );
+            assert_eq!(decision, ForceAutoRevertDecision::Restore, "{lower:?}");
+            assert_eq!(
+                arbiter.selected_owner(),
+                Some(DischargeControlOwner::ManualForce)
+            );
+        }
+    }
+
+    #[test]
+    fn force_revert_releases_a_baseline_from_a_different_inverter() {
+        let (decision, _) = decide(baseline(Some(0), "SN-OLD"), false, &gen2_snapshot("SN-NEW"));
+        assert_eq!(decision, ForceAutoRevertDecision::ReleaseForeignBaseline);
+    }
+
+    #[test]
+    fn force_revert_releases_a_baseline_from_a_different_register_family() {
+        // Same serial, but single-phase baseline vs a three-phase unit: the
+        // captured writes cannot be applied safely.
+        let three_phase = InverterSnapshot {
+            device_type: DeviceType::ThreePhase,
+            inverter_serial: "SN1".to_string(),
+            ..Default::default()
+        };
+        let (decision, _) = decide(baseline(Some(0), "SN1"), false, &three_phase);
+        assert_eq!(decision, ForceAutoRevertDecision::ReleaseForeignBaseline);
+    }
+
+    #[test]
+    fn force_revert_accepts_a_same_serial_model_refinement() {
+        // An OTA update can refine the device class (Gen2 -> Gen3) without
+        // changing the register family; that must not strand the baseline.
+        let refined = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            inverter_serial: "SN1".to_string(),
+            ..Default::default()
+        };
+        let (decision, _) = decide(baseline(Some(0), "SN1"), false, &refined);
+        assert_eq!(decision, ForceAutoRevertDecision::Restore);
+    }
+
+    #[test]
+    fn force_revert_withholds_when_identity_cannot_be_verified() {
+        // Unreadable serial on either side: cannot tell, so keep ownership.
+        let (decision, _) = decide(baseline(Some(0), ""), false, &gen2_snapshot("SN1"));
+        assert_eq!(decision, ForceAutoRevertDecision::WithholdUnidentifiable);
+        let (decision, _) = decide(baseline(Some(0), "SN1"), false, &gen2_snapshot(""));
+        assert_eq!(decision, ForceAutoRevertDecision::WithholdUnidentifiable);
+    }
+
+    #[test]
+    fn force_revert_asks_the_arbiter_before_judging_identity() {
+        // A foreign baseline must not be released while a higher-priority owner
+        // holds the domain: the arbiter outcome comes first.
+        let mut arbiter = DischargeControlArbiter::default();
+        arbiter.request(DischargeControlOwner::Safety);
+        let decision = decide_force_auto_revert(
+            baseline(Some(0), "SN-OLD"),
+            REVERT_NOW_MS,
+            false,
+            &mut arbiter,
+            &gen2_snapshot("SN-NEW"),
+        );
+        assert_eq!(decision, ForceAutoRevertDecision::DeferredByOwner);
+    }
+
+    // -------------------------------------------------------------------
+    // run_force_charge_auto_revert / run_force_discharge_auto_revert
+    // -------------------------------------------------------------------
+
+    type RecordedWrites = Arc<std::sync::Mutex<Vec<(u16, u16)>>>;
+
+    /// A dongle that acknowledges every register write and records it.
+    async fn spawn_write_recorder() -> (ModbusClient, RecordedWrites, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let recorded: RecordedWrites = Arc::default();
+        let log = recorded.clone();
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            loop {
+                let mut header = [0u8; 6];
+                if stream.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                let mut body = vec![0u8; length];
+                if stream.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                let mut frame = header.to_vec();
+                frame.extend_from_slice(&body);
+                let Ok(decoded) = crate::modbus::framer::decode_frame(&frame) else {
+                    return;
+                };
+                if decoded.function != 6 || decoded.payload.len() < 4 {
+                    return;
+                }
+                let register = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
+                let value = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]);
+                log.lock().unwrap().push((register, value));
+                let mut payload = b"TEST123456".to_vec();
+                payload.extend_from_slice(&register.to_be_bytes());
+                payload.extend_from_slice(&value.to_be_bytes());
+                let reply =
+                    crate::modbus::framer::encode_frame("TEST123456", decoded.slave, 6, &payload);
+                if stream.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let mut client = ModbusClient::new("127.0.0.1", port, "TEST123456");
+        client.set_timeout(Duration::from_millis(500));
+        client.connect().await.unwrap();
+        (client, recorded, handle)
+    }
+
+    fn charge_baseline(serial: &str, slot_end_ms: Option<i64>) -> ForceChargeRevert {
+        ForceChargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            force_charge_slot_end_ms: slot_end_ms,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial.into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            target_soc: 100,
+            charge_slot_1_target_soc: None,
+            battery_power_mode: 1,
+            charge_rate: None,
+            charge_slot_1_start: None,
+            charge_slot_1_end: None,
+            three_phase_force_charge_enable: None,
+            three_phase_ac_charge_enable: None,
+            battery_pause_mode: Some(0),
+        }
+    }
+
+    fn discharge_baseline(serial: &str, slot_end_ms: Option<i64>) -> ForceDischargeRevert {
+        ForceDischargeRevert {
+            started_at_ms: 0,
+            external_owner: None,
+            enable_charge: false,
+            enable_charge_target: false,
+            device_type: DeviceType::Gen2Hybrid,
+            inverter_serial: serial.into(),
+            firmware_version: "400".into(),
+            enable_discharge: false,
+            discharge_rate: None,
+            discharge_slot_1_start: None,
+            discharge_slot_1_end: None,
+            discharge_slot_2_start: None,
+            discharge_slot_2_end: None,
+            three_phase_force_discharge_enable: None,
+            three_phase_force_charge_enable: None,
+            force_discharge_slot_end_ms: slot_end_ms,
+            pause_registers_supported: false,
+            battery_pause_mode_raw: None,
+            battery_pause_slot_start_raw: None,
+            battery_pause_slot_end_raw: None,
+            battery_pause_mode: 0,
+            battery_pause_slot: Default::default(),
+        }
+    }
+
+    const GAP: Duration = Duration::from_millis(1);
+    /// A slot that closed long ago / one that never closes: the wall clock the
+    /// appliers read cannot affect either.
+    const LONG_EXPIRED: Option<i64> = Some(0);
+    const NEVER_EXPIRES: Option<i64> = Some(i64::MAX);
+
+    #[tokio::test]
+    async fn charge_auto_revert_writes_the_baseline_once_the_slot_has_closed() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let revert = charge_baseline("SN1", LONG_EXPIRED);
+            let expected =
+                crate::server::api::build_force_charge_stop_writes(DeviceType::Gen2Hybrid, &revert);
+            assert!(
+                !expected.is_empty(),
+                "fixture must produce restoration writes"
+            );
+            *state.force_charge_revert.lock().await = Some(revert);
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            let sent: Vec<_> = recorded.lock().unwrap().clone();
+            let want: Vec<_> = expected.iter().map(|w| (w.address, w.value)).collect();
+            assert_eq!(sent, want);
+            let request = state.force_charge_restoration.lock().await.clone();
+            assert_eq!(request.map(|r| r.inverter_serial), Some("SN1".to_string()));
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "the baseline is kept until a newer snapshot confirms the writes"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_does_nothing_while_the_slot_is_open() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", NEVER_EXPIRES));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+            assert!(state.force_charge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_does_nothing_without_a_baseline() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_is_not_repeated_while_one_awaits_confirmation() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            let snap = gen2_snapshot("SN1");
+
+            run_force_charge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP).await;
+            let first = recorded.lock().unwrap().len();
+            assert!(first > 0);
+            let first_request = state.force_charge_restoration.lock().await.clone().unwrap();
+
+            // Next cycle: a fresh arbiter, restoration still unconfirmed.
+            let mut next_cycle = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(&state, &mut client, &snap, &mut next_cycle, GAP).await;
+            server.abort();
+
+            assert_eq!(
+                recorded.lock().unwrap().len(),
+                first,
+                "no second batch of writes"
+            );
+            let after = state.force_charge_restoration.lock().await.clone().unwrap();
+            assert_eq!(
+                after.requested_at_ms, first_request.requested_at_ms,
+                "the freshness barrier must not advance again"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_releases_a_baseline_from_another_inverter() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN-OLD", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN-NEW"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(
+                recorded.lock().unwrap().is_empty(),
+                "never write a foreign baseline"
+            );
+            assert!(
+                state.force_charge_revert.lock().await.is_none(),
+                "ownership released"
+            );
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_keeps_an_unverifiable_baseline_for_a_later_cycle() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            // The connected inverter's serial is unreadable this cycle.
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot(""),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(
+                state.force_charge_revert.lock().await.is_some(),
+                "baseline kept"
+            );
+            assert!(state.force_charge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn charge_auto_revert_defers_to_a_higher_priority_owner() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_charge_revert.lock().await = Some(charge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(DischargeControlOwner::Safety);
+            run_force_charge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert!(state.force_charge_restoration.lock().await.is_none());
+            assert!(state.force_charge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_writes_the_baseline_and_allows_overriding_a_pause() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let revert = discharge_baseline("SN1", LONG_EXPIRED);
+            let expected = crate::server::api::build_force_discharge_stop_writes(
+                DeviceType::Gen2Hybrid,
+                "400",
+                &revert,
+            );
+            assert!(
+                !expected.is_empty(),
+                "fixture must produce restoration writes"
+            );
+            *state.force_discharge_revert.lock().await = Some(revert);
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+
+            let mut arbiter = DischargeControlArbiter::default();
+            let may_override = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN1"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            let want: Vec<_> = expected.iter().map(|w| (w.address, w.value)).collect();
+            assert_eq!(recorded.lock().unwrap().clone(), want);
+            assert_eq!(may_override, Some(true));
+            assert!(state.force_discharge_restoration.lock().await.is_some());
+            assert!(state.force_discharge_revert.lock().await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_leaves_the_pause_flag_alone_when_not_due() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let snap = gen2_snapshot("SN1");
+
+            // No baseline.
+            let mut arbiter = DischargeControlArbiter::default();
+            assert_eq!(
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                    .await,
+                None
+            );
+            // Slot still open.
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", NEVER_EXPIRES));
+            let mut arbiter = DischargeControlArbiter::default();
+            assert_eq!(
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                    .await,
+                None
+            );
+            // Deferred to a higher-priority owner.
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", LONG_EXPIRED));
+            let mut arbiter = DischargeControlArbiter::default();
+            arbiter.request(DischargeControlOwner::Safety);
+            assert_eq!(
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP)
+                    .await,
+                None
+            );
+            server.abort();
+            assert!(recorded.lock().unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_is_not_repeated_while_one_awaits_confirmation() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let snap = gen2_snapshot("SN1");
+
+            let mut arbiter = DischargeControlArbiter::default();
+            run_force_discharge_auto_revert(&state, &mut client, &snap, &mut arbiter, GAP).await;
+            let first = recorded.lock().unwrap().len();
+            assert!(first > 0);
+
+            let mut next_cycle = DischargeControlArbiter::default();
+            let again =
+                run_force_discharge_auto_revert(&state, &mut client, &snap, &mut next_cycle, GAP)
+                    .await;
+            server.abort();
+            assert_eq!(again, None);
+            assert_eq!(recorded.lock().unwrap().len(), first);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_releases_a_foreign_baseline_and_clears_the_override() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN-OLD", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            let may_override = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot("SN-NEW"),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert_eq!(may_override, Some(false));
+            assert!(state.force_discharge_revert.lock().await.is_none());
+            assert!(state.force_discharge_restoration.lock().await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn discharge_auto_revert_withholds_an_unverifiable_baseline() {
+        with_isolated_config_dir_async(|| async {
+            let state = Arc::new(AppState::new());
+            *state.force_discharge_revert.lock().await =
+                Some(discharge_baseline("SN1", LONG_EXPIRED));
+            let (mut client, recorded, server) = spawn_write_recorder().await;
+            let mut arbiter = DischargeControlArbiter::default();
+            let may_override = run_force_discharge_auto_revert(
+                &state,
+                &mut client,
+                &gen2_snapshot(""),
+                &mut arbiter,
+                GAP,
+            )
+            .await;
+            server.abort();
+
+            assert!(recorded.lock().unwrap().is_empty());
+            assert_eq!(may_override, Some(false));
+            assert!(
+                state.force_discharge_revert.lock().await.is_some(),
+                "baseline kept"
+            );
+        })
+        .await;
+    }
+
+    // -------------------------------------------------------------------
+    // plan_model_detection / ModelIdentity
+    // -------------------------------------------------------------------
+
+    fn snapshot_decoded_as(dtc: u16, arm_fw: u16) -> InverterSnapshot {
+        let trace = DeviceType::detection_trace(dtc, arm_fw);
+        InverterSnapshot {
+            device_type: trace.refined,
+            device_type_display: trace.refined.display_name().to_string(),
+            device_type_code: format!("{dtc:04X}"),
+            firmware_version: arm_fw.to_string(),
+            inverter_serial: "SA1234G567".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn unconnected_client() -> ModbusClient {
+        ModbusClient::new("127.0.0.1", 8899, "TEST123456")
+    }
+
+    #[test]
+    fn plan_for_a_plain_hybrid_on_the_default_slave_changes_nothing() {
+        let plan = plan_model_detection(DeviceType::Gen2Hybrid, 0x11);
+        assert!(!plan.slave_changed);
+        assert!(!plan.should_repoll);
+        assert!(!plan.longer_inter_request_delay);
+        assert_eq!(plan.preferred_slave, 0x11);
+    }
+
+    #[test]
+    fn plan_for_an_ac_coupled_model_switches_slave_and_repolls() {
+        let plan = plan_model_detection(DeviceType::ACCoupled, 0x11);
+        assert!(plan.slave_changed);
+        assert_eq!(
+            plan.preferred_slave,
+            DeviceType::ACCoupled.preferred_read_slave_address()
+        );
+        assert_ne!(plan.preferred_slave, 0x11);
+        assert!(plan.should_repoll);
+    }
+
+    #[test]
+    fn plan_is_quiet_once_already_on_the_preferred_slave() {
+        let preferred = DeviceType::ACCoupled.preferred_read_slave_address();
+        let plan = plan_model_detection(DeviceType::ACCoupled, preferred);
+        assert!(!plan.slave_changed);
+        // Still repolls: AC coupled has an extra config block to read.
+        assert!(plan.should_repoll);
+    }
+
+    #[test]
+    fn plan_for_three_phase_slows_the_request_cadence() {
+        for dt in [DeviceType::ThreePhase, DeviceType::ACThreePhase] {
+            assert!(
+                plan_model_detection(dt, 0x11).longer_inter_request_delay,
+                "{dt:?}"
+            );
+        }
+        assert!(!plan_model_detection(DeviceType::Gen3Hybrid, 0x11).longer_inter_request_delay);
+    }
+
+    #[test]
+    fn plan_reports_model_specific_blocks_for_gateway_but_not_plain_gen1() {
+        assert!(plan_model_detection(DeviceType::Gateway, 0x11).has_model_specific_blocks);
+        assert!(!plan_model_detection(DeviceType::Gen1Hybrid, 0x11).has_model_specific_blocks);
+    }
+
+    #[test]
+    fn a_new_identity_has_confirmed_nothing() {
+        let identity = ModelIdentity::default();
+        assert!(identity.confirmed().is_none());
+        assert!(identity.reported_unidentified.is_empty());
+    }
+
+    #[test]
+    fn identify_confirms_a_plain_hybrid_without_a_repoll() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x2001, 852); // Gen2
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::Continue
+        );
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen2Hybrid, "2001")));
+        assert_eq!(client.slave_address(), 0x11, "slave must not change");
+    }
+
+    #[test]
+    fn identify_switches_the_client_slave_and_asks_for_a_repoll() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        assert_eq!(client.slave_address(), 0x11);
+        let mut snap = snapshot_decoded_as(0x3001, 0); // AC coupled
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::RepollNow
+        );
+        assert_eq!(
+            client.slave_address(),
+            DeviceType::ACCoupled.preferred_read_slave_address()
+        );
+        assert_eq!(identity.confirmed(), Some((DeviceType::ACCoupled, "3001")));
+    }
+
+    #[test]
+    fn identify_asks_for_a_repoll_for_models_with_extra_blocks_on_the_default_slave() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x2001, 352); // Gen3: HR 240-299
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::RepollNow
+        );
+        assert_eq!(client.slave_address(), 0x11);
+    }
+
+    #[test]
+    fn identify_only_repolls_on_the_cycle_that_confirmed_the_model() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x3001, 0);
+        identity.identify(&mut snap, &mut client);
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::Continue,
+            "a stable model must not repoll every cycle"
+        );
+    }
+
+    #[test]
+    fn identify_leaves_an_unrecognised_code_unconfirmed() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x5101, 352); // Commercial EMS
+        assert_eq!(
+            identity.identify(&mut snap, &mut client),
+            IdentifyOutcome::Continue
+        );
+        assert!(identity.confirmed().is_none());
+        assert!(identity.reported_unidentified.contains(&0x5101));
+        assert_eq!(
+            client.slave_address(),
+            0x11,
+            "an unknown model must not move the slave"
+        );
+    }
+
+    #[test]
+    fn identify_keeps_trying_after_an_empty_read_and_then_confirms() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut empty = InverterSnapshot::default(); // HR(0) read 0x0000
+        identity.identify(&mut empty, &mut client);
+        assert!(identity.confirmed().is_none());
+
+        let mut good = snapshot_decoded_as(0x2001, 852);
+        identity.identify(&mut good, &mut client);
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen2Hybrid, "2001")));
+    }
+
+    #[test]
+    fn identify_locks_the_snapshot_to_the_confirmed_type() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x2001, 352), &mut client); // Gen3
+
+        // Corrupt ARM firmware now decodes the same code as Gen1.
+        let mut drifted = snapshot_decoded_as(0x2001, 7);
+        assert_eq!(drifted.device_type, DeviceType::Gen1Hybrid);
+        assert_eq!(
+            identity.identify(&mut drifted, &mut client),
+            IdentifyOutcome::Continue
+        );
+        assert_eq!(drifted.device_type, DeviceType::Gen3Hybrid);
+        assert_eq!(drifted.device_type_display, "Gen 3 Hybrid");
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen3Hybrid, "2001")));
+    }
+
+    #[test]
+    fn identify_never_re_confirms_to_a_different_model() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x2001, 352), &mut client);
+        // A wholesale corrupt HR(0) must not displace the confirmed model.
+        let mut garbage = snapshot_decoded_as(0xFFFF, 0);
+        identity.identify(&mut garbage, &mut client);
+        assert_eq!(identity.confirmed(), Some((DeviceType::Gen3Hybrid, "2001")));
+        assert_eq!(garbage.device_type, DeviceType::Gen3Hybrid);
+    }
+
+    #[test]
+    fn identify_leaves_the_confirmed_code_alone_when_the_code_drifts() {
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x8102, 0), &mut client);
+        // Same family, different rating digit: keep the confirmed code.
+        identity.identify(&mut snapshot_decoded_as(0x8101, 0), &mut client);
+        assert_eq!(
+            identity.confirmed(),
+            Some((DeviceType::HybridHvGen3, "8102"))
+        );
+    }
+
+    #[test]
+    fn identify_logs_the_decoded_identity_once() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x2001, 352);
+        for _ in 0..3 {
+            identity.identify(&mut snap, &mut client);
+        }
+        assert_eq!(
+            count_logs(&ring, "Model detection: HR(0)/ARM firmware decoded"),
+            1
+        );
+        assert_eq!(count_logs(&ring, "Device model identified"), 1);
+    }
+
+    #[test]
+    fn identify_warns_once_per_distinct_unrecognised_code() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut a = snapshot_decoded_as(0x4101, 0);
+        let mut b = snapshot_decoded_as(0x5101, 0);
+        for _ in 0..3 {
+            identity.identify(&mut a, &mut client);
+        }
+        assert_eq!(count_logs(&ring, "unrecognised HR(0) device type code"), 1);
+        identity.identify(&mut b, &mut client);
+        assert_eq!(
+            count_logs(&ring, "unrecognised HR(0) device type code"),
+            2,
+            "a different unknown code is a new report"
+        );
+    }
+
+    #[test]
+    fn identify_does_not_repeat_a_warning_when_the_code_flaps() {
+        // A dongle alternating between a failed read and an unsupported model
+        // must not warn on every transition.
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut empty = InverterSnapshot::default();
+        let mut unsupported = snapshot_decoded_as(0x4101, 0);
+        for _ in 0..4 {
+            identity.identify(&mut empty, &mut client);
+            identity.identify(&mut unsupported, &mut client);
+        }
+        assert_eq!(count_logs(&ring, "unrecognised HR(0) device type code"), 1);
+        assert_eq!(count_logs(&ring, "read as 0x0000"), 1);
+    }
+
+    #[test]
+    fn identify_logs_the_raw_firmware_not_a_parsed_number() {
+        // Three-phase firmware strings are not numeric; the log must show the
+        // real string rather than a misleading arm_fw=0.
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        let mut snap = snapshot_decoded_as(0x4001, 0);
+        snap.firmware_version = "1.2-rc3".to_string();
+        identity.identify(&mut snap, &mut client);
+        let line = ring
+            .read_all()
+            .into_iter()
+            .find(|l| l.contains("Model detection: HR(0)/ARM firmware decoded"))
+            .expect("identification line");
+        assert!(line.contains("firmware=1.2-rc3"), "{line}");
+        assert!(!line.contains("arm_fw=0"), "{line}");
+    }
+
+    #[test]
+    fn identify_does_not_warn_about_an_empty_hr0_read() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut InverterSnapshot::default(), &mut client);
+        assert_eq!(count_logs(&ring, "unrecognised HR(0) device type code"), 0);
+        assert_eq!(count_logs(&ring, "read as 0x0000"), 1);
+    }
+
+    #[test]
+    fn identify_flags_a_prefix_only_classification() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        // 0x3003 is not a listed AC code; the 0x30 family prefix catches it.
+        identity.identify(&mut snapshot_decoded_as(0x3003, 0), &mut client);
+        assert_eq!(count_logs(&ring, "classified by family prefix only"), 1);
+        assert_eq!(
+            identity.confirmed().map(|(t, _)| t),
+            Some(DeviceType::ACCoupled)
+        );
+    }
+
+    #[test]
+    fn identify_does_not_flag_an_exact_code_as_prefix_only() {
+        let (ring, _guard) = capture_logs();
+        let mut identity = ModelIdentity::default();
+        let mut client = unconnected_client();
+        identity.identify(&mut snapshot_decoded_as(0x2201, 0), &mut client);
+        assert_eq!(count_logs(&ring, "classified by family prefix only"), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // OptionalBlocksPresent / suspicious_blocks / carry_forward_absent_blocks
+    // -------------------------------------------------------------------
+
+    use crate::modbus::client::BlockRead;
+    use crate::modbus::registers as reg;
+
+    fn read_of(block: &'static reg::RegisterBlock, fill: u16) -> BlockRead {
+        BlockRead {
+            block,
+            data: vec![fill; block.count as usize],
+        }
+    }
+
+    /// Every optional block with the flag it should raise.
+    type OptionalBlockCase = (
+        &'static str,
+        &'static reg::RegisterBlock,
+        fn(&OptionalBlocksPresent) -> bool,
+    );
+
+    fn optional_block_cases() -> Vec<OptionalBlockCase> {
+        vec![
+            ("ac_config", &reg::AC_CONFIG_BLOCK, |p| p.ac_config),
+            ("extended_slots", &reg::EXTENDED_SLOTS_BLOCK, |p| {
+                p.extended_slots
+            }),
+            (
+                "three_phase_high_config",
+                &reg::THREE_PHASE_HIGH_CONFIG_BLOCK,
+                |p| p.three_phase_high_config,
+            ),
+            ("three_phase_config", &reg::THREE_PHASE_CONFIG_BLOCK, |p| {
+                p.three_phase_config
+            }),
+            ("three_phase_fault", &reg::THREE_PHASE_INPUT_BLOCK_6, |p| {
+                p.three_phase_fault
+            }),
+            ("ems_plant", &reg::EMS_PLANT_HOLDING_BLOCK, |p| p.ems_plant),
+            (
+                "gateway_discharge_detail",
+                &reg::GATEWAY_INPUT_BLOCK_3,
+                |p| p.gateway_discharge_detail,
+            ),
+            ("gateway_serial", &reg::GATEWAY_INPUT_BLOCK_5, |p| {
+                p.gateway_serial
+            }),
+        ]
+    }
+
+    #[test]
+    fn no_blocks_means_no_optional_block_is_present() {
+        assert_eq!(
+            OptionalBlocksPresent::from_blocks(&[]),
+            OptionalBlocksPresent::default()
+        );
+    }
+
+    #[test]
+    fn each_optional_block_raises_only_its_own_flag() {
+        let cases = optional_block_cases();
+        for (name, block, own_flag) in &cases {
+            let present = OptionalBlocksPresent::from_blocks(&[read_of(block, 0)]);
+            for (other_name, _, other_flag) in &cases {
+                assert_eq!(
+                    other_flag(&present),
+                    other_name == name,
+                    "reading {name} must raise only {name}, but {other_name} was {}",
+                    other_flag(&present)
+                );
+            }
+            assert!(own_flag(&present), "{name}");
+        }
+    }
+
+    #[test]
+    fn all_optional_blocks_together_raise_every_flag() {
+        let blocks: Vec<_> = optional_block_cases()
+            .into_iter()
+            .map(|(_, b, _)| read_of(b, 0))
+            .collect();
+        let present = OptionalBlocksPresent::from_blocks(&blocks);
+        for (name, _, flag) in optional_block_cases() {
+            assert!(flag(&present), "{name}");
+        }
+    }
+
+    #[test]
+    fn standard_blocks_do_not_count_as_optional_blocks() {
+        let blocks: Vec<_> = reg::STANDARD_POLL_BLOCKS
+            .iter()
+            .map(|b| read_of(b, 0))
+            .collect();
+        assert_eq!(
+            OptionalBlocksPresent::from_blocks(&blocks),
+            OptionalBlocksPresent::default()
+        );
+    }
+
+    #[test]
+    fn a_block_with_the_right_start_but_the_wrong_type_is_not_a_match() {
+        // Input 300/60 is not the Holding AC config block, and Holding
+        // 1300/60 is not the three-phase fault input block.
+        static INPUT_300: reg::RegisterBlock = reg::RegisterBlock {
+            start: 300,
+            count: 60,
+            register_type: reg::RegisterType::Input,
+            name: "input_300_359",
+        };
+        static HOLDING_1300: reg::RegisterBlock = reg::RegisterBlock {
+            start: 1300,
+            count: 60,
+            register_type: reg::RegisterType::Holding,
+            name: "holding_1300_1359",
+        };
+        let present = OptionalBlocksPresent::from_blocks(&[
+            read_of(&INPUT_300, 0),
+            read_of(&HOLDING_1300, 0),
+        ]);
+        assert_eq!(present, OptionalBlocksPresent::default());
+    }
+
+    #[test]
+    fn a_block_with_the_right_start_but_the_wrong_length_is_not_a_match() {
+        static SHORT_AC: reg::RegisterBlock = reg::RegisterBlock {
+            start: 300,
+            count: 30,
+            register_type: reg::RegisterType::Holding,
+            name: "holding_300_329",
+        };
+        assert!(!OptionalBlocksPresent::from_blocks(&[read_of(&SHORT_AC, 0)]).ac_config);
+    }
+
+    /// 60 registers full of the 0xE000+ leaked-memory pattern.
+    fn leaked_block(block: &'static reg::RegisterBlock) -> BlockRead {
+        read_of(block, 0xE500)
+    }
+
+    #[test]
+    fn clean_blocks_are_not_suspicious() {
+        let blocks = vec![read_of(&reg::STANDARD_POLL_BLOCKS[0], 0x0010)];
+        assert_eq!(suspicious_blocks(&blocks).count(), 0);
+    }
+
+    #[test]
+    fn a_leaked_sixty_register_block_is_suspicious() {
+        let blocks = vec![
+            read_of(&reg::STANDARD_POLL_BLOCKS[0], 0x0010),
+            leaked_block(&reg::AC_CONFIG_BLOCK),
+        ];
+        let hits: Vec<_> = suspicious_blocks(&blocks).map(|b| b.block.name).collect();
+        assert_eq!(hits, vec![reg::AC_CONFIG_BLOCK.name]);
+    }
+
+    #[test]
+    fn every_leaked_sixty_register_block_is_reported() {
+        let blocks = vec![
+            leaked_block(&reg::AC_CONFIG_BLOCK),
+            read_of(&reg::THREE_PHASE_CONFIG_BLOCK, 0),
+            leaked_block(&reg::EXTENDED_SLOTS_BLOCK),
+        ];
+        let hits: Vec<_> = suspicious_blocks(&blocks).map(|b| b.block.name).collect();
+        assert_eq!(
+            hits,
+            vec![reg::AC_CONFIG_BLOCK.name, reg::EXTENDED_SLOTS_BLOCK.name]
+        );
+    }
+
+    #[test]
+    fn leaked_data_in_a_non_standard_sized_block_is_not_fingerprinted() {
+        // The fingerprint is defined over 60-register blocks aligned to 60;
+        // the 45-register config block and the unaligned 29-register gateway
+        // serial block are out of scope even when full of 0xE000+ values.
+        let blocks = vec![
+            leaked_block(&reg::THREE_PHASE_CONFIG_BLOCK),
+            leaked_block(&reg::GATEWAY_INPUT_BLOCK_5),
+        ];
+        assert_eq!(suspicious_blocks(&blocks).count(), 0);
+    }
+
+    fn gateway_snapshot_with_aio(kwh: f32, serial: &str) -> InverterSnapshot {
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gateway,
+            ..Default::default()
+        };
+        snap.per_aio_discharge_today_kwh = [kwh; 3];
+        snap.per_aio_serial = std::array::from_fn(|_| serial.to_string());
+        snap
+    }
+
+    #[test]
+    fn absent_gateway_blocks_carry_the_previous_aio_values_forward() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = gateway_snapshot_with_aio(0.0, "");
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &OptionalBlocksPresent::default());
+        assert_eq!(snap.per_aio_discharge_today_kwh, [7.5; 3]);
+        assert_eq!(snap.per_aio_serial[0], "AB1234C567");
+    }
+
+    #[test]
+    fn present_gateway_blocks_keep_their_own_aio_values() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = gateway_snapshot_with_aio(1.25, "ZZ9999Z999");
+        let present = OptionalBlocksPresent {
+            gateway_discharge_detail: true,
+            gateway_serial: true,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &present);
+        assert_eq!(snap.per_aio_discharge_today_kwh, [1.25; 3]);
+        assert_eq!(snap.per_aio_serial[0], "ZZ9999Z999");
+    }
+
+    #[test]
+    fn gateway_detail_and_serial_blocks_are_carried_independently() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = gateway_snapshot_with_aio(1.25, "");
+        let present = OptionalBlocksPresent {
+            gateway_discharge_detail: true,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &present);
+        assert_eq!(
+            snap.per_aio_discharge_today_kwh, [1.25; 3],
+            "detail present"
+        );
+        assert_eq!(snap.per_aio_serial[0], "AB1234C567", "serial carried");
+    }
+
+    #[test]
+    fn nothing_is_carried_forward_without_a_previous_snapshot() {
+        let mut snap = gateway_snapshot_with_aio(0.0, "");
+        carry_forward_absent_blocks(&mut snap, None, &OptionalBlocksPresent::default());
+        assert_eq!(snap.per_aio_discharge_today_kwh, [0.0; 3]);
+        assert_eq!(snap.per_aio_serial[0], "");
+    }
+
+    #[test]
+    fn non_gateway_models_never_borrow_gateway_aio_values() {
+        let prev = gateway_snapshot_with_aio(7.5, "AB1234C567");
+        let mut snap = InverterSnapshot {
+            device_type: DeviceType::Gen3Hybrid,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut snap, Some(&prev), &OptionalBlocksPresent::default());
+        assert_eq!(snap.per_aio_discharge_today_kwh, [0.0; 3]);
+    }
+
+    #[test]
+    fn an_absent_ac_config_block_keeps_the_previous_limits_and_a_present_one_does_not() {
+        let prev = InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 80,
+            discharge_rate: 60,
+            ..Default::default()
+        };
+        let fresh = || InverterSnapshot {
+            device_type: DeviceType::ACCoupled,
+            charge_rate: 0,
+            discharge_rate: 0,
+            ..Default::default()
+        };
+
+        let mut absent = fresh();
+        carry_forward_absent_blocks(&mut absent, Some(&prev), &OptionalBlocksPresent::default());
+        assert_eq!((absent.charge_rate, absent.discharge_rate), (80, 60));
+
+        let mut present = fresh();
+        let flags = OptionalBlocksPresent {
+            ac_config: true,
+            ..Default::default()
+        };
+        carry_forward_absent_blocks(&mut present, Some(&prev), &flags);
+        assert_eq!((present.charge_rate, present.discharge_rate), (0, 0));
+    }
+
+    // -------------------------------------------------------------------
+    // decide_after_cycle / tick_meter_retry_cadence
+    // -------------------------------------------------------------------
+
+    fn fresh_reconnect() -> ReconnectController {
+        ReconnectController::new(Instant::now(), 0)
+    }
+
+    /// How many consecutive transient timeouts a fresh controller tolerates
+    /// before demanding a reconnect (so the tests don't hard-code the constant).
+    fn timeouts_until_reconnect() -> u8 {
+        let mut reconnect = fresh_reconnect();
+        let mut streak = 0u8;
+        for n in 1..=20u8 {
+            let step = decide_after_cycle(
+                CycleOutcome::TRANSIENT_FAILURE,
+                &mut streak,
+                &mut reconnect,
+                Instant::now(),
+            );
+            if step == CycleStep::Reconnect {
+                return n;
+            }
+            assert_eq!(step, CycleStep::RetryAfterBackoff);
+        }
+        panic!("transient timeouts never forced a reconnect");
+    }
+
+    fn step(
+        outcome: CycleOutcome,
+        streak: &mut u8,
+        reconnect: &mut ReconnectController,
+    ) -> CycleStep {
+        decide_after_cycle(outcome, streak, reconnect, Instant::now())
+    }
+
+    #[test]
+    fn clean_cycle_waits_for_the_interval() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        assert_eq!(
+            step(CycleOutcome::published(false), &mut streak, &mut reconnect),
+            CycleStep::WaitForInterval
+        );
+    }
+
+    #[test]
+    fn sanitized_cycle_repolls_immediately() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        assert_eq!(
+            step(CycleOutcome::published(true), &mut streak, &mut reconnect),
+            CycleStep::RepollSanitized
+        );
+    }
+
+    #[test]
+    fn fingerprint_cycles_repoll_until_the_streak_forces_a_reconnect() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        for n in 1..MAX_SUSPICIOUS_CYCLES {
+            assert_eq!(
+                step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect),
+                CycleStep::RepollSuspicious,
+                "fingerprint cycle {n}"
+            );
+            assert_eq!(streak, n);
+        }
+        assert_eq!(
+            step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect),
+            CycleStep::Reconnect,
+            "the streak limit must force a reconnect"
+        );
+    }
+
+    #[test]
+    fn a_clean_cycle_resets_the_fingerprint_streak() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        for _ in 1..MAX_SUSPICIOUS_CYCLES {
+            step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        }
+        assert_eq!(
+            step(CycleOutcome::published(false), &mut streak, &mut reconnect),
+            CycleStep::WaitForInterval
+        );
+        assert_eq!(streak, 0);
+        // A fresh run of fingerprint cycles must start counting from zero again.
+        for n in 1..MAX_SUSPICIOUS_CYCLES {
+            assert_eq!(
+                step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect),
+                CycleStep::RepollSuspicious,
+                "fingerprint cycle {n} after reset"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sanitized_cycle_also_resets_the_fingerprint_streak() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        step(CycleOutcome::published(true), &mut streak, &mut reconnect);
+        assert_eq!(streak, 0);
+    }
+
+    #[test]
+    fn a_fingerprint_cycle_does_not_count_as_a_good_poll() {
+        // Review H2: the fingerprint cycle decoded nothing real, so it must not
+        // clear the sustained-timeout streak.
+        let limit = timeouts_until_reconnect();
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        for _ in 1..limit {
+            assert_eq!(
+                step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect),
+                CycleStep::RetryAfterBackoff
+            );
+        }
+        step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        assert_eq!(
+            step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect),
+            CycleStep::Reconnect,
+            "the timeout streak must survive a fingerprint cycle"
+        );
+    }
+
+    #[test]
+    fn a_published_cycle_clears_the_sustained_timeout_streak() {
+        let limit = timeouts_until_reconnect();
+        for sanitized in [false, true] {
+            let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+            for _ in 1..limit {
+                step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect);
+            }
+            step(
+                CycleOutcome::published(sanitized),
+                &mut streak,
+                &mut reconnect,
+            );
+            assert_eq!(
+                step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect),
+                CycleStep::RetryAfterBackoff,
+                "sanitized={sanitized}: good poll must reset the timeout count"
+            );
+        }
+    }
+
+    #[test]
+    fn transient_timeouts_back_off_then_reconnect_at_the_limit() {
+        let limit = timeouts_until_reconnect();
+        assert!(limit >= 2, "a single timeout must not drop the session");
+    }
+
+    #[test]
+    fn a_dead_socket_reconnects_immediately() {
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        assert_eq!(
+            step(CycleOutcome::CONNECTION_LOST, &mut streak, &mut reconnect),
+            CycleStep::Reconnect
+        );
+    }
+
+    #[test]
+    fn a_failed_poll_leaves_the_fingerprint_streak_alone() {
+        // Existing behaviour, pinned: only a decoded cycle resets the streak.
+        let (mut streak, mut reconnect) = (0u8, fresh_reconnect());
+        step(CycleOutcome::FINGERPRINT, &mut streak, &mut reconnect);
+        step(CycleOutcome::TRANSIENT_FAILURE, &mut streak, &mut reconnect);
+        assert_eq!(streak, 1);
+    }
+
+    #[test]
+    fn meter_cadence_ticks_while_retries_remain() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, true, 1, false);
+        assert_eq!(ticks, 1);
+        tick_meter_retry_cadence(&mut ticks, true, METER_MAX_RETRIES - 1, false);
+        assert_eq!(ticks, 2);
+    }
+
+    #[test]
+    fn meter_cadence_stops_ticking_once_retries_are_exhausted() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, true, METER_MAX_RETRIES, false);
+        assert_eq!(ticks, 0);
+    }
+
+    #[test]
+    fn meter_cadence_starts_after_an_empty_first_scan_only() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, true, 0, true);
+        assert_eq!(ticks, 1, "first scan found nothing: start the cadence");
+        tick_meter_retry_cadence(&mut ticks, true, 0, false);
+        assert_eq!(ticks, 1, "meters were found: nothing to retry");
+    }
+
+    #[test]
+    fn meter_cadence_does_not_tick_before_the_first_scan() {
+        let mut ticks = 0u8;
+        tick_meter_retry_cadence(&mut ticks, false, 0, true);
+        tick_meter_retry_cadence(&mut ticks, false, 3, false);
+        assert_eq!(ticks, 0);
+    }
+
+    #[test]
+    fn detection_observation_first_known_code_is_identified() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Gen3Hybrid, "2001"),
+            DetectionObservation::Identified
+        );
+    }
+
+    #[test]
+    fn detection_observation_unknown_code_is_unidentified_with_raw_value() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Unknown(0x4101), "4101"),
+            DetectionObservation::Unidentified { raw_dtc: 0x4101 }
+        );
+        // Commercial 0x51xx must stay unidentified rather than being guessed.
+        assert_eq!(
+            observe_model_detection(None, DeviceType::from_register(0x5101), "5101"),
+            DetectionObservation::Unidentified { raw_dtc: 0x5101 }
+        );
+    }
+
+    #[test]
+    fn detection_observation_empty_hr0_is_unidentified_zero() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Unknown(0), "0000"),
+            DetectionObservation::Unidentified { raw_dtc: 0 }
+        );
+    }
+
+    #[test]
+    fn detection_observation_garbage_code_text_does_not_panic() {
+        assert_eq!(
+            observe_model_detection(None, DeviceType::Unknown(0), "ZZZZ"),
+            DetectionObservation::Unidentified { raw_dtc: 0 }
+        );
+    }
+
+    #[test]
+    fn detection_observation_same_model_and_code_is_stable() {
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::HybridHvGen3, "8102")),
+                DeviceType::HybridHvGen3,
+                "8102"
+            ),
+            DetectionObservation::Stable
+        );
+        // Hex case is not a difference.
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::HybridHvGen3, "810a")),
+                DeviceType::HybridHvGen3,
+                "810A"
+            ),
+            DetectionObservation::Stable
+        );
+    }
+
+    #[test]
+    fn detection_observation_corrupt_arm_fw_flip_is_type_drift() {
+        // 0x2001 + ARM FW 352 -> Gen3; a corrupt FW later decodes as Gen1.
+        let confirmed = DeviceType::from_register(0x2001).refine_with_arm_fw(0x2001, 352);
+        let flipped = DeviceType::from_register(0x2001).refine_with_arm_fw(0x2001, 7);
+        assert_eq!(
+            observe_model_detection(Some((confirmed, "2001")), flipped, "2001"),
+            DetectionObservation::TypeDrift
+        );
+    }
+
+    #[test]
+    fn detection_observation_corrupt_dtc_to_other_family_is_type_drift() {
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::Gen3Hybrid, "2001")),
+                DeviceType::Unknown(0xFFFF),
+                "FFFF"
+            ),
+            DetectionObservation::TypeDrift
+        );
+    }
+
+    #[test]
+    fn detection_observation_rating_digit_change_is_code_drift() {
+        assert_eq!(
+            observe_model_detection(
+                Some((DeviceType::HybridHvGen3, "8102")),
+                DeviceType::HybridHvGen3,
+                "8101"
+            ),
+            DetectionObservation::CodeDrift
+        );
     }
 
     #[test]
@@ -10107,6 +10490,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,
@@ -10196,6 +10580,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,
@@ -10338,6 +10723,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: true,
                 target_soc: 60,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: Some(30),
                 charge_slot_1_start: None,
@@ -10586,6 +10972,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 100,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: Some((2, 0)),
@@ -10778,6 +11165,7 @@ mod tests {
                 firmware_version: "400".into(),
                 enable_discharge: false,
                 target_soc: 60,
+                charge_slot_1_target_soc: None,
                 battery_power_mode: 1,
                 charge_rate: None,
                 charge_slot_1_start: None,
@@ -11518,6 +11906,339 @@ mod tests {
             assert_eq!(snapshot.grid_frequency, 50.0);
             assert_eq!(snapshot.battery_temperature, 25.0);
             assert_eq!(snapshot.device_type_code, "0000");
+        })
+        .await;
+    }
+
+    /// One decoded read request, as a scripted mock sees it.
+    struct ReadRequest {
+        function: u8,
+        base: u16,
+        count: usize,
+    }
+
+    type RegisterScript = Arc<dyn Fn(&ReadRequest) -> Vec<u16> + Send + Sync>;
+
+    /// Like `run_keyed_register_mock`, but the register contents come from a
+    /// script the test can change while the session is running, and it keeps
+    /// accepting connections so a forced reconnect does not hang the test.
+    async fn run_scripted_register_mock(listener: tokio::net::TcpListener, script: RegisterScript) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            loop {
+                let mut header = [0u8; 6];
+                if stream.read_exact(&mut header).await.is_err() {
+                    break;
+                }
+                let length = u16::from_be_bytes([header[4], header[5]]) as usize;
+                let mut body = vec![0u8; length];
+                if stream.read_exact(&mut body).await.is_err() {
+                    break;
+                }
+                let mut frame = header.to_vec();
+                frame.extend_from_slice(&body);
+                let Ok(decoded) = crate::modbus::framer::decode_frame(&frame) else {
+                    break;
+                };
+                if decoded.payload.len() < 4 {
+                    break;
+                }
+                let base = u16::from_be_bytes([decoded.payload[0], decoded.payload[1]]);
+                let count = u16::from_be_bytes([decoded.payload[2], decoded.payload[3]]) as usize;
+                let mut data = script(&ReadRequest {
+                    function: decoded.function,
+                    base,
+                    count,
+                });
+                data.resize(count, 0);
+
+                let mut payload = Vec::with_capacity(14 + count * 2);
+                payload.extend_from_slice(b"TEST123456");
+                payload.extend_from_slice(&base.to_be_bytes());
+                payload.extend_from_slice(&(count as u16).to_be_bytes());
+                for value in data {
+                    payload.extend_from_slice(&value.to_be_bytes());
+                }
+                let response = crate::modbus::framer::encode_frame(
+                    "TEST123456",
+                    decoded.slave,
+                    decoded.function,
+                    &payload,
+                );
+                if stream.write_all(&response).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Plausible healthy registers for any block, with the device type code
+    /// (HR 0) and ARM firmware (HR 21) chosen by the caller.
+    fn healthy_registers(req: &ReadRequest, dtc: u16, arm_fw: u16) -> Vec<u16> {
+        let mut data = vec![0u16; req.count];
+        let mut set = |idx: usize, value: u16| {
+            if idx < data.len() {
+                data[idx] = value;
+            }
+        };
+        match (req.function, req.base) {
+            (4, 0) => {
+                set(5, 2300); // 230.0 V
+                set(13, 5000); // 50.00 Hz
+                set(41, 250); // 25.0 C inverter
+                set(50, 4800); // 48.0 V battery
+                set(56, 250); // 25.0 C battery
+                set(59, 50); // 50% SOC
+            }
+            (4, 60) => set(43, 250),
+            (3, 0) => {
+                set(0, dtc);
+                set(21, arm_fw);
+                set(27, 1); // eco
+            }
+            (3, 60) => {
+                set(50, 4); // reserve
+                set(51, 50); // charge rate
+                set(52, 50); // discharge rate
+                set(56, 100); // charge target
+            }
+            _ => {}
+        }
+        data
+    }
+
+    /// Settings pointing the poll loop at a mock on `port`.
+    async fn point_at_mock(state: &AppState, port: u16) {
+        let mut settings = state.settings.lock().await;
+        settings.host = "127.0.0.1".to_string();
+        settings.port = port;
+        settings.serial = "TEST123456".to_string();
+        settings.interval_secs = 1;
+    }
+
+    /// Collect the next `n` snapshot broadcasts, failing the test on timeout.
+    async fn next_snapshots(
+        rx: &mut tokio::sync::broadcast::Receiver<PollMessage>,
+        n: usize,
+    ) -> Vec<InverterSnapshot> {
+        let mut out = Vec::new();
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while out.len() < n {
+                match rx.recv().await {
+                    Ok(PollMessage::Snapshot(snap)) => out.push(*snap),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("only {} of {n} snapshots arrived", out.len()));
+        out
+    }
+
+    /// Install a log-capturing subscriber for the current thread (the test
+    /// runtime is single-threaded, so the spawned poll loop logs into it too).
+    fn capture_logs() -> (
+        Arc<crate::server::logs::LogRing>,
+        tracing::dispatcher::DefaultGuard,
+    ) {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(crate::server::logs::LogRing::new(2000));
+        ring.min_level
+            .store(3, std::sync::atomic::Ordering::Relaxed); // DEBUG
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(crate::server::logs::LogCaptureLayer::new(ring.clone()));
+        let guard =
+            tracing::dispatcher::set_default(&tracing::dispatcher::Dispatch::new(subscriber));
+        (ring, guard)
+    }
+
+    fn count_logs(ring: &crate::server::logs::LogRing, needle: &str) -> usize {
+        ring.read_all()
+            .iter()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+
+    /// A register that reads healthy, then (when the flag flips) returns
+    /// plausible-looking corrupt values for a few fields. They pass the
+    /// block-level fingerprint filter, so only the sanitizer can stop them.
+    #[tokio::test]
+    async fn poll_loop_never_broadcasts_corrupt_registers_that_pass_the_block_filter() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let corrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let script: RegisterScript = {
+                let corrupt = corrupt.clone();
+                Arc::new(move |req: &ReadRequest| {
+                    let mut data = healthy_registers(req, 0x2001, 352);
+                    if corrupt.load(std::sync::atomic::Ordering::Relaxed)
+                        && req.function == 4
+                        && req.base == 0
+                        && data.len() > 59
+                    {
+                        data[5] = 0xFFFF; // 6553.5 V
+                        data[13] = 0xFFFF; // 655.35 Hz
+                        data[41] = 2390; // 239.0 C inverter
+                        data[59] = 200; // SOC 200%
+                    }
+                    data
+                })
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+
+            // Establish a healthy baseline first: connect, warmup, grace.
+            let healthy = next_snapshots(&mut rx, 6).await;
+            let baseline = healthy.last().unwrap().clone();
+            assert_eq!(baseline.grid_voltage, 230.0);
+            assert_eq!(baseline.soc, 50);
+
+            corrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+            let after = next_snapshots(&mut rx, 4).await;
+            poll_task.abort();
+            server.abort();
+
+            for (i, snap) in after.iter().enumerate() {
+                assert_eq!(snap.grid_voltage, 230.0, "snapshot {i}: voltage leaked");
+                assert_eq!(snap.grid_frequency, 50.0, "snapshot {i}: frequency leaked");
+                assert_eq!(snap.soc, 50, "snapshot {i}: SOC leaked");
+                assert!(
+                    snap.inverter_temperature < 100.0,
+                    "snapshot {i}: temperature leaked ({})",
+                    snap.inverter_temperature
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_logs_how_a_known_model_was_identified_once() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let script: RegisterScript =
+                Arc::new(|req: &ReadRequest| healthy_registers(req, 0x2001, 352));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snaps = next_snapshots(&mut rx, 4).await;
+            poll_task.abort();
+            server.abort();
+
+            // 0x2001 + ARM FW 352 refines to Gen 3.
+            assert_eq!(snaps.last().unwrap().device_type, DeviceType::Gen3Hybrid);
+            assert_eq!(
+                count_logs(&ring, "Model detection: HR(0)/ARM firmware decoded"),
+                1,
+                "identification is logged once per session, not per poll"
+            );
+            let line = ring
+                .read_all()
+                .into_iter()
+                .find(|l| l.contains("Model detection: HR(0)/ARM firmware decoded"))
+                .unwrap();
+            for expected in ["0x2001", "firmware=352", "Exact", "Gen3Hybrid"] {
+                assert!(line.contains(expected), "missing {expected} in: {line}");
+            }
+            assert_eq!(
+                count_logs(&ring, "not a known code"),
+                0,
+                "an exact DTC must not raise the prefix-fallback warning"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_warns_once_about_an_unrecognised_device_code() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            // 0x4101 is a Commercial AIO code: it must stay unidentified.
+            let script: RegisterScript =
+                Arc::new(|req: &ReadRequest| healthy_registers(req, 0x4101, 352));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let snaps = next_snapshots(&mut rx, 4).await;
+            poll_task.abort();
+            server.abort();
+
+            assert!(matches!(
+                snaps.last().unwrap().device_type,
+                DeviceType::Unknown(0x4101)
+            ));
+            assert_eq!(
+                count_logs(&ring, "unrecognised HR(0) device type code"),
+                1,
+                "a persistently unknown code is warned about once, not every poll"
+            );
+            assert_eq!(count_logs(&ring, "HR(0)/ARM firmware decoded"), 0);
+            assert_eq!(count_logs(&ring, "Device model identified"), 0);
+            assert!(count_logs(&ring, "0x4101") >= 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn poll_loop_keeps_the_confirmed_model_when_arm_firmware_is_corrupted() {
+        crate::test_util::with_isolated_config_dir_async(|| async {
+            let (ring, _guard) = capture_logs();
+            let arm_fw = Arc::new(std::sync::atomic::AtomicU16::new(352));
+            let script: RegisterScript = {
+                let arm_fw = arm_fw.clone();
+                Arc::new(move |req: &ReadRequest| {
+                    healthy_registers(
+                        req,
+                        0x2001,
+                        arm_fw.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                })
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(run_scripted_register_mock(listener, script));
+
+            let state = Arc::new(AppState::new());
+            point_at_mock(&state, port).await;
+            let mut rx = state.tx.subscribe();
+            let poll_task = tokio::spawn(run_poll_loop(state.clone()));
+            let before = next_snapshots(&mut rx, 4).await;
+            assert_eq!(before.last().unwrap().device_type, DeviceType::Gen3Hybrid);
+
+            // A corrupt ARM FW would decode this 0x2001 as Gen1.
+            arm_fw.store(7, std::sync::atomic::Ordering::Relaxed);
+            let after = next_snapshots(&mut rx, 3).await;
+            poll_task.abort();
+            server.abort();
+
+            for snap in &after {
+                assert_eq!(snap.device_type, DeviceType::Gen3Hybrid);
+                assert_eq!(snap.device_type_display, "Gen 3 Hybrid");
+            }
+            assert!(
+                count_logs(&ring, "decoded type differs from confirmed model") >= 1,
+                "the drift must be visible in the logs"
+            );
         })
         .await;
     }

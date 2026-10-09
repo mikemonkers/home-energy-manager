@@ -1,7 +1,7 @@
 {
   "name": "givenergy-local",
   "private": true,
-  "version": "0.84.0",
+  "version": "0.86.0",
   "description": "Local monitoring and control for GivEnergy solar/battery inverters",
   "author": "Stuart Harding",
   "license": "MIT",
@@ -21,7 +21,7 @@
     "lint": "eslint .",
     "lint:md": "markdownlint . --ignore node_modules --ignore src-tauri/target --ignore AUDIT.md --ignore REGISTER_AUDIT.md --ignore test-results --ignore ideas --ignore reviews",
     "check:versions": "bash scripts/check-versions.sh",
-    "test": "bash scripts/check-versions.sh && vitest run && bash tests/scripts/run-with-software-renderer.test.sh && bash tests/scripts/install-dev-desktop.test.sh && bash tests/scripts/check-versions.test.sh && bash tests/scripts/check-autostart-permissions.test.sh && bash tests/scripts/proxmox-lxc.test.sh && bash tests/scripts/release-workflow.test.sh && bash tests/scripts/deb-updater-refresh.test.sh && bash tests/scripts/pi-updater.test.sh && python3 tests/scripts/backfill-history.test.py && python3 tests/scripts/pages-store-link.test.py && python3 tests/scripts/prepare-msix.test.py && python3 tests/scripts/platform-ci.test.py",
+    "test": "bash scripts/check-versions.sh && vitest run && bash tests/scripts/run-with-software-renderer.test.sh && bash tests/scripts/install-dev-desktop.test.sh && bash tests/scripts/check-versions.test.sh && bash tests/scripts/check-tauri-plugin-versions.test.sh && bash tests/scripts/check-autostart-permissions.test.sh && bash tests/scripts/proxmox-lxc.test.sh && bash tests/scripts/release-workflow.test.sh && bash tests/scripts/deb-updater-refresh.test.sh && bash tests/scripts/pi-updater.test.sh && python3 tests/scripts/backfill-history.test.py && python3 tests/scripts/pages-store-link.test.py && python3 tests/scripts/prepare-msix.test.py && python3 tests/scripts/platform-ci.test.py",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
@@ -33,8 +33,8 @@
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.1",
     "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/react": "^16.3.2",
-    "@types/node": "^26.1.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^26.6.2",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
@@ -42,19 +42,19 @@
     "@vitest/coverage-v8": "^5.0.0",
     "eslint": "^10.10.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "eslint-plugin-react-refresh": "^0.5.3",
+    "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.7.0",
     "jsdom": "^30.0.1",
     "markdownlint-cli": "^0.49.1",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
-    "typescript-eslint": "^8.65.0",
+    "typescript-eslint": "^8.70.0",
     "vite": "^8.1.5",
     "vitest": "^5.0.0"
   },
   "dependencies": {
-    "@tauri-apps/plugin-autostart": "^2.5.1",
-    "@tauri-apps/plugin-opener": "^2.5.4",
+    "@tauri-apps/plugin-autostart": "~2.6.0",
+    "@tauri-apps/plugin-opener": "~2.6.0",
     "jspdf": "^4.2.1",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
@@ -79,6 +79,6 @@
     "lightningcss-darwin-arm64": "^1.33.0",
     "lightningcss-darwin-x64": "^1.32.0",
     "lightningcss-linux-x64-gnu": "^1.33.0",
-    "lightningcss-win32-x64-msvc": "^1.32.0"
+    "lightningcss-win32-x64-msvc": "^1.33.0"
   }
 }

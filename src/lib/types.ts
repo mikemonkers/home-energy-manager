@@ -1,3 +1,5 @@
+import type { PlanStrategy } from './forecast';
+
 export interface InverterSnapshot {
   timestamp: number;
   solar_power: number;
@@ -337,6 +339,9 @@ export interface PollSettings {
   /** Minutes before the cheap charging tariff window's start at which
    * the auto-apply trigger fires (0–120). Defaults to 30. */
   forecast_plan_auto_apply_lead_minutes?: number;
+  /** How the Planner sizes the overnight charge (issue #359). Defaults
+   * to `min_soc`. */
+  forecast_plan_strategy?: PlanStrategy;
   /** Rated peak capacity (kWp) of the PV2 DC string. 0 = unset. */
   pv2_rated_kw?: number;
   /** External solar arrays measured by CT clamps (AC-coupled). */

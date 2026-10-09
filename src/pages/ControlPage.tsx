@@ -7,10 +7,14 @@ import { apiPost, apiGet } from '../lib/api';
 import {
   deviceSupportsEps,
   deviceSupportsTimedDischarge,
+  deviceUsesHr50ActivePowerRate,
   isAcCoupledDevice,
   isThreePhaseLimitModel,
   usesDirectChargeLimit,
 } from '../lib/deviceCapabilities';
+import { waitForSnapshotReadback } from '../lib/readback';
+import { formatPowerLimitLabel, percentToRawLimit, percentToWatts, rawLimitToPercent, resolveLimitDraft, snapLimitPercent } from '../lib/powerLimit';
+import type { LimitDraft, LimitScale } from '../lib/powerLimit';
 import type { InverterSnapshot, ScheduleSlot } from '../lib/types';
 import { fillScheduleSlots } from '../lib/scheduleSlots';
 import {
@@ -265,6 +269,12 @@ function InverterWriteProgress({ detail = 'This can take several seconds. Please
 }
 
 const CHARGE_SLOT_CONFIRM_TIMEOUT_MS = 15_000;
+/**
+ * A power-limit change waits for the poll loop's next write pass (up to one poll
+ * cycle) plus the paced write itself, and then for a snapshot that reads it
+ * back, so allow comfortably longer than a charge slot's single-pass wait.
+ */
+const POWER_LIMIT_CONFIRM_TIMEOUT_MS = 20_000;
 const TIMED_DISCHARGE_CONFIRM_TIMEOUT_MS = 15_000;
 
 function chargeSlotMatchesReadback(
@@ -564,6 +574,10 @@ function ScheduleSlotEditor({
   );
 }
 
+/** Shown beside a Save that is switched off because the saved settings could not be loaded. */
+const LOAD_FAILED_NOTE =
+  'The saved settings could not be loaded, so saving is turned off to avoid overwriting them. Reload the page to try again.';
+
 function AutoWinterSection() {
   const { snapshot } = useInverterStore();
   const [enabled, setEnabled] = useState(false);
@@ -573,6 +587,10 @@ function AutoWinterSection() {
 
   const [debounce, setDebounce] = useState(10);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -585,8 +603,13 @@ function AutoWinterSection() {
           setRecoveryThreshold(Math.round(res.data.config.recovery_threshold));
           setTargetSoc(Math.max(4, res.data.config.target_soc));
           setDebounce(res.data.config.debounce_readings);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ }
+      } catch {
+        setLoadFailed(true);
+      }
     })();
   }, []);
 
@@ -737,9 +760,12 @@ function AutoWinterSection() {
           </div>
         )}
 
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -756,6 +782,10 @@ function AdaptiveChargeSection() {
     confirmation_readings: 2,
   });
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -766,8 +796,15 @@ function AdaptiveChargeSection() {
           ok: boolean;
           data: { config: AdaptiveChargeConfig };
         }>('/api/adaptive-charge');
-        if (response.ok) setConfig(response.data.config);
-      } catch { /* retain safe defaults */ }
+        if (response.ok) {
+          setConfig(response.data.config);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
+        }
+      } catch {
+        setLoadFailed(true);
+      }
     })();
   }, []);
 
@@ -781,13 +818,14 @@ function AdaptiveChargeSection() {
 
   // Whether the charge-rate registers are a direct 1-100% percentage for this
   // device family — see lib/deviceCapabilities.ts (single source of truth).
+  // It no longer changes the watt arithmetic: once a DC-hybrid 0-50 register is
+  // doubled for display, both families express a percentage of the inverter's
+  // maximum battery power (issue #346). It still sets the slider floor, because
+  // the backend's `adaptive_charge_register` rejects 0 on the direct registers
+  // (1-100) while HR 111 accepts 0-50.
   const usesDirectLimit = usesDirectChargeLimit(snapshot?.device_type_code);
-  const estimatedWatts = (percent: number) => {
-    const maxPower = snapshot?.max_battery_power_w ?? 0;
-    if (usesDirectLimit) return Math.round(percent / 100 * maxPower);
-    const capacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-    return Math.min(Math.round(percent / 200 * capacityW), maxPower);
-  };
+  const rateLabel = (percent: number) =>
+    formatPowerLimitLabel(percent, percentToWatts(percent, snapshot?.max_battery_power_w));
 
   const save = async () => {
     const validationError = validateAdaptiveChargeConfig(config);
@@ -903,7 +941,7 @@ function AdaptiveChargeSection() {
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-text-secondary">{label}</span>
                     <span className="font-mono text-text-primary">
-                      {period[field]}% ({(estimatedWatts(period[field]) / 1000).toFixed(1)} kW)
+                      {rateLabel(period[field])}
                     </span>
                   </div>
                   <input
@@ -960,10 +998,13 @@ function AdaptiveChargeSection() {
       )}
 
       {serverError && <p className="text-red-400 text-xs">{serverError}</p>}
+      {loadFailed && (
+        <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+      )}
       <button
         type="button"
         onClick={save}
-        disabled={saving}
+        disabled={saving || !loaded}
         className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 disabled:opacity-50"
       >
         {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? 'Check settings' : 'Save Adaptive Charge'}
@@ -1551,6 +1592,10 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
   }, [computeRollingWindow]);
 
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   // Load config from backend on mount
@@ -1558,12 +1603,24 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
     (async () => {
       try {
         const res = await apiGet<{ ok: boolean; enabled: boolean; region: string; charge_threshold: number; discharge_threshold: number }>('/api/agile');
-        if (res.ok) {
+        // Only a response that really carries the saved values counts: a partial
+        // one would leave the form undefined and Save would post that.
+        if (
+          res.ok
+          && typeof res.region === 'string'
+          && typeof res.charge_threshold === 'number'
+          && typeof res.discharge_threshold === 'number'
+        ) {
           setRegion(res.region);
           setChargeThreshold(res.charge_threshold);
           setDischargeThreshold(res.discharge_threshold);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ }
+      } catch {
+        setLoadFailed(true);
+      }
     })();
   }, []);
 
@@ -1811,9 +1868,12 @@ function AgileControls({ scope }: { scope: 'full' | 'charge_only' | 'discharge_o
         </div>
       </div>
 
+      {loadFailed && (
+        <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+      )}
       <button
         onClick={saveConfig}
-        disabled={saving}
+        disabled={saving || !loaded}
         className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
       >
         {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -1961,6 +2021,10 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const [enabled, setEnabled] = useState(false);
   const [floorSoc, setFloorSoc] = useState(50);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -1970,8 +2034,13 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
         if (res.ok) {
           setEnabled(res.data.config.enabled);
           setFloorSoc(res.data.config.floor_soc);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ }
+      } catch {
+        setLoadFailed(true);
+      }
     })();
   }, [refreshKey]);
 
@@ -2026,9 +2095,12 @@ function DischargeFloorSection({ refreshKey = 0 }: { refreshKey?: number }) {
             className="flex-1"
           />
         </div>
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="w-full px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? '...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -2057,6 +2129,10 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
   const [endHour, setEndHour] = useState(0);
   const [endMinute, setEndMinute] = useState(0);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saveFeedback, setSaveFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -2072,8 +2148,13 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           setStartMinute(cfg.start_minute);
           setEndHour(cfg.end_hour);
           setEndMinute(cfg.end_minute);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* use defaults */ }
+      } catch {
+        setLoadFailed(true);
+      }
     })();
   }, [refreshKey]);
 
@@ -2257,9 +2338,12 @@ function LoadLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) {
           </>
         )}
 
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !loaded}
           className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : saveFeedback === 'saved' ? '✓ Saved' : saveFeedback === 'error' ? '✗ Error' : 'Save'}
@@ -2284,6 +2368,10 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
   const [recoveryThreshold, setRecoveryThreshold] = useState(55);
   const [confirmations, setConfirmations] = useState(3);
   const [saving, setSaving] = useState(false);
+  // True once the saved configuration has loaded. A failed load keeps Save off: saving
+  // earlier would post the defaults over what the user configured.
+  const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [feedback, setFeedback] = useState<'saved' | 'error' | null>(null);
 
   useEffect(() => {
@@ -2299,8 +2387,13 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           setHighThreshold(config.high_threshold);
           setRecoveryThreshold(config.recovery_threshold);
           setConfirmations(config.confirmation_readings);
+          setLoaded(true);
+        } else {
+          setLoadFailed(true);
         }
-      } catch { /* retain safe defaults */ }
+      } catch {
+        setLoadFailed(true);
+      }
     })();
   }, [refreshKey]);
 
@@ -2428,10 +2521,13 @@ function TemperatureLimiterSection({ refreshKey = 0 }: { refreshKey?: number }) 
           </>
         )}
 
+        {loadFailed && (
+          <p className="text-amber-300 text-xs">{LOAD_FAILED_NOTE}</p>
+        )}
         <button
           type="button"
           onClick={handleSave}
-          disabled={saving || recoveryThreshold >= highThreshold}
+          disabled={saving || !loaded || recoveryThreshold >= highThreshold}
           className="w-full py-2 bg-accent/20 text-accent rounded-lg text-sm font-medium hover:bg-accent/30 transition disabled:opacity-50"
         >
           {saving ? 'Saving...' : feedback === 'saved' ? '✓ Saved' : feedback === 'error' ? '✗ Error' : 'Save'}
@@ -2550,9 +2646,9 @@ export default function ControlPage() {
 
   // Battery limits: local draft state while dragging, otherwise from snapshot
   const [draftReserve, setDraftReserve] = useState<number | null>(null);
-  const [draftCharge, setDraftCharge] = useState<number | null>(null);
-  const [draftDischarge, setDraftDischarge] = useState<number | null>(null);
-  const [draftActivePower, setDraftActivePower] = useState<number | null>(null);
+  const [draftCharge, setDraftCharge] = useState<LimitDraft | null>(null);
+  const [draftDischarge, setDraftDischarge] = useState<LimitDraft | null>(null);
+  const [draftActivePower, setDraftActivePower] = useState<LimitDraft | null>(null);
   // ChargeMode is defined at module scope so it can be referenced by
   // the `CosyChargingSection` component declared earlier in this file.
   const snapshotCosyEnabled = snapshot?.cosy_enabled ?? false;
@@ -2923,6 +3019,12 @@ export default function ControlPage() {
   // backend refuses the write with HTTP 400.
   const supportsTimedDischarge = deviceSupportsTimedDischarge(snapshot);
 
+  // Whether the Inverter Active Power Limit is offered at all. HEM only writes
+  // HR 50, but the 1000-range-layout families read the value back from
+  // HR 1002, so there the save would land nowhere and the slider would snap
+  // back — see lib/deviceCapabilities.ts (issue #346).
+  const supportsHr50ActivePowerRate = deviceUsesHr50ActivePowerRate(snapshot?.device_type_code);
+
   // ARM firmware version as integer (e.g. 318, 352, 449). Used for firmware-gating
   // the extended schedule block on Gen3 hybrids.
   const armFwNum = snapshot?.firmware_version != null && snapshot.firmware_version !== ''
@@ -2950,47 +3052,44 @@ export default function ControlPage() {
   const isThreePhaseLimitModelDevice = isThreePhaseLimitModel(snapshot?.device_type_code);
   // Three-phase-bank models use HR1113-1121 for charge/discharge schedules;
   // the backend now selects that register map automatically.
-  const usesDirectPowerLimit = isAcCoupled || isThreePhaseLimitModelDevice;
-  // DC-coupled hybrid registers HR111/112 are 0-50 and are displayed as 0-100%.
-  // AC-coupled HR313/314 and three-phase HR1110/1108 are already 1-100%, so display directly.
-  const rateRegisterMax = usesDirectPowerLimit ? 100 : 50;
-  const rateDisplayMultiplier = usesDirectPowerLimit ? 1 : 2;
+  const usesDirectPowerLimit = usesDirectChargeLimit(snapshot?.device_type_code);
+  // The sliders mean "percent of the inverter's maximum battery power". The
+  // direct registers (AC-coupled HR313/314, three-phase HR1110/1108, Gateway)
+  // store that percentage as is; the single-phase DC-hybrid HR111/112 store a
+  // percentage of battery *capacity*, so the register is derived through the
+  // pack size. That conversion lives in lib/powerLimit.ts so the Inverter page
+  // and Adaptive Charge editor cannot drift from these sliders (issue #346).
+  const maxBatteryPowerW = snapshot?.max_battery_power_w ?? 0;
+  const limitScale: LimitScale = {
+    usesDirect: usesDirectPowerLimit,
+    maxWatts: maxBatteryPowerW,
+    capacityKwh: snapshot?.battery_capacity_kwh ?? 0,
+  };
   const rateDisplayMin = usesDirectPowerLimit ? 1 : 0;
+  // One slider step per percent. On the capacity-relative register several
+  // neighbouring percentages share a register value; the label shows the one
+  // the inverter will actually hold (snapLimitPercent).
+  const rateDisplayStep = 1;
   const snapshotChargeRate = snapshot?.charge_rate != null
-    ? Math.max(0, Math.min(rateRegisterMax, snapshot.charge_rate))
+    ? rawLimitToPercent(snapshot.charge_rate, limitScale)
     : undefined;
   const snapshotDischargeRate = snapshot?.discharge_rate != null
-    ? Math.max(0, Math.min(rateRegisterMax, snapshot.discharge_rate))
+    ? rawLimitToPercent(snapshot.discharge_rate, limitScale)
     : undefined;
-  const chargeRate = (draftCharge != null && (snapshotChargeRate == null || snapshotChargeRate * rateDisplayMultiplier !== draftCharge))
-    ? Math.max(rateDisplayMin, Math.min(100, draftCharge))
-    : snapshotChargeRate != null ? snapshotChargeRate * rateDisplayMultiplier : undefined;
-  const dischargeRate = (draftDischarge != null && (snapshotDischargeRate == null || snapshotDischargeRate * rateDisplayMultiplier !== draftDischarge))
-    ? Math.max(rateDisplayMin, Math.min(100, draftDischarge))
-    : snapshotDischargeRate != null ? snapshotDischargeRate * rateDisplayMultiplier : undefined;
-  const activePowerRate = (draftActivePower != null && snapshot?.active_power_rate !== draftActivePower) ? draftActivePower : snapshot?.active_power_rate;
-  const activePowerWatts = activePowerRate != null && snapshot?.max_ac_power_w
-    ? Math.round(activePowerRate / 100 * snapshot.max_ac_power_w)
-    : null;
-  const activePowerKw = activePowerWatts != null
-    ? `${Number((activePowerWatts / 1000).toFixed(1))}kW`
-    : null;
+  const chargeRate = resolveLimitDraft(draftCharge, snapshotChargeRate);
+  const dischargeRate = resolveLimitDraft(draftDischarge, snapshotDischargeRate);
+  const activePowerRate = resolveLimitDraft(draftActivePower, snapshot?.active_power_rate);
+  const activePowerWatts = percentToWatts(activePowerRate, snapshot?.max_ac_power_w);
 
-  // DC hybrid HR111/112 are 0-50, using the GivTCP formula:
-  // display_rate / 200 × battery_capacity. AC-coupled HR313/314 and three-phase
-  // HR1110/1108 are direct 1-100% percentages of inverter battery power rating.
-  const maxBatteryPowerW = snapshot?.max_battery_power_w ?? 0;
-  const batteryCapacityW = (snapshot?.battery_capacity_kwh ?? 0) * 1000;
-  const chargeWatts = chargeRate != null
-    ? usesDirectPowerLimit
-      ? Math.round(chargeRate / 100 * maxBatteryPowerW)
-      : Math.min(Math.round(chargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
-    : null;
-  const dischargeWatts = dischargeRate != null
-    ? usesDirectPowerLimit
-      ? Math.round(dischargeRate / 100 * maxBatteryPowerW)
-      : Math.min(Math.round(dischargeRate / 200 * batteryCapacityW), maxBatteryPowerW)
-    : null;
+  // The kilowatt figure is the snapped percentage of the inverter's stated
+  // maximum, i.e. what the inverter will really be limited to.
+  const chargeShown = chargeRate == null ? undefined : snapLimitPercent(chargeRate, limitScale);
+  const dischargeShown = dischargeRate == null ? undefined : snapLimitPercent(dischargeRate, limitScale);
+  const chargeWatts = percentToWatts(chargeShown, maxBatteryPowerW);
+  const dischargeWatts = percentToWatts(dischargeShown, maxBatteryPowerW);
+  const chargeLimitLabel = formatPowerLimitLabel(chargeShown, chargeWatts);
+  const dischargeLimitLabel = formatPowerLimitLabel(dischargeShown, dischargeWatts);
+  const activePowerLabel = formatPowerLimitLabel(activePowerRate, activePowerWatts);
 
   // Derive force charge/discharge state from live snapshot registers so the
   // progress indicators remain visible until the inverter confirms each
@@ -3029,6 +3128,16 @@ export default function ControlPage() {
   // the quick actions).
   const forceDischargeActive = forceDischargeActiveForState;
   const [reserveSaving, setReserveSaving] = useState(false);
+  // Every in-flight power-limit save (charge and discharge can overlap), so
+  // closing the page cancels all of them, including one still posting.
+  const powerLimitSavesRef = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const saves = powerLimitSavesRef.current;
+    return () => {
+      for (const controller of saves) controller.abort();
+      saves.clear();
+    };
+  }, []);
   const [chargeRateSaving, setChargeRateSaving] = useState(false);
   const [dischargeRateSaving, setDischargeRateSaving] = useState(false);
   const [activePowerSaving, setActivePowerSaving] = useState(false);
@@ -3379,32 +3488,95 @@ export default function ControlPage() {
     setReserveSaving(false);
   };
 
+  /**
+   * Wait for the inverter to read a just-saved limit back. The POST only means
+   * "queued"; the poll loop applies the write a few seconds later, and a running
+   * Force Charge holds manual limit changes until it ends. Records the outcome in
+   * the error banner and hands the slider back to the inverter's value either way
+   * (several percentages share one register, so a kept draft could sit under the
+   * wrong label). Returns false when the page was closed meanwhile, in which case
+   * nothing may be updated.
+   */
+  const confirmPowerLimit = async (
+    label: string,
+    field: 'charge_rate' | 'discharge_rate',
+    raw: number,
+    snapshotBeforeSave: InverterSnapshot | null,
+    signal: AbortSignal,
+    resetDraft: () => void,
+  ): Promise<boolean> => {
+    const result = await waitForSnapshotReadback(
+      (snap) => snap[field] === raw,
+      snapshotBeforeSave,
+      POWER_LIMIT_CONFIRM_TIMEOUT_MS,
+      signal,
+    );
+    if (result === 'aborted') return false;
+    if (result === 'timeout') {
+      setPowerControlSaveError(describeSaveFailure(new Error(
+        `${label} was sent but the inverter has not confirmed it yet. It may still be applying; `
+        + 'a running Force Charge holds limit changes until it ends',
+      )));
+    } else {
+      setPowerControlSaveError(null);
+    }
+    resetDraft();
+    return true;
+  };
+
+  /**
+   * Save a charge or discharge limit and keep it pending until the inverter
+   * confirms. The abort controller exists before the POST so a page closed while
+   * the request is still in flight cancels the wait that would follow it.
+   */
+  const savePowerLimit = async (
+    label: string,
+    path: string,
+    field: 'charge_rate' | 'discharge_rate',
+    raw: number,
+    setSaving: (saving: boolean) => void,
+    resetDraft: () => void,
+  ) => {
+    const controller = new AbortController();
+    powerLimitSavesRef.current.add(controller);
+    setSaving(true);
+    const snapshotBeforeSave = useInverterStore.getState().snapshot;
+    try {
+      await apiPost(path, { limit: raw });
+      if (!await confirmPowerLimit(label, field, raw, snapshotBeforeSave, controller.signal, resetDraft)) return;
+    } catch (e: unknown) {
+      if (controller.signal.aborted) return;
+      console.warn(`${label} save failed:`, e);
+      setPowerControlSaveError(`${label} save failed: ${describeSaveFailure(e)}`);
+      resetDraft();
+    } finally {
+      powerLimitSavesRef.current.delete(controller);
+    }
+    setSaving(false);
+  };
+
   const handleChargeRateSave = async () => {
     if (chargeRate == null) return;
-    setChargeRateSaving(true);
-    try {
-      await apiPost('/api/control/charge-rate', { limit: Math.round(chargeRate / rateDisplayMultiplier) });
-      setPowerControlSaveError(null);
-    } catch (e: unknown) {
-      console.warn("Charge power limit save failed:", e);
-      setPowerControlSaveError(`Charge power limit save failed: ${describeSaveFailure(e)}`);
-      setDraftCharge(null);
-    }
-    setChargeRateSaving(false);
+    await savePowerLimit(
+      'Charge power limit',
+      '/api/control/charge-rate',
+      'charge_rate',
+      percentToRawLimit(chargeRate, limitScale),
+      setChargeRateSaving,
+      () => setDraftCharge(null),
+    );
   };
 
   const handleDischargeRateSave = async () => {
     if (dischargeRate == null) return;
-    setDischargeRateSaving(true);
-    try {
-      await apiPost('/api/control/discharge-rate', { limit: Math.round(dischargeRate / rateDisplayMultiplier) });
-      setPowerControlSaveError(null);
-    } catch (e: unknown) {
-      console.warn("Discharge power limit save failed:", e);
-      setPowerControlSaveError(`Discharge power limit save failed: ${describeSaveFailure(e)}`);
-      setDraftDischarge(null);
-    }
-    setDischargeRateSaving(false);
+    await savePowerLimit(
+      'Discharge power limit',
+      '/api/control/discharge-rate',
+      'discharge_rate',
+      percentToRawLimit(dischargeRate, limitScale),
+      setDischargeRateSaving,
+      () => setDraftDischarge(null),
+    );
   };
 
   const handleActivePowerSave = async () => {
@@ -4066,16 +4238,16 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Charge Power Limit' : isAcCoupled ? 'AC Charge Power Limit' : 'Battery Charge Power Limit'}</span>
-              <span className="font-mono text-text-primary text-sm">{chargeRate != null ? `${chargeRate}%` : '—'}{chargeWatts != null && chargeWatts > 0 ? ` (${(chargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
+              <span className="font-mono text-text-primary text-sm">{chargeLimitLabel}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
                 type="range"
                 min={rateDisplayMin}
                 max={100}
-                step={1}
+                step={rateDisplayStep}
                 value={chargeRate ?? rateDisplayMin}
-                onChange={(e) => setDraftCharge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
+                onChange={(e) => setDraftCharge({ value: Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))), base: snapshotChargeRate })}
                 disabled={adaptiveOwnsChargeRate}
                 className="flex-1 disabled:opacity-50"
               />
@@ -4100,16 +4272,16 @@ export default function ControlPage() {
           <div className="space-y-1">
             <div className="flex items-center justify-between">
               <span className="text-text-secondary text-sm">{isThreePhaseLimitModelDevice ? 'Three-phase Discharge Power Limit' : isAcCoupled ? 'AC Discharge Power Limit' : 'Battery Discharge Power Limit'}</span>
-              <span className="font-mono text-text-primary text-sm">{dischargeRate != null ? `${dischargeRate}%` : '—'}{dischargeWatts != null && dischargeWatts > 0 ? ` (${(dischargeWatts / 1000).toFixed(1)} kW)` : ''}</span>
+              <span className="font-mono text-text-primary text-sm">{dischargeLimitLabel}</span>
             </div>
             <div className="flex items-center gap-3">
               <input
                 type="range"
                 min={rateDisplayMin}
                 max={100}
-                step={1}
+                step={rateDisplayStep}
                 value={dischargeRate ?? rateDisplayMin}
-                onChange={(e) => setDraftDischarge(Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))))}
+                onChange={(e) => setDraftDischarge({ value: Math.max(rateDisplayMin, Math.min(100, Number(e.target.value))), base: snapshotDischargeRate })}
                 className="flex-1"
               />
               <button
@@ -4122,31 +4294,35 @@ export default function ControlPage() {
             </div>
           </div>
 
-          {/* Inverter Active Power Limit */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-text-secondary text-sm">Inverter Active Power Limit</span>
-              <span className="font-mono text-text-primary text-sm whitespace-nowrap">{activePowerRate ?? '—'}%{activePowerKw != null && activePowerWatts != null && activePowerWatts > 0 ? `(${activePowerKw})` : ''}</span>
+          {/* Inverter Active Power Limit — HR 50 only. The 1000-range-layout
+              families read this value back from HR 1002, which HEM does not
+              write, so the control would snap back on save (issue #346). */}
+          {supportsHr50ActivePowerRate && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-text-secondary text-sm">Inverter Active Power Limit</span>
+                <span className="font-mono text-text-primary text-sm whitespace-nowrap">{activePowerLabel}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={activePowerRate ?? 100}
+                  onChange={(e) => setDraftActivePower({ value: Number(e.target.value), base: snapshot?.active_power_rate })}
+                  className="flex-1"
+                />
+                <button
+                  onClick={handleActivePowerSave}
+                  disabled={activePowerSaving}
+                  className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
+                >
+                  {activePowerSaving ? 'Applying…' : 'Save'}
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={activePowerRate ?? 100}
-                onChange={(e) => setDraftActivePower(Number(e.target.value))}
-                className="flex-1"
-              />
-              <button
-                onClick={handleActivePowerSave}
-                disabled={activePowerSaving}
-                className="px-3 py-1.5 bg-accent/20 text-accent rounded-lg text-xs font-medium hover:bg-accent/30 transition disabled:opacity-50"
-              >
-                {activePowerSaving ? 'Applying…' : 'Save'}
-              </button>
-            </div>
-          </div>
+          )}
         </div>
         {developerMode && <DischargeFloorSection refreshKey={loadLimiterRefreshKey} />}
         {/* Load Discharge Limiter — always visible when battery is in Eco mode */}

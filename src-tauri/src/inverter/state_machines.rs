@@ -21,12 +21,13 @@ use chrono::Timelike;
 
 use crate::inverter::encoder::{ControlCommand, RegisterWrite};
 use crate::inverter::model::{BatteryMode, DeviceType, InverterSnapshot, ScheduleSlot};
+use crate::inverter::power_limit::PowerLimitScale;
 use crate::modbus::client::ModbusClient;
 use crate::modbus::registers::{
-    encode_hhmm, HR_3PH_BATTERY_CHARGE_LIMIT, HR_3PH_BATTERY_SOC_RESERVE,
-    HR_3PH_FORCE_DISCHARGE_ENABLE, HR_AC_BATTERY_CHARGE_LIMIT, HR_BATTERY_CHARGE_LIMIT,
-    HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END, HR_CHARGE_SLOT_1_START,
-    HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET, HR_ENABLE_DISCHARGE,
+    encode_hhmm, HR_3PH_BATTERY_SOC_RESERVE, HR_3PH_FORCE_DISCHARGE_ENABLE,
+    HR_BATTERY_CHARGE_LIMIT, HR_BATTERY_POWER_MODE, HR_BATTERY_SOC_RESERVE, HR_CHARGE_SLOT_1_END,
+    HR_CHARGE_SLOT_1_START, HR_CHARGE_TARGET_SOC, HR_ENABLE_CHARGE, HR_ENABLE_CHARGE_TARGET,
+    HR_ENABLE_DISCHARGE,
 };
 
 /// The owner of the inverter's shared discharge-control registers.
@@ -677,31 +678,31 @@ pub struct AdaptiveChargeOutcome {
 
 /// Charge-limit register for device families with a controllable battery.
 pub fn adaptive_charge_register(device_type: DeviceType) -> Option<u16> {
-    if device_type.uses_three_phase_schedule_slots() {
-        return Some(HR_3PH_BATTERY_CHARGE_LIMIT);
-    }
     match device_type {
-        DeviceType::ACCoupled | DeviceType::ACCoupledMk2 => Some(HR_AC_BATTERY_CHARGE_LIMIT),
+        // No controllable battery here (or an unrecognised model).
         DeviceType::PvInverter | DeviceType::Ems | DeviceType::Gateway | DeviceType::Unknown(_) => {
             None
         }
-        _ => Some(HR_BATTERY_CHARGE_LIMIT),
+        _ => Some(device_type.power_limit_bank().charge_register()),
     }
 }
 
-/// Convert the normalized UI percentage to the model-specific raw register.
-pub fn normalized_charge_rate_to_raw(device_type: DeviceType, percent: u8) -> Option<u16> {
-    let register = adaptive_charge_register(device_type)?;
+/// Convert the normalized UI percentage (a share of the inverter's maximum
+/// battery power) to the model-specific raw register. The single-phase HR 111
+/// stores a percentage of battery capacity, so the pack size and the inverter's
+/// maximum are needed; see `inverter::power_limit` (issue #346).
+pub fn normalized_charge_rate_to_raw(snap: &InverterSnapshot, percent: u8) -> Option<u16> {
+    let register = adaptive_charge_register(snap.device_type)?;
     if register == HR_BATTERY_CHARGE_LIMIT {
-        Some((percent as u16).div_ceil(2).min(50))
+        Some(PowerLimitScale::from_snapshot(snap).percent_to_raw(u16::from(percent)))
     } else {
         Some((percent as u16).clamp(1, 100))
     }
 }
 
-fn raw_charge_rate_to_normalized(device_type: DeviceType, raw: u16) -> u8 {
-    if adaptive_charge_register(device_type) == Some(HR_BATTERY_CHARGE_LIMIT) {
-        (raw.saturating_mul(2).min(100)) as u8
+fn raw_charge_rate_to_normalized(snap: &InverterSnapshot, raw: u16) -> u8 {
+    if adaptive_charge_register(snap.device_type) == Some(HR_BATTERY_CHARGE_LIMIT) {
+        PowerLimitScale::from_snapshot(snap).raw_to_percent(raw) as u8
     } else {
         raw.min(100) as u8
     }
@@ -805,10 +806,7 @@ pub fn check_adaptive_charge(
                 address: register,
                 value: baseline.raw_value,
             }),
-            desired_rate_percent: Some(raw_charge_rate_to_normalized(
-                snap.device_type,
-                baseline.raw_value,
-            )),
+            desired_rate_percent: Some(raw_charge_rate_to_normalized(snap, baseline.raw_value)),
         };
     }
 
@@ -894,10 +892,7 @@ pub fn check_adaptive_charge(
                     address: register,
                     value: baseline.raw_value,
                 }),
-                desired_rate_percent: Some(raw_charge_rate_to_normalized(
-                    snap.device_type,
-                    baseline.raw_value,
-                )),
+                desired_rate_percent: Some(raw_charge_rate_to_normalized(snap, baseline.raw_value)),
             };
         }
         *state = AdaptiveChargeState::SuspendedAutoWinter {
@@ -926,7 +921,7 @@ pub fn check_adaptive_charge(
                         value: baseline.raw_value,
                     }),
                     desired_rate_percent: Some(raw_charge_rate_to_normalized(
-                        snap.device_type,
+                        snap,
                         baseline.raw_value,
                     )),
                 };
@@ -942,7 +937,7 @@ pub fn check_adaptive_charge(
         *state = AdaptiveChargeState::OutsideWindow;
         return AdaptiveChargeOutcome {
             write: None,
-            desired_rate_percent: Some(raw_charge_rate_to_normalized(snap.device_type, desired)),
+            desired_rate_percent: Some(raw_charge_rate_to_normalized(snap, desired)),
         };
     };
     let period = &config.periods[period_index];
@@ -1016,7 +1011,19 @@ pub fn check_adaptive_charge(
     } else {
         period.preferred_rate_percent
     };
-    let desired_raw = normalized_charge_rate_to_raw(snap.device_type, desired_percent)
+    // A partial rate on the half-scale register needs the pack size. Without it
+    // (right after connect, or after a corrupt capacity read) the only mapping
+    // available limits nothing on a large pack and would flip-flop the register
+    // once a good read arrives, so hold off, like the API does.
+    if register == HR_BATTERY_CHARGE_LIMIT
+        && !PowerLimitScale::from_snapshot(snap).can_convert(u16::from(desired_percent))
+    {
+        return AdaptiveChargeOutcome {
+            write: None,
+            desired_rate_percent: Some(desired_percent),
+        };
+    }
+    let desired_raw = normalized_charge_rate_to_raw(snap, desired_percent)
         .expect("supported device has a charge-rate conversion");
 
     AdaptiveChargeOutcome {
@@ -1184,7 +1191,7 @@ pub(crate) fn clear_cosy_slot_registers(device_type: DeviceType) -> Vec<Register
 }
 
 #[allow(async_fn_in_trait)]
-trait RegisterWriteExecutor {
+pub(crate) trait RegisterWriteExecutor {
     async fn write_register(&mut self, write: &RegisterWrite) -> Result<(), String>;
 }
 
@@ -1197,7 +1204,7 @@ impl RegisterWriteExecutor for ModbusClient {
 }
 
 /// Execute a list of register writes with delays between adjacent writes.
-async fn execute_register_writes<W: RegisterWriteExecutor>(
+pub(crate) async fn execute_register_writes<W: RegisterWriteExecutor>(
     writer: &mut W,
     writes: &[RegisterWrite],
     label: &str,
@@ -2114,6 +2121,32 @@ pub fn inverter_minute_of_day(snapshot: &InverterSnapshot) -> Option<u16> {
     } else {
         None
     }
+}
+
+/// Clock skew, in whole minutes, from which the inverter clock is reported as
+/// wrong. The inverter resets its Today counters at midnight by its own clock,
+/// so a clock left on GMT in summer resets them an hour late.
+pub const INVERTER_CLOCK_SKEW_WARN_MINUTES: i64 = 5;
+
+/// Signed difference in whole minutes between the inverter clock and the host
+/// clock (positive = inverter ahead), truncated toward zero.
+///
+/// `inverter_time` is the `YYYY-MM-DD HH:MM:SS` string the decoder emits from
+/// HR 35-40; `None` when it is empty or not a valid date-time.
+pub fn inverter_clock_skew_minutes(
+    inverter_time: &str,
+    host_now: chrono::NaiveDateTime,
+) -> Option<i64> {
+    let inverter_now =
+        chrono::NaiveDateTime::parse_from_str(inverter_time, "%Y-%m-%d %H:%M:%S").ok()?;
+    Some(inverter_now.signed_duration_since(host_now).num_minutes())
+}
+
+/// Whether to log the clock-skew warning now: the skew is known, at or past
+/// the threshold, and it has not been logged yet on this connection.
+pub fn clock_skew_warning_due(skew_minutes: Option<i64>, already_logged: bool) -> bool {
+    !already_logged
+        && skew_minutes.is_some_and(|skew| skew.abs() >= INVERTER_CLOCK_SKEW_WARN_MINUTES)
 }
 
 /// Choose the scheduling minute shared by all time-driven automations.
@@ -3380,6 +3413,11 @@ mod tests {
             device_type: DeviceType::Gen3Hybrid,
             device_type_code: "2001".to_string(),
             inverter_serial: "CE234".to_string(),
+            // A known pack where capacity / 2 is the maximum, so the half-scale
+            // register maps 1:2 to the percentage and a partial rate can be
+            // converted (Adaptive Charge holds off while the pack size is unknown).
+            battery_capacity_kwh: 5.12,
+            max_battery_power_w: 2560,
             ..Default::default()
         }
     }
@@ -3402,21 +3440,63 @@ mod tests {
         }
     }
 
+    /// A snapshot of `device_type` with no capacity or maximum known, which makes
+    /// the half-scale register fall back to a plain doubling.
+    fn unscaled_snapshot(device_type: DeviceType) -> InverterSnapshot {
+        InverterSnapshot {
+            device_type,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn adaptive_rate_conversion_is_device_aware() {
-        assert_eq!(
-            normalized_charge_rate_to_raw(DeviceType::Gen3Hybrid, 41),
-            Some(21)
-        );
-        assert_eq!(
-            normalized_charge_rate_to_raw(DeviceType::ACCoupled, 41),
-            Some(41)
-        );
-        assert_eq!(
-            normalized_charge_rate_to_raw(DeviceType::ThreePhase, 41),
-            Some(41)
-        );
-        assert_eq!(normalized_charge_rate_to_raw(DeviceType::Gateway, 41), None);
+        let raw = |dt: DeviceType, percent: u8| {
+            normalized_charge_rate_to_raw(&unscaled_snapshot(dt), percent)
+        };
+        assert_eq!(raw(DeviceType::Gen3Hybrid, 41), Some(21));
+        assert_eq!(raw(DeviceType::ACCoupled, 41), Some(41));
+        assert_eq!(raw(DeviceType::ThreePhase, 41), Some(41));
+        assert_eq!(raw(DeviceType::Gateway, 41), None);
+    }
+
+    /// Issue #346 was reported on a Gen1 Hybrid: its HR 111 is the 0-50 register.
+    /// With the capacity unknown it falls back to the plain half scale, so every
+    /// display percentage halves on the way out and doubles on the way back
+    /// without drifting.
+    #[test]
+    fn adaptive_rate_conversion_round_trips_on_the_unscaled_half_scale() {
+        let snap = unscaled_snapshot(DeviceType::Gen1Hybrid);
+        let dt = snap.device_type;
+        assert_eq!(adaptive_charge_register(dt), Some(HR_BATTERY_CHARGE_LIMIT));
+        assert_eq!(normalized_charge_rate_to_raw(&snap, 66), Some(33));
+        assert_eq!(normalized_charge_rate_to_raw(&snap, 67), Some(34));
+        assert_eq!(normalized_charge_rate_to_raw(&snap, 100), Some(50));
+        assert_eq!(normalized_charge_rate_to_raw(&snap, 0), Some(0));
+        for percent in (0..=100u8).step_by(2) {
+            let raw = normalized_charge_rate_to_raw(&snap, percent).unwrap();
+            assert!(raw <= 50, "{percent}% exceeds HR 111's 0-50 range");
+            assert_eq!(raw_charge_rate_to_normalized(&snap, raw), percent);
+            assert!(observed_charge_rate_is_valid(dt, raw));
+        }
+        assert!(!observed_charge_rate_is_valid(dt, 51));
+    }
+
+    /// With the pack size known the same percentages map through capacity, and a
+    /// register written then read back reports the percentage that was asked for.
+    #[test]
+    fn adaptive_rate_conversion_round_trips_through_the_pack_size() {
+        let snap = gen1_large_pack_snapshot(50, 50);
+        for raw in 0..=27u16 {
+            let percent = raw_charge_rate_to_normalized(&snap, raw);
+            assert_eq!(
+                normalized_charge_rate_to_raw(&snap, percent),
+                Some(raw),
+                "register {raw} reads as {percent}%"
+            );
+        }
+        assert_eq!(raw_charge_rate_to_normalized(&snap, 50), 100);
+        assert_eq!(normalized_charge_rate_to_raw(&snap, 100), Some(50));
     }
 
     #[test]
@@ -3456,6 +3536,140 @@ mod tests {
         assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
         assert_eq!(write.value, 20);
         assert_eq!(outcome.desired_rate_percent, Some(40));
+    }
+
+    /// Issue #346 on the reporter's Gen1 Hybrid: 9.5 kWh behind a 2.6 kW
+    /// inverter. The configured percentages are shares of the inverter's maximum,
+    /// but HR 111 stores a percentage of battery capacity, so the register has to
+    /// be derived through the pack size (GivTCP write.py).
+    fn gen1_large_pack_snapshot(soc: u8, raw_rate: u8) -> InverterSnapshot {
+        InverterSnapshot {
+            soc,
+            charge_rate: raw_rate,
+            device_type: DeviceType::Gen1Hybrid,
+            device_type_code: "1001".to_string(),
+            inverter_serial: "CE234".to_string(),
+            battery_capacity_kwh: 9.5,
+            max_battery_power_w: 2600,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn adaptive_preferred_rate_is_a_share_of_the_inverter_maximum_through_the_pack_size() {
+        let snap = gen1_large_pack_snapshot(50, 50);
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = None;
+        let config = adaptive_config();
+        check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+        let outcome = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+
+        // 40% of 2600 W = 1040 W = 10.9% of 9500 Wh -> register 11 (not 20,
+        // which is 20% of capacity = 1900 W).
+        let write = outcome.write.expect("preferred rate differs from baseline");
+        assert_eq!(write.address, HR_BATTERY_CHARGE_LIMIT);
+        assert_eq!(write.value, 11);
+        assert_eq!(outcome.desired_rate_percent, Some(40));
+    }
+
+    /// The API refuses a partial rate it cannot convert faithfully; Adaptive
+    /// Charge must hold off the same way. With the pack size unknown (right after
+    /// connect) or implausible (one corrupt HR 55 read) the only available
+    /// mapping is the plain halving that limits nothing on a large pack, and
+    /// writing it would flip-flop the register once a good read arrives.
+    #[test]
+    fn adaptive_holds_off_a_partial_rate_while_the_pack_size_is_unknown() {
+        let config = adaptive_config();
+        for capacity_kwh in [0.0_f32, 3355.0] {
+            let mut snap = gen1_large_pack_snapshot(50, 50);
+            snap.battery_capacity_kwh = capacity_kwh;
+            let mut state = AdaptiveChargeState::Inactive;
+            let mut saved = None;
+            check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+            let outcome =
+                check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+            assert!(
+                outcome.write.is_none(),
+                "{capacity_kwh} kWh: must not write the unscaled register"
+            );
+            assert_eq!(outcome.desired_rate_percent, Some(40));
+            assert!(matches!(
+                state,
+                AdaptiveChargeState::Preferred { period: 0, .. }
+            ));
+
+            // Once the pack size is known the preferred rate is applied.
+            let known = gen1_large_pack_snapshot(50, 50);
+            let outcome =
+                check_adaptive_charge(&known, &config, true, &mut state, &mut saved, 9 * 60);
+            assert_eq!(
+                outcome.write.map(|w| w.value),
+                Some(11),
+                "{capacity_kwh} kWh"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_recovery_still_lifts_the_limit_while_the_pack_size_is_unknown() {
+        // 100% writes register 50 whatever the pack size, so there is nothing to
+        // hold off and a low battery must still be allowed to recover.
+        let mut config = adaptive_config();
+        config.confirmation_readings = 1;
+        let mut snap = gen1_large_pack_snapshot(10, 11);
+        snap.battery_capacity_kwh = 0.0;
+        let mut state = AdaptiveChargeState::Recovery {
+            period: 0,
+            high_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "1001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 30,
+        });
+        let outcome = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 9 * 60);
+        assert_eq!(outcome.write.map(|w| w.value), Some(50));
+    }
+
+    #[test]
+    fn adaptive_recovery_at_100_percent_writes_the_register_maximum() {
+        let mut config = adaptive_config();
+        config.confirmation_readings = 1;
+        let mut state = AdaptiveChargeState::Recovery {
+            period: 0,
+            high_count: 0,
+        };
+        let mut saved = Some(crate::settings::AdaptiveChargeSavedLimit {
+            inverter_serial: "CE234".to_string(),
+            device_type_code: "1001".to_string(),
+            register_address: HR_BATTERY_CHARGE_LIMIT,
+            raw_value: 30,
+        });
+        let outcome = check_adaptive_charge(
+            &gen1_large_pack_snapshot(10, 11),
+            &config,
+            true,
+            &mut state,
+            &mut saved,
+            9 * 60,
+        );
+        let write = outcome.write.expect("recovery lifts the limit");
+        assert_eq!(write.value, 50);
+        assert_eq!(outcome.desired_rate_percent, Some(100));
+    }
+
+    #[test]
+    fn adaptive_reports_the_observed_register_as_a_share_of_the_maximum() {
+        // Outside a window the outcome reports the user's own register. Register
+        // 17 on this pack is 1615 W = 62% of the inverter maximum.
+        let config = adaptive_config();
+        let mut state = AdaptiveChargeState::Inactive;
+        let mut saved = None;
+        let snap = gen1_large_pack_snapshot(50, 17);
+        check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 20 * 60);
+        let outcome = check_adaptive_charge(&snap, &config, true, &mut state, &mut saved, 20 * 60);
+        assert_eq!(outcome.desired_rate_percent, Some(62));
     }
 
     #[test]
@@ -7740,6 +7954,94 @@ mod tests {
         // Simulate a UTC host at 00:30 while the inverter/user clock is still
         // 23:30. Every schedule evaluator must receive 23:30.
         assert_eq!(authoritative_minute_of_day(&snap, 30), 23 * 60 + 30);
+    }
+
+    fn host_at(date_time: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(date_time, "%Y-%m-%d %H:%M:%S").unwrap()
+    }
+
+    #[test]
+    fn clock_skew_is_zero_when_the_clocks_agree() {
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 12:00:00", host_at("2026-08-29 12:00:00")),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn clock_skew_is_signed_inverter_minus_host() {
+        let host = host_at("2026-08-29 12:00:00");
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 12:05:00", host),
+            Some(5)
+        );
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 11:54:00", host),
+            Some(-6)
+        );
+    }
+
+    #[test]
+    fn clock_skew_truncates_toward_zero_to_whole_minutes() {
+        let host = host_at("2026-08-29 12:00:00");
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 12:04:59", host),
+            Some(4)
+        );
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-08-29 11:55:01", host),
+            Some(-4)
+        );
+    }
+
+    #[test]
+    fn clock_skew_spans_midnight_and_gmt_bst_offsets() {
+        // Inverter just past midnight, host just before it the previous day.
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-07-01 00:02:00", host_at("2026-06-30 23:58:00")),
+            Some(4)
+        );
+        // A clock left on GMT through British Summer Time runs an hour behind.
+        assert_eq!(
+            inverter_clock_skew_minutes("2026-07-01 11:00:00", host_at("2026-07-01 12:00:00")),
+            Some(-60)
+        );
+    }
+
+    #[test]
+    fn clock_skew_is_unknown_for_a_missing_or_malformed_inverter_time() {
+        let host = host_at("2026-08-29 12:00:00");
+        for bad in [
+            "",
+            "garbage",
+            "2026-08-29",
+            "2026-13-45 99:00:00",
+            "12:00:00",
+        ] {
+            assert_eq!(inverter_clock_skew_minutes(bad, host), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn clock_skew_warning_is_due_from_five_minutes_either_way() {
+        assert!(!clock_skew_warning_due(Some(0), false));
+        assert!(!clock_skew_warning_due(Some(4), false));
+        assert!(!clock_skew_warning_due(Some(-4), false));
+        assert!(clock_skew_warning_due(
+            Some(INVERTER_CLOCK_SKEW_WARN_MINUTES),
+            false
+        ));
+        assert!(clock_skew_warning_due(
+            Some(-INVERTER_CLOCK_SKEW_WARN_MINUTES),
+            false
+        ));
+        assert!(clock_skew_warning_due(Some(-60), false));
+    }
+
+    #[test]
+    fn clock_skew_warning_is_not_due_when_unknown_or_already_logged() {
+        assert!(!clock_skew_warning_due(None, false));
+        assert!(!clock_skew_warning_due(Some(60), true));
     }
 
     #[test]

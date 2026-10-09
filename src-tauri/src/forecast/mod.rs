@@ -388,36 +388,34 @@ pub fn build_forecast_payload(inputs: &ForecastInputs) -> ForecastPayload {
 }
 
 /// Battery AC rate limits in kW derived from snapshot registers, using
-/// the same model classification the Control page applies: direct-limit
-/// families store 1–100%, DC hybrids store 0–50 which the UI doubles.
+/// the same conversion the Control page applies (`inverter::power_limit`):
+/// direct-limit families store 1–100% of the inverter's maximum, DC hybrids
+/// store 0–50 as a percentage of battery capacity.
 /// Returns (0, 0) when the max battery power is unknown.
 pub(crate) fn battery_rate_limits_kw(snapshot: &InverterSnapshot) -> (f64, f64) {
     if snapshot.max_battery_power_w == 0 {
         return (0.0, 0.0);
     }
-    let max_kw = snapshot.max_battery_power_w as f64 / 1000.0;
-    // DC hybrids store 0–50 which the UI doubles for display; direct-limit
-    // families store 1–100 natively.
-    let scale = if snapshot.device_type.uses_direct_charge_limit() {
-        1.0
-    } else {
-        2.0
-    };
+    // The raw register means different things per family: direct banks hold a
+    // percentage of the inverter's maximum, while the DC-hybrid HR 111/112 holds
+    // a percentage of battery capacity (GivTCP read.py), so the power it allows
+    // depends on the pack size. See `inverter::power_limit`.
+    let scale = crate::inverter::power_limit::PowerLimitScale::from_snapshot(snapshot);
     // A 0 rate register means "unset/unknown", not "disabled" — the AC
     // config / limit blocks are optional and read zero right after connect
     // (and on simulators). Fall back to the hardware maximum so the
     // projection still runs; a genuine user-configured 0 is rare and the
     // forecast is an estimate capped at the physical limit either way.
-    let pct_or_max = |raw: u8| {
+    let limit_kw = |raw: u8| {
         if raw == 0 {
-            100.0
-        } else {
-            (raw as f64 * scale).clamp(0.0, 100.0)
+            return snapshot.max_battery_power_w as f64 / 1000.0;
         }
+        scale.raw_to_watts(u16::from(raw)) / 1000.0
     };
-    let charge_pct = pct_or_max(snapshot.charge_rate);
-    let discharge_pct = pct_or_max(snapshot.discharge_rate);
-    (charge_pct / 100.0 * max_kw, discharge_pct / 100.0 * max_kw)
+    (
+        limit_kw(snapshot.charge_rate),
+        limit_kw(snapshot.discharge_rate),
+    )
 }
 
 /// How far back the calibration reads actual generation for. One day
@@ -1057,6 +1055,76 @@ mod tests {
         }
     }
 
+    /// Issue #346 regression, reported on a Gen1 Hybrid: a 2600 W inverter
+    /// with HR 111 = 33 (displayed 66%) must project 66% of 2600 W, not the
+    /// full rating, and the Gateway's direct HR 313/314 must not be doubled.
+    #[test]
+    fn rate_limits_for_the_gen1_hybrid_reporter_and_the_gateway() {
+        use crate::inverter::model::DeviceType;
+        let mut snap = rate_snapshot();
+        snap.device_type = DeviceType::Gen1Hybrid;
+        snap.max_battery_power_w = 2600;
+        snap.charge_rate = 33;
+        snap.discharge_rate = 25;
+        let (charge, discharge) = battery_rate_limits_kw(&snap);
+        assert!((charge - 1.716).abs() < 1e-9, "66% of 2.6 kW, got {charge}");
+        assert!(
+            (discharge - 1.3).abs() < 1e-9,
+            "50% of 2.6 kW, got {discharge}"
+        );
+
+        // Every even display percentage round-trips through the half scale.
+        for raw in 1..=50u8 {
+            snap.charge_rate = raw;
+            let (charge, _) = battery_rate_limits_kw(&snap);
+            let expected = raw as f64 * 2.0 / 100.0 * 2.6;
+            assert!((charge - expected).abs() < 1e-9, "raw {raw}");
+        }
+
+        snap.device_type = DeviceType::Gateway;
+        snap.max_battery_power_w = 6000;
+        snap.charge_rate = 66;
+        snap.discharge_rate = 66;
+        let (charge, _) = battery_rate_limits_kw(&snap);
+        assert!((charge - 3.96).abs() < 1e-9, "Gateway HR 313 is direct");
+    }
+
+    /// Issue #346: the DC-hybrid HR 111/112 register is a percentage of battery
+    /// *capacity* (GivTCP read.py: `min(reg / 100 * capacity_w, inverter_max)`),
+    /// so the power the forecast assumes must follow the pack size. A 9.5 kWh
+    /// Gen1 behind a 2.6 kW inverter with the reporter's old register 31 was
+    /// never throttled at all.
+    #[test]
+    fn rate_limits_follow_the_pack_size_on_the_half_scale_register() {
+        use crate::inverter::model::DeviceType;
+        let mut snap = rate_snapshot();
+        snap.device_type = DeviceType::Gen1Hybrid;
+        snap.max_battery_power_w = 2600;
+        snap.battery_capacity_kwh = 9.5;
+
+        // Register 17 = 17% of 9500 Wh = 1615 W.
+        snap.charge_rate = 17;
+        snap.discharge_rate = 10;
+        let (charge, discharge) = battery_rate_limits_kw(&snap);
+        assert!((charge - 1.615).abs() < 1e-9, "got {charge}");
+        assert!((discharge - 0.95).abs() < 1e-9, "got {discharge}");
+
+        // 31 and the factory default 50 both exceed the inverter's rating.
+        for raw in [28, 31, 50] {
+            snap.charge_rate = raw;
+            let (charge, _) = battery_rate_limits_kw(&snap);
+            assert!((charge - 2.6).abs() < 1e-9, "raw {raw}: {charge}");
+        }
+
+        // A small pack where capacity / 2 is the maximum keeps the doubling.
+        snap.battery_capacity_kwh = 5.12;
+        snap.max_battery_power_w = 2560;
+        snap.charge_rate = 25;
+        let (charge, _) = battery_rate_limits_kw(&snap);
+        // 5.12 is not exact in f32, hence the looser tolerance.
+        assert!((charge - 1.28).abs() < 1e-6, "got {charge}");
+    }
+
     #[test]
     fn store_and_calibrate_persists_pr_to_meta() {
         let db = test_db();
@@ -1199,6 +1267,122 @@ mod tests {
             discharge_rate: 50,
             battery_reserve: 10,
             ..Default::default()
+        }
+    }
+
+    /// Issue #359: the plan the API serves and the automation applies
+    /// follows the configured strategy.
+    #[test]
+    fn plan_follows_the_configured_strategy() {
+        use crate::forecast::planner::PlanRecommendation;
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_full_forecast_state(&db, now);
+        // Overcast: no solar at all, so the battery runs down overnight.
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 0.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        let snap = battery_snapshot();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+
+        let default_plan = crate::server::api::compute_plan_recommendation(
+            &payload,
+            &settings,
+            Some(&snap),
+            now_ts,
+        );
+        assert!(
+            matches!(default_plan, PlanRecommendation::Charge { .. }),
+            "{default_plan:?}"
+        );
+
+        settings.forecast_plan_strategy = crate::settings::PlanStrategy::HoldWindow;
+        let hold_plan = crate::server::api::compute_plan_recommendation(
+            &payload,
+            &settings,
+            Some(&snap),
+            now_ts,
+        );
+        assert!(
+            matches!(hold_plan, PlanRecommendation::ChargeAndHold { .. }),
+            "{hold_plan:?}"
+        );
+    }
+
+    /// Issue #359 review: the export advice must see a hold plan's charge,
+    /// or it can sell into the very hours the battery is being charged.
+    #[test]
+    fn export_advice_respects_a_hold_plan_charge() {
+        use crate::forecast::planner::ExportAdvice;
+        let db = test_db();
+        let now = local_dt(2025, 1, 15, 20, 0);
+        seed_full_forecast_state(&db, now);
+        let now_ts = now.timestamp();
+        let hour_start = now_ts - now_ts.rem_euclid(3600);
+        for h in 0..72i64 {
+            db.insert_forecast_values(&[ForecastValueRow {
+                timestamp: hour_start + h * 3600,
+                variable: "shortwave_radiation".to_string(),
+                value: 0.0,
+                source: "open-meteo".to_string(),
+                fetched_at: now_ts,
+            }])
+            .unwrap();
+        }
+        let slot = |start: &str, end: &str, rate: f64| crate::settings::TariffSlot {
+            start: start.to_string(),
+            end: end.to_string(),
+            rate,
+        };
+        let mut settings = five_kwp_settings();
+        settings.import_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![slot("00:00", "05:00", 0.07), slot("05:00", "23:59", 0.27)],
+        });
+        // The best export window, 23:00–01:00, runs into the cheap charging
+        // hours that start at midnight.
+        settings.export_tariff_config = Some(crate::settings::TariffConfig {
+            slots: vec![
+                slot("00:00", "01:00", 0.40),
+                slot("01:00", "23:00", 0.05),
+                slot("23:00", "23:59", 0.40),
+            ],
+        });
+        let snap = battery_snapshot();
+        let payload =
+            build_forecast_payload(&full_forecast_inputs(&db, Some(&snap), now, &settings));
+        for strategy in [
+            crate::settings::PlanStrategy::MinSoc,
+            crate::settings::PlanStrategy::HoldWindow,
+        ] {
+            settings.forecast_plan_strategy = strategy;
+            let (_, export) =
+                crate::server::api::compute_full_plan(&payload, &settings, Some(&snap), now_ts);
+            match export {
+                Some(ExportAdvice::NoExport { reason }) => assert!(
+                    reason.contains("overlaps the planned charge"),
+                    "{strategy:?}: {reason}"
+                ),
+                other => panic!("{strategy:?}: expected an overlap refusal, got {other:?}"),
+            }
         }
     }
 

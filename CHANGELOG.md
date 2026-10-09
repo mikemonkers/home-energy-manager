@@ -2,7 +2,88 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.86.0] - 2026-10-09
+
+### Added
+
+- **The planner can charge to a target and then hold it through the cheap window.** Pick "Hold through the cheap window" under Plan settings and the planner charges only as far as the lowest level that lasts until the next cheap period, then holds the battery there while the grid supplies the house until the cheap rate ends. Until now it charged at full rate for as short a time as possible and let the battery run the house for the rest of the cheap window, losing energy charging the battery only to empty it again. Keeping a minimum is still the default (#359).
+- **Holding at a target is confirmed on Gen 3 hybrids.** On other inverters the planner shows a note asking you to check, on the first night, that the battery stays flat once it reaches the target.
+
+## [0.85.7] - 2026-10-09
+
+### Fixed
+
+- **The planner charges overnight again when the battery would otherwise run flat.** With the Minimum battery level at or below your inverter's battery reserve, the planner said no charge was needed even when the battery would sit empty on grid power until the sun came up. It now charges in the cheap window whenever the battery would otherwise run empty before the next one, and the export advice no longer sells energy you'll need to buy back later that night (#360).
+- **A Minimum battery level of 0% means the planner never charges from the grid.** The setting explains this beside the input, along with what a minimum at or below your battery reserve does.
+- **The planner no longer suggests a pointless one-minute charge.** A dip before the cheap window, which charging in that window can't help, is no longer treated as a reason to charge.
+
+### Improved
+
+- **The Forecast tab is now called Planner.** It's the name everyone uses for it. Bookmarks and your panel visibility settings carry over unchanged.
+
+## [0.85.6] - 2026-10-06
+
+### Improved
+
+- **The Refresh Interval setting now explains its effect on your GivEnergy cloud history.** Your WiFi dongle passes each reading the app asks for on to the cloud, which stores it as a data point, so a short interval makes the cloud history much larger (#347).
+
+## [0.85.5] - 2026-10-04
+
+### Fixed
+
+- **The daily consumption report now actually sends.** Since June the scheduled Telegram report never fired. It now goes out at the time you choose, and if you turn it on (or restart the app) shortly before that time you still get this morning's report rather than waiting a day.
+- **Every switch on the Settings page now works with a keyboard and a screen reader.** Only four of nineteen switches were announced by name; all of them are now labelled, can be tabbed to, and flip with Space or Enter.
+- **Saving settings can no longer overwrite what you configured with defaults.** On a slow or failing connection the Save buttons for Notifications, Auto Winter, the Load and Temperature limiters, the Discharge Schedule Minimum SOC, Adaptive Charge and the Agile thresholds could be pressed before your saved settings had loaded. They now stay off until the settings have loaded, and if they can't be loaded they stay off and say why. The Notifications form is also locked until it has loaded, so nothing you type is lost.
+- **A failed attempt to switch Alerts or Auto-Discovery on or off now shows a clear message** instead of failing silently.
+
+### Improved
+
+- **The log now records how your inverter model was identified.** At startup it notes the device code and firmware, whether the code was recognised exactly, and warns once if it isn't recognised, which makes support requests easier to diagnose.
+
+## [0.85.4] - 2026-10-04
+
+### Fixed
+
+- **The Battery Charge and Discharge Power Limits now really limit the power on single-phase hybrid inverters.** The slider is a share of the inverter's maximum, but these inverters read the setting as a share of the battery's size, so on a large battery a limit like 62% still charged at full power. HEM now works out the right setting from your battery size, and the forecast and Adaptive Charge use the same conversion (#346). If you set a limit with an earlier version, set it again.
+- **Saving a power limit now waits for the inverter to confirm it.** The "Applying changes to inverter" notice used to vanish after a few milliseconds, before the inverter had taken the new value. It now stays until the inverter reports the change, and says so if it hasn't been applied within about 20 seconds, for example because a Force Charge is holding limit changes.
+- **The power limit sliders move in 1% steps and show what the inverter will actually hold.** Neighbouring percentages can map to the same inverter setting, so the figure beside the slider is the value a save will really apply.
+
+## [0.85.3] - 2026-10-03
+
+### Fixed
+
+- **Force Charge works on 10-slot inverters even when the battery is already above your first charge slot's target.** Gen 3, Gen 4, All-in-One and HV inverters stop charging at the lower of the overall target and the first slot's own target, so Force Charge could do nothing. It now raises the first slot's target for the duration and puts your value back when you stop.
+- **Battery lifetime charge and discharge totals are filled in for Gen 1, Gen 2, Gen 3 and AC-coupled inverters.** They come from the first battery, falling back to the inverter's own value, and a battery that briefly stops answering keeps the last total instead of dropping to zero.
+
+### Added
+
+- **A warning in the Logs when the inverter's clock is five or more minutes out.** The inverter resets its Today counters at midnight by its own clock, so a clock left on GMT through summer resets them an hour late. Use Sync Time to correct it.
+
+## [0.85.2] - 2026-10-03
+
+### Fixed
+
+- **Average lines are gone from the cumulative History graphs.** They still appear on the power, SOC, temperature and grid voltage charts, but the daily energy counters and the Import Cost / Export Income totals no longer draw one — a running total has no meaningful average, and the number changed with the range you picked (#345).
+
+## [0.85.1] - 2026-10-03
+
+### Fixed
+
+- **The charge and discharge power limits behave consistently across every inverter.** The Inverter page now shows the same percentage as the Control page instead of half of it on hybrid inverters, the sliders on those models move in steps they can actually save, and they follow changes made elsewhere instead of sticking on an old value (#346).
+- **Gateways save and read back their charge and discharge limits correctly.** HEM now uses the same limit settings for the Gateway as GivTCP does, so a value above 50% is accepted and shown at the right level.
+- **The Inverter Active Power Limit is only offered where it works.** On three-phase and HV models the slider wrote a setting those inverters never read back, so it is now hidden there and the API refuses the request rather than reporting a success that changed nothing.
+
+## [0.85.0] - 2026-10-02
+
+### Added
+
+- **History charts can show the average of each plotted series.** Enable History Chart Averages in Settings to add a fixed dotted line per series over the selected period, and to surface the same window average in the chart tooltip (#345).
+
+## [0.84.1] - 2026-09-26
+
+### Fixed
+
+- **Solar generation starts at the right value on Gen3 hybrid inverters.** A separate inverter reading could make the History chart count energy before the panels had generated it, then drop back when the panel counters started moving. HEM now uses those panel counters from the beginning of the day, so the chart and period total no longer overcount the false rise (#338).
 
 ## [0.84.0] - 2026-09-21
 

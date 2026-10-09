@@ -205,15 +205,72 @@ instructions on all three channels.
 
 ---
 
-### How does the Forecast tab work?
+### How does the Planner tab work?
 
-The Forecast tab predicts the next 48 hours from live weather data (Open-Meteo — free, no account or API key needed) combined with your own history:
+The Planner tab (called Forecast in older versions) looks three days ahead and
+tells you whether tonight's cheap-rate window needs a grid charge, and how much.
+It combines live weather data (Open-Meteo — free, no account or API key needed)
+with your own history:
 
 - **Solar** is calibrated against your actual generation over the last two weeks, so the prediction learns how your panels really perform. Until roughly five usable days of history exist, the prediction is marked *preliminary*.
 - **Consumption** is learned from your household's typical hourly usage.
 - **Battery projection** simulates your charge level hour by hour. When it would dip below your **Minimum battery level**, the planner recommends an overnight grid charge — sized to the smallest charge that holds that floor and placed in your cheapest import tariff window. Press **Apply** to write the charge slot to the inverter.
 
-For charge recommendations to appear, make sure your import tariff windows are configured under **Settings → Energy Tariffs**.
+Set the **Minimum battery level** to `0%` if you never want the planner to charge
+from the grid. A minimum at or below your inverter's battery reserve means the
+planner only charges when the battery would otherwise run empty and draw from
+the grid before the next cheap period.
+
+**Automatic planning** saves you pressing Apply every evening. Switch it on and
+the app re-sizes the charge from your live battery level shortly before each
+cheap window (30 minutes by default, adjustable up to two hours), writes the charge slot itself, and sends you a notification
+saying what it did — or why no charge was needed.
+
+**Export opportunities** appear when your export tariff pays more at certain
+times. The Planner shows how much you could sell from the battery, when, and
+what it should earn, without dropping below your minimum battery level.
+
+For charge recommendations to appear, make sure your import tariff windows are
+configured under **Settings → Energy Tariffs**.
+
+---
+
+### How do I stop the battery discharging into the car, or another large load?
+
+The **Load Discharge Limiter** on the Control page watches your home load and
+pauses battery discharge when it stays above a threshold, then restores normal
+Eco when the load falls back. This is the setting to use if something like a car
+charger pulls the battery down whenever it starts.
+
+Put the **Load Threshold** above your ordinary house load but below what the
+large load draws, and set the **Activation Window** to the hours you care about.
+For a 7.4 kW charger during peak-rate hours, for example:
+
+- **Load Threshold**: `7.0 kW` — a 7.4 kW charge plus house load is comfortably
+  above this, while ordinary evening use is well below it.
+- **Activation Window**: `08:00` to `23:00` — your peak hours. Outside them the
+  limiter does nothing, so the battery supports the house as usual overnight and
+  during cheap-rate hours.
+- **Pause / Recovery Delay**: how long the load must stay above the threshold
+  before discharge pauses, and below it before discharge resumes. The default
+  **5 minutes** suits most homes.
+
+Switch **Enable** on, set those values, then **Save**. While the limiter is
+holding the battery down the house runs on grid — what you want when the large
+load is on a cheap rate, but worth knowing if it isn't.
+
+Two things it needs:
+
+- **Load the inverter can see.** `home_power` comes from the inverter's own load
+  register, so a charger wired upstream of your CT clamp is invisible to it.
+  Check the **Home Power** figure on the Control page while the car is charging
+  — it should jump by roughly the charge rate. If it doesn't move, the limiter
+  has nothing to trigger on.
+- **Eco mode, and the app running.** The limiter is implemented inside HEM and
+  only operates while the battery is in Eco mode; the card warns you if you're
+  in Timed or Export.
+
+---
 
 ### Something else?
 

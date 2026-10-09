@@ -5,6 +5,42 @@ export function getSeriesOpacity(muted: boolean): number {
 }
 
 /**
+ * Arithmetic mean of a series' plotted values, ignoring gaps (issue #345).
+ *
+ * History buckets have a fixed width per range (see `resolve_history_window`
+ * in the backend), so averaging the per-bucket values is equivalent to a
+ * time-weighted mean over the window — not a raw reading count, which would
+ * bias toward whichever period happened to record more often.
+ *
+ * `null`/`undefined` gaps (buckets with no reading for that field) and
+ * non-finite values are skipped. An all-gap series returns `null` so the
+ * caller can omit its average line entirely rather than draw one at zero.
+ */
+export function computeSeriesAverage(values: Array<number | null | undefined>): number | null {
+  let sum = 0;
+  let count = 0;
+  for (const v of values) {
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      sum += v;
+      count += 1;
+    }
+  }
+  return count === 0 ? null : sum / count;
+}
+
+/**
+ * Unit-aware History chart value formatting, shared by the tooltip's live
+ * values and its average read-outs so both use the same precision
+ * (e.g. `£1.23`, `12.3 kWh`, `21.0 °C`, `350 W`).
+ */
+export function formatHistoryValue(value: number, unit: string): string {
+  if (unit === '£') return `£${value.toFixed(2)}`;
+  if (unit === 'kWh') return `${value.toFixed(1)} kWh`;
+  if (unit === '°C') return `${value.toFixed(1)} °C`;
+  return `${Math.round(value)} ${unit}`;
+}
+
+/**
  * Per-field spike detection thresholds. A point is considered a spike if its
  * value differs from both neighbors by more than the threshold while the
  * neighbors differ by less than half the threshold.
@@ -60,6 +96,39 @@ export const SPIKE_THRESHOLDS: Record<string, number> = {
  */
 export function isCumulativeField(field: string): boolean {
   return /^today_.*_kwh$/.test(field) || field === 'home_energy_today_kwh';
+}
+
+/**
+ * Series the backend derives by integrating the daily counters against the
+ * tariff, so they ramp up across the window just like the counters do. The
+ * spike-repair predicate deliberately leaves them out (they're not raw
+ * registers, and interpolating a corrupted cost point is the lesser evil),
+ * but they are cumulative for the purposes of the average line.
+ */
+const CUMULATIVE_DERIVED_FIELDS = new Set([
+  '_import_cost',
+  '_import_energy_cost',
+  '_import_standing_charge',
+  '_export_income',
+]);
+
+/**
+ * Whether a series' mean over the selected window is worth showing
+ * (issue #345).
+ *
+ * Instantaneous rates and gauges — power, SOC, voltage, temperature and the
+ * derived differentials — answer "what was the typical value while I was
+ * looking?", which is exactly what the average line is for. Cumulative series
+ * (the daily `today_*_kwh` counters, `home_energy_today_kwh`, and the
+ * server-integrated cost/income series) only ever climb from midnight to
+ * their final total, so the mean of the plotted values is an artefact of
+ * where the window happens to start and stop: it drifts with the range,
+ * changes when midnight enters the window, and matches neither the daily
+ * total nor an hourly rate. Those charts get no average line and no average
+ * read-out in the tooltip.
+ */
+export function hasMeaningfulAverage(field: string): boolean {
+  return !isCumulativeField(field) && !CUMULATIVE_DERIVED_FIELDS.has(field);
 }
 
 /**
