@@ -266,11 +266,20 @@ export type ForecastYAxisScale = {
   ticks: number[];
 };
 
-/** Return dated x-axis ticks at 12-hour intervals, including both bounds. */
-export function forecastXAxisTicks(start: number, end: number): number[] {
+/** Return dated x-axis ticks at 12-hour intervals (or `stepSeconds`),
+ *  including both bounds. A step that could not advance falls back to 12 h. */
+export function forecastXAxisTicks(
+  start: number,
+  end: number,
+  stepSeconds: number = FORECAST_X_AXIS_TICK_INTERVAL_SECONDS,
+): number[] {
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  const step =
+    Number.isFinite(stepSeconds) && stepSeconds > 0
+      ? stepSeconds
+      : FORECAST_X_AXIS_TICK_INTERVAL_SECONDS;
   const ticks: number[] = [];
-  for (let tick = start; tick <= end; tick += FORECAST_X_AXIS_TICK_INTERVAL_SECONDS) {
+  for (let tick = start; tick <= end; tick += step) {
     ticks.push(tick);
   }
   if (ticks[ticks.length - 1] !== end) ticks.push(end);
@@ -431,7 +440,7 @@ export function truncateSeriesAtNextChargeStart(
 }
 
 /** How the Planner sizes the overnight charge (issue #359). */
-export type PlanStrategy = 'min_soc' | 'hold_window';
+export type PlanStrategy = 'min_soc' | 'hold_window' | 'cheapest';
 
 export type PlanRecommendation =
   | {
@@ -547,11 +556,13 @@ export function minimumSocNote(
   );
 }
 
-/** The slot target of a hold-through-window plan, % (issue #359), or null
- *  for any other plan. Keyed on the strategy: a target alone doesn't make
- *  a plan a hold. */
+/** The slot target of a hold-through-window plan, % (issue #359; the
+ *  cheapest-overall strategy shares the same charge-then-hold slot), or
+ *  null for any other plan. Keyed on the strategy: a target alone doesn't
+ *  make a plan a hold. */
 export function holdTargetPct(rec: PlanRecommendation): number | null {
-  if (rec.kind !== 'charge' || rec.strategy !== 'hold_window') return null;
+  if (rec.kind !== 'charge') return null;
+  if (rec.strategy !== 'hold_window' && rec.strategy !== 'cheapest') return null;
   return rec.slot_target_soc_pct ?? null;
 }
 
@@ -563,22 +574,6 @@ export function chargeTargetReadBack(
   actualTargetSoc: number | undefined,
 ): boolean {
   return desiredTargetSoc >= 100 || actualTargetSoc === desiredTargetSoc;
-}
-
-/** Device types where charging to a target and then holding it through
- *  the slot has been confirmed on real hardware (issue #359). Gen 3 Plus
- *  writes its target through a different, flag-gated path, so it isn't
- *  covered by the Gen 3 confirmation. */
-const HOLD_CONFIRMED_DEVICES = new Set(['Gen3Hybrid']);
-
-/** Caveat under the strategy picker on models where the hold behaviour is
- *  unconfirmed, or null when it's confirmed or the model isn't known yet. */
-export function holdStrategyNote(deviceType: string | undefined): string | null {
-  if (deviceType == null || HOLD_CONFIRMED_DEVICES.has(deviceType)) return null;
-  return (
-    'Holding the battery at its target has only been confirmed on Gen 3 hybrids so far. ' +
-    'On the first night, check the battery stays flat once it reaches the target.'
-  );
 }
 
 /** Short headline for the Plan card. Degrades gracefully per kind. */

@@ -23,6 +23,7 @@ use crate::forecast::simulate::{
     simulate_battery_segment, SimHourInput, SimHourResult, SimulationParams,
 };
 use crate::forecast::time_windows::split_hour_segments;
+use crate::settings::PlanStrategy;
 use chrono::Timelike;
 
 /// Lowest target the slot is ever given. HR 116 decodes 4 as "unset" and
@@ -41,6 +42,10 @@ pub(super) struct HoldOutcome {
     /// AC kWh the grid supplies during the window: the charge plus the
     /// house load the held battery no longer covers.
     pub(super) grid_kwh: f64,
+    /// The part of each hour's `import_kwh` that is that in-window supply,
+    /// by hour, so it can be priced at the window's rate even when the
+    /// window opens or closes part-way through an hour.
+    pub(super) window_grid: Vec<f64>,
     /// The hours the minimum is judged across (see [`post_range`]).
     post: (usize, usize),
     /// Hour index where the next cheap-window occurrence begins.
@@ -92,23 +97,29 @@ pub(super) fn simulate_hold(
     target_pct: u8,
 ) -> Option<HoldOutcome> {
     let (selected, next_occurrence_start) = first_reachable_occurrence(sim_hours, window, now_ts);
+    let run = selected?.run;
+    let last = *run.last()?;
     simulate_hold_run(
         sim_hours,
         params,
         window,
-        &selected?.run,
+        &run,
+        last,
         next_occurrence_start,
         target_pct,
     )
 }
 
-/// Simulate the hold for an occurrence already found: `run` is its hours
-/// and `next_occurrence_start` where the following one begins.
+/// Simulate the hold for an occurrence already found: `run` is the hours
+/// the slot is active (empty for plain Eco), `last_of_run` the occurrence's
+/// last hour, from which the minimum is judged, and `next_occurrence_start`
+/// where the following one begins.
 fn simulate_hold_run(
     sim_hours: &[SimHourInput],
     params: &SimulationParams,
     window: &ChargeWindow,
     run: &[usize],
+    last_of_run: usize,
     next_occurrence_start: Option<usize>,
     target_pct: u8,
 ) -> Option<HoldOutcome> {
@@ -116,10 +127,12 @@ fn simulate_hold_run(
     let target = f64::from(target_pct.min(100));
     let mut soc = params.start_soc_pct;
     let mut series = Vec::with_capacity(sim_hours.len());
+    let mut window_grid = Vec::with_capacity(sim_hours.len());
     let mut charge_kwh = 0.0;
     let mut grid_kwh = 0.0;
 
     for (index, hour) in sim_hours.iter().copied().enumerate() {
+        let mut hour_drawn = 0.0;
         let active = if run.contains(&index) {
             window_overlap_segments(hour.timestamp, window)
         } else {
@@ -161,6 +174,7 @@ fn simulate_hold_run(
             let res = simulate_battery_segment(segment_hour, &segment_params, fraction)?;
             soc = res.soc_pct;
             grid_kwh += drawn;
+            hour_drawn += drawn;
             combined.soc_pct = res.soc_pct;
             combined.import_kwh += res.import_kwh + drawn;
             combined.export_kwh += res.export_kwh;
@@ -168,14 +182,18 @@ fn simulate_hold_run(
             combined.discharge_kwh += res.discharge_kwh;
         }
         series.push(combined);
+        window_grid.push(hour_drawn);
     }
 
-    let last = *run.last()?;
-    let post = post_range(last, next_occurrence_start.unwrap_or(sim_hours.len()));
+    let post = post_range(
+        last_of_run,
+        next_occurrence_start.unwrap_or(sim_hours.len()),
+    );
     Some(HoldOutcome {
         series,
         charge_kwh,
         grid_kwh,
+        window_grid,
         post,
         next_occurrence_start,
     })
@@ -193,103 +211,136 @@ pub fn hold_charging_window(
     (minutes > 0).then(|| charge_window_for_duration(window, minutes))
 }
 
-/// Compute the hold-through-window recommendation. `NoPlan` and
-/// `NoChargeNeeded` from the default planner pass through unchanged, as
-/// does its plan when there are no hourly inputs to simulate a hold with.
-pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
-    let base = plan_overnight_charge(inputs);
-    let PlanRecommendation::Charge {
-        min_soc_pct,
-        observed_min_soc_pct,
-        current_soc_pct,
-        ..
-    } = base
-    else {
-        return base;
-    };
-    let Some(sim_hours) = inputs
+/// Everything both hold-based strategies need to evaluate a target: the
+/// cheap window, the occurrence being planned, and the lowest target worth
+/// considering.
+pub(super) struct HoldContext<'a> {
+    pub(super) sim_hours: &'a [SimHourInput],
+    pub(super) window: ChargeWindow,
+    run: Vec<usize>,
+    last: usize,
+    pub(super) first_index: usize,
+    pub(super) next_occurrence_start: Option<usize>,
+    /// The battery's level when the window opens, rounded up: never target
+    /// below it. Whether an inverter discharges down to a lower target
+    /// during a charge slot is unconfirmed, while charging up to a target
+    /// and holding it is what issue #359 confirmed. With the lowest target
+    /// the battery only holds from the window's start, so the end of its
+    /// first hour reads that level, even mid-hour; solar inside that hour
+    /// can only lift it, keeping the floor on the safe side.
+    pub(super) lowest: u8,
+    /// The hold at a 100% target, the most the window can do.
+    pub(super) full: HoldOutcome,
+}
+
+impl HoldContext<'_> {
+    /// Simulate the occurrence as a hold slot with `target`.
+    pub(super) fn simulate(&self, params: &SimulationParams, target: u8) -> Option<HoldOutcome> {
+        self.simulate_on(self.sim_hours, params, target)
+    }
+
+    /// [`Self::simulate`] on another forecast for the same hours, such as
+    /// the low solar estimate.
+    pub(super) fn simulate_on(
+        &self,
+        hours: &[SimHourInput],
+        params: &SimulationParams,
+        target: u8,
+    ) -> Option<HoldOutcome> {
+        simulate_hold_run(
+            hours,
+            params,
+            &self.window,
+            &self.run,
+            self.last,
+            self.next_occurrence_start,
+            target,
+        )
+    }
+
+    /// The same hours with no slot at all: plain Eco, the battery running
+    /// the house through the window. The baseline a hold is worth beating.
+    pub(super) fn simulate_eco(
+        &self,
+        hours: &[SimHourInput],
+        params: &SimulationParams,
+    ) -> Option<HoldOutcome> {
+        simulate_hold_run(
+            hours,
+            params,
+            &self.window,
+            &[],
+            self.last,
+            self.next_occurrence_start,
+            100,
+        )
+    }
+}
+
+/// Find the window to plan and the bounds to search, or `None` when the
+/// inputs can't support a hold (no hourly inputs, no tariff window, no
+/// occurrence ahead).
+pub(super) fn prepare_hold<'a>(inputs: &PlanInputs<'a>) -> Option<HoldContext<'a>> {
+    let sim_hours = inputs
         .sim_hours
-        .filter(|hours| hours.len() == inputs.simulation.hours.len())
-    else {
-        return base;
-    };
-    let Some(tariff) = inputs.import_tariff else {
-        return base;
-    };
+        .filter(|hours| hours.len() == inputs.simulation.hours.len())?;
+    let tariff = inputs.import_tariff?;
     let now_min = chrono::DateTime::from_timestamp(inputs.now_ts, 0)
         .map(|dt| {
             let local = dt.with_timezone(&chrono::Local);
             local.hour() as u16 * 60 + local.minute() as u16
         })
         .unwrap_or(0);
-    let Some(window) = cheapest_import_window(tariff, now_min, 30) else {
-        return base;
-    };
-    let params = inputs.params;
+    let window = cheapest_import_window(tariff, now_min, 30)?;
     let (selected, next_occurrence_start) =
         first_reachable_occurrence(sim_hours, &window, inputs.now_ts);
-    let Some(occurrence) = selected else {
-        return base;
-    };
+    let occurrence = selected?;
+    let first_index = occurrence.first_index();
+    let run = occurrence.run;
+    let last = *run.last()?;
+    let params = inputs.params;
     let simulate = |target: u8| {
         simulate_hold_run(
             sim_hours,
             params,
             &window,
-            &occurrence.run,
+            &run,
+            last,
             next_occurrence_start,
             target,
         )
     };
-    let Some(full) = simulate(100) else {
-        return base;
-    };
-
-    // Never target below the battery's level when the window opens:
-    // whether an inverter discharges down to a lower target during a
-    // charge slot is unconfirmed, while charging up to a target and
-    // holding it is what issue #359 confirmed. With the lowest target the
-    // battery only holds from the window's start, so the end of its first
-    // hour reads the level at that moment, even mid-hour. Solar inside
-    // that hour can only lift it, keeping the floor on the safe side.
-    let Some(soc_at_start) = simulate(MIN_TARGET_PCT).and_then(|probe| {
-        probe
-            .series
-            .get(occurrence.first_index())
-            .map(|h| h.soc_pct)
-    }) else {
-        return base;
-    };
+    let full = simulate(100)?;
+    let soc_at_start = simulate(MIN_TARGET_PCT)?
+        .series
+        .get(first_index)
+        .map(|h| h.soc_pct)?;
     let lowest = soc_at_start.ceil().clamp(f64::from(MIN_TARGET_PCT), 100.0) as u8;
+    Some(HoldContext {
+        sim_hours,
+        window,
+        run,
+        last,
+        first_index,
+        next_occurrence_start,
+        lowest,
+        full,
+    })
+}
 
-    let floor = inputs.target_soc_pct;
-    // Search for the lowest holding target, keeping the winning simulation
-    // so it isn't run again.
-    let holding = |target: u8| simulate(target).filter(|o| o.holds(sim_hours, params, floor));
-    let (target, reaches_minimum, outcome) = if !full.holds(sim_hours, params, floor) {
-        (100, false, full)
-    } else if let Some(at_lowest) = holding(lowest) {
-        (lowest, true, at_lowest)
-    } else {
-        // `lowest` fails and 100 holds; holding is monotonic in the target.
-        let (mut lo, mut hi, mut best) = (lowest, 100u8, full);
-        while hi - lo > 1 {
-            let mid = lo + (hi - lo) / 2;
-            match holding(mid) {
-                Some(at_mid) => {
-                    hi = mid;
-                    best = at_mid;
-                }
-                None => lo = mid,
-            }
-        }
-        (hi, true, best)
-    };
-    let after_min_soc_pct = outcome.trough_pct();
-
-    // Same overlay and Tomorrow-tile conventions as the default planner:
-    // the line stops at the next cheap period; the tiles read tomorrow's
-    // local calendar day across the whole horizon.
+/// Build the recommendation for a hold at `target` with `outcome`, using
+/// the default planner's overlay and Tomorrow-tile conventions: the line
+/// stops at the next cheap period; the tiles read tomorrow's local calendar
+/// day across the whole horizon.
+pub(super) fn hold_recommendation(
+    inputs: &PlanInputs,
+    ctx: HoldContext,
+    target: u8,
+    outcome: &HoldOutcome,
+    observed_min_soc_pct: f64,
+    rationale: String,
+    strategy: PlanStrategy,
+) -> PlanRecommendation {
     let with_charge_end = outcome
         .next_occurrence_start
         .map(|i| (i + 1).min(outcome.series.len()))
@@ -309,33 +360,117 @@ pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
         ),
         None => (0.0, 0.0),
     };
-
-    let rationale = hold_rationale(&HoldRationale {
-        current_soc_pct,
-        observed_min_soc_pct,
-        after_min_soc_pct,
-        floor,
-        reserve: params.reserve_soc_pct,
-        target,
-        reaches_minimum,
-        window: &window,
-        charge_cost: outcome.charge_kwh * window.rate,
-        house_cost: (outcome.grid_kwh - outcome.charge_kwh).max(0.0) * window.rate,
-    });
-
     PlanRecommendation::ChargeAndHold {
-        window,
+        window: ctx.window,
         target_soc_pct: target,
+        strategy,
         kwh: outcome.charge_kwh,
-        min_soc_pct,
+        min_soc_pct: inputs.target_soc_pct,
         observed_min_soc_pct,
-        after_min_soc_pct,
-        current_soc_pct,
+        after_min_soc_pct: outcome.trough_pct(),
+        current_soc_pct: inputs.current_soc_pct,
         rationale,
         with_charge_series,
         import_tomorrow_with_charge_kwh,
         export_tomorrow_with_charge_kwh,
     }
+}
+
+/// The lowest target, from the battery's level when the window opens up to
+/// 100, whose hold keeps `floor` until the next cheap period; whether any
+/// does; and that hold's simulation. When even 100% can't, `(100, false,
+/// the 100% hold)`.
+pub(super) fn lowest_holding_target(
+    ctx: &HoldContext,
+    params: &SimulationParams,
+    floor: f64,
+) -> (u8, bool, HoldOutcome) {
+    let sim_hours = ctx.sim_hours;
+    // Search for the lowest holding target, keeping the winning simulation
+    // so it isn't run again.
+    let holding = |target: u8| {
+        ctx.simulate(params, target)
+            .filter(|o| o.holds(sim_hours, params, floor))
+    };
+    if !ctx.full.holds(sim_hours, params, floor) {
+        return (100, false, ctx.full.clone());
+    }
+    if let Some(at_lowest) = holding(ctx.lowest) {
+        return (ctx.lowest, true, at_lowest);
+    }
+    // `lowest` fails and 100 holds; holding is monotonic in the target.
+    let (mut lo, mut hi, mut best) = (ctx.lowest, 100u8, ctx.full.clone());
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        match holding(mid) {
+            Some(at_mid) => {
+                hi = mid;
+                best = at_mid;
+            }
+            None => lo = mid,
+        }
+    }
+    (hi, true, best)
+}
+
+/// Compute the hold-through-window recommendation. `NoPlan` and
+/// `NoChargeNeeded` from the default planner pass through unchanged, as
+/// does its plan when there are no hourly inputs to simulate a hold with.
+pub fn plan_hold_through_window(inputs: &PlanInputs) -> PlanRecommendation {
+    let base = plan_overnight_charge(inputs);
+    let PlanRecommendation::Charge {
+        observed_min_soc_pct,
+        ..
+    } = base
+    else {
+        return base;
+    };
+    let Some(ctx) = prepare_hold(inputs) else {
+        return base;
+    };
+    let (target, reaches_minimum, outcome) =
+        lowest_holding_target(&ctx, inputs.params, inputs.target_soc_pct);
+    build_hold_plan(
+        inputs,
+        ctx,
+        observed_min_soc_pct,
+        (target, reaches_minimum, outcome),
+        PlanStrategy::HoldWindow,
+    )
+}
+
+/// The hold recommendation for a target search result `(target, whether it
+/// keeps the minimum, its simulation)`, with the explanation in the default
+/// planner's voice.
+pub(super) fn build_hold_plan(
+    inputs: &PlanInputs,
+    ctx: HoldContext,
+    observed_min_soc_pct: f64,
+    (target, reaches_minimum, outcome): (u8, bool, HoldOutcome),
+    strategy: PlanStrategy,
+) -> PlanRecommendation {
+    let params = inputs.params;
+    let rationale = hold_rationale(&HoldRationale {
+        current_soc_pct: inputs.current_soc_pct,
+        observed_min_soc_pct,
+        after_min_soc_pct: outcome.trough_pct(),
+        floor: inputs.target_soc_pct,
+        reserve: params.reserve_soc_pct,
+        target,
+        reaches_minimum,
+        window: &ctx.window,
+        charge_cost: outcome.charge_kwh * ctx.window.rate,
+        house_cost: (outcome.grid_kwh - outcome.charge_kwh).max(0.0) * ctx.window.rate,
+    });
+    hold_recommendation(
+        inputs,
+        ctx,
+        target,
+        &outcome,
+        observed_min_soc_pct,
+        rationale,
+        strategy,
+    )
 }
 
 struct HoldRationale<'a> {

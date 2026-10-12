@@ -2,6 +2,56 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.89.2] - 2026-10-12
+
+### Fixed
+
+- **The charge rate on the Control page no longer flickers to "as last read".** It only allowed a minute, the same as the default poll interval, so a healthy reading was marked out of date just before each new one arrived. It now allows 90 seconds, and the age reads in seconds until two minutes.
+
+## [0.89.1] - 2026-10-11
+
+### Fixed
+
+- **The Planner no longer crashes when you open the Solar chart with a past range shown.** Choosing a range under "Show past" and switching to Solar showed "Something went wrong — Invariant failed" instead of the chart. Both charts now draw for every range (#364).
+
+## [0.89.0] - 2026-10-11
+
+### Added
+
+- **The Planner's past view now reaches back 30 and 90 days.** Choose 30 days or 90 days under "Show past" to compare earlier nights' plans with what the battery and the sun actually did over a longer stretch.
+- **The charge rate shows what the inverter last reported.** Beside the charge setting, the page now shows the rate the inverter is holding, so an unsaved slider can't pass for the inverter's own value. Once a reading is more than a minute old, it says how long ago it was read.
+
+### Security
+
+- **Patched katex**, a development-tooling dependency that GitHub flagged for a prototype pollution advisory. It isn't part of the shipped app, so nothing changes for users.
+
+## [0.88.0] - 2026-10-11
+
+### Added
+
+- **The Planner can now show the past.** Pick 24 hours, 3 days or 7 days under "Show past" on the Battery and Solar charts and the earlier decisions appear behind the forward view: the battery level and solar the planner expected at the time, in their own colours, against what the battery and the sun really did. Short notes say how far out the plan and the forecast were, and a list underneath gives each night's decision with the reason the planner gave, so you can see why it did what it did (#361).
+
+### Changed
+
+- **The planner no longer warns that holding at a target is unconfirmed.** The note under the strategy picker asking you to check the battery on the first night is gone from every model. If a hold doesn't behave on your inverter, please report it.
+
+### Security
+
+- **Updated bundled libraries** to pick up fixes for the security advisories GitHub flagged, along with the usual Tauri and tooling updates.
+
+## [0.87.0] - 2026-10-11
+
+### Added
+
+- **A "Cheapest overall" charging strategy for the planner.** Choose it under Plan settings and the planner picks whichever charge target costs least until the next cheap period, then holds it through the cheap window. It charges further when the sun might not show up, so the house doesn't end up on peak-rate power, and leaves room for the day's solar when exports earn little. To judge that it needs your import rates, and your export rates if you have them, set in Settings. It never goes below what your Minimum battery level needs, and a minimum of 0% still means no grid charging. "Keep a minimum" stays the default (#359).
+- **Octopus Go style cheap windows that start on the half hour are priced at their own rate** when the planner compares how much to charge.
+
+## [0.86.1] - 2026-10-11
+
+### Added
+
+- **The planner now keeps a history of its decisions.** Each night's plan, with the solar forecast it was based on, is stored for 90 days, so a past night can be compared with what the battery and the sun actually did. A page to browse it is coming next; recording starts now, so there is history to look at when it arrives (#361).
+
 ## [0.86.0] - 2026-10-09
 
 ### Added

@@ -2232,7 +2232,7 @@ pub async fn update_settings(
         }
         if let Some(v) = body.get("forecast_plan_strategy") {
             persist.forecast_plan_strategy = serde_json::from_value(v.clone()).map_err(|_| {
-                "Unknown planner strategy — expected \"min_soc\" or \"hold_window\"".to_string()
+                "Unknown planner strategy — expected \"min_soc\", \"hold_window\" or \"cheapest\"".to_string()
             })?;
         }
         if let Some(arrays) = body.get("solar_arrays").and_then(|v| v.as_array()) {
@@ -8378,6 +8378,114 @@ pub(crate) async fn get_forecast_at(
     (StatusCode::OK, Json(json!({ "ok": true, "data": payload })))
 }
 
+/// Query for `GET /api/forecast/plan-history` (issue #361): unix-second
+/// bounds, `from` inclusive and `to` exclusive. Defaults to the last week.
+#[derive(Debug, Deserialize)]
+pub struct PlanHistoryQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+/// Longest range `GET /api/forecast/plan-history` serves in one request.
+pub const PLAN_HISTORY_MAX_SPAN_SECS: i64 =
+    crate::history::PLAN_SNAPSHOT_RETENTION_DAYS * 24 * 3600;
+
+/// The forecast fields the Planner's past view draws: the generation and
+/// battery projections, plus the time they were made. The rest of a stored
+/// forecast (consumption profile, status text) is left out of
+/// `plan-history` so a 90 day request stays a manageable size.
+fn project_forecast(text: &str) -> Value {
+    // Only the three kept fields are deserialised; serde skips everything else
+    // without building it, so the discarded consumption data costs no
+    // allocation. A stored forecast that doesn't parse becomes null, as before.
+    #[derive(serde::Deserialize)]
+    struct PastViewForecast {
+        #[serde(default)]
+        generated_at: Value,
+        #[serde(default)]
+        solar: Value,
+        #[serde(default)]
+        battery: Value,
+    }
+    match serde_json::from_str::<PastViewForecast>(text) {
+        Ok(view) => json!({
+            "generated_at": view.generated_at,
+            "solar": view.solar,
+            "battery": view.battery,
+        }),
+        Err(_) => Value::Null,
+    }
+}
+
+/// GET /api/forecast/plan-history — the Planner decisions recorded in a
+/// time range, each with the forecast it was computed from (issue #361).
+pub async fn get_plan_history(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PlanHistoryQuery>,
+) -> (StatusCode, Json<Value>) {
+    get_plan_history_at(state, params, chrono::Utc::now().timestamp()).await
+}
+
+/// [`get_plan_history`] with the clock passed in, so the default range can
+/// be tested deterministically.
+pub(crate) async fn get_plan_history_at(
+    state: Arc<AppState>,
+    params: PlanHistoryQuery,
+    now_ts: i64,
+) -> (StatusCode, Json<Value>) {
+    let to = params.to.unwrap_or_else(|| now_ts.saturating_add(1));
+    // Checked: both bounds come from the query string, and an overflowing
+    // span must be refused rather than wrap past the size limit.
+    let from = match params.from {
+        Some(from) => from,
+        None => match to.checked_sub(7 * 24 * 3600) {
+            Some(from) => from,
+            None => return error_response("'to' is too early to read a week before it"),
+        },
+    };
+    match to.checked_sub(from) {
+        Some(span) if span < 0 => return error_response("'from' must not be after 'to'"),
+        Some(span) if span > PLAN_HISTORY_MAX_SPAN_SECS => {
+            return error_response(&format!(
+                "Plan history can be read at most {} days at a time",
+                PLAN_HISTORY_MAX_SPAN_SECS / 86_400
+            ))
+        }
+        Some(_) => {}
+        None => return error_response("Plan history range is out of bounds"),
+    }
+    let Some(db) = state.history.lock().await.clone() else {
+        return (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "data": { "snapshots": [] } })),
+        );
+    };
+    let rows = match tokio::task::spawn_blocking(move || db.query_plan_snapshots(from, to)).await {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => return server_error(&error),
+        Err(error) => return server_error(&format!("Plan history worker failed: {error}")),
+    };
+    // Rows hold the JSON the Planner served; return it as JSON, falling
+    // back to null for a row that somehow doesn't parse.
+    let parse = |text: &str| serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+    let snapshots: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "recorded_at": row.recorded_at,
+                "kind": row.kind,
+                "strategy": row.strategy,
+                "plan": parse(&row.plan_json),
+                "forecast": project_forecast(&row.forecast_json),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "data": { "snapshots": snapshots } })),
+    )
+}
+
 /// GET /api/forecast/plan — tariff-aware overnight charge recommendation
 /// (issue #283, Phase 2). Same inputs as `/api/forecast` plus the user's
 /// import-tariff config; never writes any register — Apply happens only
@@ -8416,34 +8524,40 @@ pub(crate) async fn get_forecast_plan_at(
         Ok(plan) => plan,
         Err(error) => return server_error(&format!("Forecast worker failed: {error}")),
     };
-    let rec_value = plan_to_json_value(&charge);
-    let apply = rec_value
-        .get("apply")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "data": plan_response_json(&charge, export_advice.as_ref()),
+        })),
+    )
+}
+
+/// The `data` block of `GET /api/forecast/plan`: the recommendation, its
+/// Apply payload and the export advice. Also what the plan history stores
+/// (issue #361), so a past night reads exactly as it was shown.
+pub(crate) fn plan_response_json(
+    charge: &crate::forecast::planner::PlanRecommendation,
+    export_advice: Option<&crate::forecast::planner::ExportAdvice>,
+) -> Value {
+    let rec_value = plan_to_json_value(charge);
+    let apply = rec_value.get("apply").cloned().unwrap_or(Value::Null);
     let recommendation = {
         let mut r = rec_value.as_object().cloned().unwrap_or_default();
         r.remove("apply");
-        serde_json::Value::Object(r)
+        Value::Object(r)
     };
     // The export advice has no Apply path yet (read-only v1) — when it
     // stands down with the charge plan it serialises as null so the UI
     // hides the card entirely.
     let export = export_advice
-        .as_ref()
         .map(export_advice_to_json)
-        .unwrap_or(serde_json::Value::Null);
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "data": {
-                "recommendation": recommendation,
-                "apply": apply,
-                "export": export,
-            }
-        })),
-    )
+        .unwrap_or(Value::Null);
+    json!({
+        "recommendation": recommendation,
+        "apply": apply,
+        "export": export,
+    })
 }
 
 /// Compute the typed plan recommendation from a forecast payload, plus
@@ -8531,6 +8645,7 @@ pub(crate) fn compute_full_plan(
 /// by the API handler (which serialises it) and the poll loop's nightly
 /// auto-refresh (which acts on it), so the applied slot and the displayed
 /// plan can never come from different computations.
+#[cfg(test)]
 pub(crate) fn compute_plan_recommendation(
     forecast: &crate::forecast::ForecastPayload,
     settings: &crate::settings::Settings,
@@ -8538,6 +8653,52 @@ pub(crate) fn compute_plan_recommendation(
     now_ts: i64,
 ) -> crate::forecast::planner::PlanRecommendation {
     compute_full_plan(forecast, settings, snapshot, now_ts).0
+}
+
+/// Which solar estimate [`forecast_sim_hours`] builds the series from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolarBand {
+    /// The calibrated median forecast.
+    Median,
+    /// The low end of the forecast band, capped at the median.
+    Low,
+}
+
+/// Rebuild the planner's hourly inputs from the forecast payload: its solar
+/// series paired with the weekday/weekend consumption profile for each
+/// hour. Re-running the simulation on these is how the planner sizes a
+/// charge against the real post-charge trajectory.
+pub(crate) fn forecast_sim_hours(
+    forecast: &crate::forecast::ForecastPayload,
+    band: SolarBand,
+) -> Vec<crate::forecast::simulate::SimHourInput> {
+    use chrono::{Datelike, Timelike};
+    forecast
+        .solar
+        .iter()
+        .map(|s| {
+            let local = chrono::DateTime::from_timestamp(s.timestamp, 0)
+                .map(|dt| dt.with_timezone(&chrono::Local));
+            let local_hour = local.map(|dt| dt.hour() as usize).unwrap_or(0);
+            let is_weekend = local
+                .map(|dt| dt.weekday().number_from_monday() >= 6)
+                .unwrap_or(false);
+            let profile = if is_weekend {
+                &forecast.consumption_weekend
+            } else {
+                &forecast.consumption_weekday
+            };
+            let consumption_kwh = profile.get(local_hour).map(|c| c.kwh).unwrap_or(0.0);
+            crate::forecast::simulate::SimHourInput {
+                timestamp: s.timestamp,
+                solar_kwh: match band {
+                    SolarBand::Median => s.kwh,
+                    SolarBand::Low => s.band_low.min(s.kwh),
+                },
+                consumption_kwh,
+            }
+        })
+        .collect()
 }
 
 /// The context the export advice needs to ride the charge plan's
@@ -8563,9 +8724,7 @@ fn compute_charge_plan_inner<'a>(
     crate::forecast::planner::PlanRecommendation,
     Option<ExportContext<'a>>,
 ) {
-    use crate::forecast::simulate::{
-        SimHourInput, SimHourResult, SimulationOutput, SimulationParams,
-    };
+    use crate::forecast::simulate::{SimHourResult, SimulationOutput, SimulationParams};
     let import_tariff = settings.import_tariff_config.as_ref();
 
     if forecast
@@ -8662,29 +8821,12 @@ fn compute_charge_plan_inner<'a>(
     // untouched. The forecast payload exposes `solar` (per-timestamp)
     // and the weekday/weekend consumption profiles (per-hour-of-day); pair them back up so the
     // re-simulation sees the same hourly inputs the original did.
-    let sim_hours: Vec<SimHourInput> = forecast
-        .solar
-        .iter()
-        .map(|s| {
-            let local = chrono::DateTime::from_timestamp(s.timestamp, 0)
-                .map(|dt| dt.with_timezone(&chrono::Local));
-            let local_hour = local.map(|dt| dt.hour() as usize).unwrap_or(0);
-            let is_weekend = local
-                .map(|dt| dt.weekday().number_from_monday() >= 6)
-                .unwrap_or(false);
-            let profile = if is_weekend {
-                &forecast.consumption_weekend
-            } else {
-                &forecast.consumption_weekday
-            };
-            let cons = profile.get(local_hour).map(|c| c.kwh).unwrap_or(0.0);
-            SimHourInput {
-                timestamp: s.timestamp,
-                solar_kwh: s.kwh,
-                consumption_kwh: cons,
-            }
-        })
-        .collect();
+    let sim_hours = forecast_sim_hours(forecast, SolarBand::Median);
+    // The cheapest strategy also prices the low solar estimate (issue
+    // #359); no other strategy reads it, so it is only built for that one.
+    let low_solar_hours = (settings.forecast_plan_strategy
+        == crate::settings::PlanStrategy::Cheapest)
+        .then(|| forecast_sim_hours(forecast, SolarBand::Low));
 
     let params = SimulationParams {
         capacity_kwh,
@@ -8711,7 +8853,14 @@ fn compute_charge_plan_inner<'a>(
         now_ts,
         current_soc_pct: snapshot.map(|s| s.soc as f64).unwrap_or(0.0),
     };
-    let charge = crate::forecast::planner::plan_charge(&inputs, settings.forecast_plan_strategy);
+    let charge = crate::forecast::planner::plan_charge(
+        &inputs,
+        settings.forecast_plan_strategy,
+        &crate::forecast::planner::CostInputs {
+            export_tariff: settings.export_tariff_config.as_ref(),
+            low_solar_hours: low_solar_hours.as_deref(),
+        },
+    );
     // The export advice rides the same trajectory: hand over the hourly
     // inputs, params, tariff, and floor. `None` when there is no import
     // tariff — the charge planner has already NoPlan'd on that gate.
@@ -8726,7 +8875,9 @@ fn compute_charge_plan_inner<'a>(
 
 /// Serialise a `PlanRecommendation` into the JSON shape the UI/Apply
 /// path expects.
-fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> serde_json::Value {
+pub(crate) fn plan_to_json_value(
+    rec: &crate::forecast::planner::PlanRecommendation,
+) -> serde_json::Value {
     use crate::forecast::planner::PlanRecommendation;
     match rec {
         PlanRecommendation::NoChargeNeeded {
@@ -8820,6 +8971,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
         PlanRecommendation::ChargeAndHold {
             window,
             target_soc_pct,
+            strategy,
             kwh,
             min_soc_pct,
             observed_min_soc_pct,
@@ -8842,7 +8994,7 @@ fn plan_to_json_value(rec: &crate::forecast::planner::PlanRecommendation) -> ser
                 import_tomorrow_with_charge_kwh: *import_tomorrow_with_charge_kwh,
                 export_tomorrow_with_charge_kwh: *export_tomorrow_with_charge_kwh,
             });
-            value["strategy"] = serde_json::json!(crate::settings::PlanStrategy::HoldWindow);
+            value["strategy"] = serde_json::json!(strategy);
             value["slot_target_soc_pct"] = serde_json::json!(target_soc_pct);
             value["apply"]["charge_slot"]["target_soc"] = serde_json::json!(target_soc_pct);
             value
@@ -20096,6 +20248,19 @@ pub(crate) mod tests {
 
             let (status, _) = update_settings(
                 State(state.clone()),
+                Json(json!({ "forecast_plan_strategy": "cheapest" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                crate::settings::Settings::load().forecast_plan_strategy,
+                PlanStrategy::Cheapest
+            );
+            let (_, body) = get_settings(State(state.clone())).await;
+            assert_eq!(body["data"]["forecast_plan_strategy"], "cheapest");
+
+            let (status, _) = update_settings(
+                State(state.clone()),
                 Json(json!({ "forecast_plan_strategy": "min_soc" })),
             )
             .await;
@@ -24021,6 +24186,7 @@ pub(crate) mod tests {
                 rate: 0.07,
             },
             target_soc_pct: 62,
+            strategy: crate::settings::PlanStrategy::HoldWindow,
             kwh: 5.4,
             min_soc_pct: 20.0,
             observed_min_soc_pct: 4.0,
@@ -24062,5 +24228,360 @@ pub(crate) mod tests {
                 },
             })
         );
+    }
+
+    // ---- plan history (issue #361) ------------------------------------------
+
+    async fn state_with_plan_history(rows: &[crate::history::PlanSnapshotRow]) -> Arc<AppState> {
+        let path = crate::test_util::make_unique_test_dir("api-plan-history").join("history.db");
+        let db = crate::history::HistoryDb::open(&path).expect("open db");
+        for row in rows {
+            db.insert_plan_snapshot(row).expect("insert");
+        }
+        let state = test_state();
+        *state.history.lock().await = Some(Arc::new(db));
+        state
+    }
+
+    fn history_row(recorded_at: i64, kind: &str) -> crate::history::PlanSnapshotRow {
+        crate::history::PlanSnapshotRow {
+            recorded_at,
+            kind: kind.to_string(),
+            strategy: "hold_window".to_string(),
+            plan_json: r#"{"kind":"charge","slot_target_soc_pct":75}"#.to_string(),
+            forecast_json: r#"{"solar":[{"timestamp":1,"kwh":0.5}]}"#.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_the_decisions_in_the_range() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[
+                history_row(1_000, "before_window"),
+                history_row(2_000, "auto_apply"),
+                history_row(5_000, "refresh"),
+            ])
+            .await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(1_000),
+                    to: Some(3_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let snapshots = body["data"]["snapshots"].as_array().expect("snapshots");
+            assert_eq!(snapshots.len(), 2, "{}", body.0);
+            assert_eq!(snapshots[0]["recorded_at"], 1_000);
+            assert_eq!(snapshots[0]["kind"], "before_window");
+            assert_eq!(snapshots[1]["kind"], "auto_apply");
+            assert_eq!(snapshots[1]["strategy"], "hold_window");
+            // The stored JSON comes back as objects, not strings.
+            assert_eq!(snapshots[0]["plan"]["slot_target_soc_pct"], 75);
+            assert_eq!(snapshots[0]["forecast"]["solar"][0]["kwh"], 0.5);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_rejects_a_backwards_or_oversized_range() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[]).await;
+            for (from, to) in [(5_000, 1_000), (0, PLAN_HISTORY_MAX_SPAN_SECS + 1)] {
+                let (status, _) = get_plan_history(
+                    State(state.clone()),
+                    Query(PlanHistoryQuery {
+                        from: Some(from),
+                        to: Some(to),
+                    }),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{from}..{to}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_names_the_span_cap_in_days_from_its_constant() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(PLAN_HISTORY_MAX_SPAN_SECS + 1),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let days = PLAN_HISTORY_MAX_SPAN_SECS / 86_400;
+            assert_eq!(
+                body.0["error"],
+                json!(format!(
+                    "Plan history can be read at most {days} days at a time"
+                ))
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_only_the_forecast_fields_the_past_view_draws() {
+        with_isolated_config_dir_async(|| async {
+            // A stored forecast carries the consumption profile and the status
+            // text too; the past view draws only the solar and battery lines,
+            // so those extras are dropped to keep a 90 day response small.
+            let mut row = history_row(1_000, "refresh");
+            row.forecast_json = r#"{
+                "generated_at": 1000,
+                "status": ["ok"],
+                "solar": [{"timestamp": 1, "kwh": 0.5}],
+                "battery": {"start_soc_pct": 40.0, "hours": []},
+                "consumption_weekday": [{"hour": 0, "median_kwh": 0.2}],
+                "consumption_weekend": [{"hour": 0, "median_kwh": 0.3}]
+            }"#
+            .to_string();
+            let state = state_with_plan_history(&[row]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let forecast = &body["data"]["snapshots"][0]["forecast"];
+            assert_eq!(forecast["generated_at"], 1000, "{forecast}");
+            assert_eq!(forecast["solar"][0]["kwh"], 0.5, "{forecast}");
+            assert_eq!(forecast["battery"]["start_soc_pct"], 40.0, "{forecast}");
+            let kept: Vec<&str> = forecast
+                .as_object()
+                .expect("forecast object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert!(
+                kept.iter()
+                    .all(|key| matches!(*key, "generated_at" | "solar" | "battery")),
+                "{kept:?}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_null_for_a_forecast_that_does_not_parse() {
+        with_isolated_config_dir_async(|| async {
+            let mut row = history_row(1_000, "refresh");
+            row.forecast_json = "not json".to_string();
+            let state = state_with_plan_history(&[row]).await;
+            let (status, body) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body["data"]["snapshots"][0]["forecast"].is_null(),
+                "{}",
+                body.0
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_reads_the_full_retention_window_in_one_request() {
+        with_isolated_config_dir_async(|| async {
+            // The 90 day view asks for the whole retained period at once, so
+            // the span cap must cover it and still refuse anything longer.
+            let state = state_with_plan_history(&[]).await;
+            let retention = crate::history::PLAN_SNAPSHOT_RETENTION_DAYS * 24 * 3600;
+            let to = 1_800_000_000;
+            let (status, _) = get_plan_history(
+                State(state.clone()),
+                Query(PlanHistoryQuery {
+                    from: Some(to - retention),
+                    to: Some(to),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, _) = get_plan_history(
+                State(state),
+                Query(PlanHistoryQuery {
+                    from: Some(to - retention - 1),
+                    to: Some(to),
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_defaults_to_the_last_week() {
+        with_isolated_config_dir_async(|| async {
+            // A pinned clock: the handler's default range is relative to it.
+            let now = 1_800_000_000;
+            let state = state_with_plan_history(&[
+                history_row(now - 8 * 24 * 3600, "before_window"),
+                history_row(now - 3600, "before_window"),
+            ])
+            .await;
+            let (status, body) = get_plan_history_at(
+                state,
+                PlanHistoryQuery {
+                    from: None,
+                    to: None,
+                },
+                now,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let snapshots = body["data"]["snapshots"].as_array().expect("snapshots");
+            assert_eq!(snapshots.len(), 1, "{}", body.0);
+            assert_eq!(snapshots[0]["recorded_at"], now - 3600);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_rejects_ranges_that_overflow() {
+        with_isolated_config_dir_async(|| async {
+            let state = state_with_plan_history(&[]).await;
+            for (from, to) in [
+                (Some(i64::MIN), Some(0)),
+                (Some(i64::MIN), Some(i64::MAX)),
+                (None, Some(i64::MIN)),
+            ] {
+                let (status, _) = get_plan_history_at(
+                    state.clone(),
+                    PlanHistoryQuery { from, to },
+                    1_800_000_000,
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{from:?}..{to:?}");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn plan_history_returns_null_for_a_row_that_does_not_parse() {
+        with_isolated_config_dir_async(|| async {
+            let mut broken = history_row(1_000, "before_window");
+            broken.plan_json = "not json".to_string();
+            let state = state_with_plan_history(&[broken]).await;
+            let (status, body) = get_plan_history_at(
+                state,
+                PlanHistoryQuery {
+                    from: Some(0),
+                    to: Some(2_000),
+                },
+                1_800_000_000,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["snapshots"][0]["plan"], Value::Null);
+            assert_eq!(
+                body["data"]["snapshots"][0]["forecast"]["solar"][0]["kwh"],
+                0.5
+            );
+        })
+        .await;
+    }
+
+    /// The history stores what the Planner page is served: the shared
+    /// builder carries the recommendation, its Apply payload and the export
+    /// advice.
+    #[test]
+    fn plan_response_json_has_the_planner_pages_shape() {
+        use crate::forecast::planner::{ExportAdvice, PlanRecommendation};
+        let rec = PlanRecommendation::NoChargeNeeded {
+            current_soc_pct: 80.0,
+            min_soc_pct: 20.0,
+            observed_min_soc_pct: 45.0,
+        };
+        let advice = ExportAdvice::NoExport {
+            reason: "none".to_string(),
+        };
+        let data = plan_response_json(&rec, Some(&advice));
+        assert_eq!(data["recommendation"]["kind"], "no_charge_needed");
+        assert!(data["recommendation"].get("apply").is_none());
+        assert_eq!(data["apply"], Value::Null);
+        assert_eq!(data["export"], export_advice_to_json(&advice));
+        assert_eq!(plan_response_json(&rec, None)["export"], Value::Null);
+    }
+
+    // ---- cheapest-overall inputs (issue #359) ----------------------------
+
+    fn forecast_with_bands(bands: &[(f64, f64, f64)]) -> crate::forecast::ForecastPayload {
+        let flat: Vec<crate::forecast::ForecastConsumptionHour> = (0..24u8)
+            .map(|hour| crate::forecast::ForecastConsumptionHour {
+                hour,
+                kwh: 0.5,
+                p25: 0.4,
+                p75: 0.6,
+            })
+            .collect();
+        crate::forecast::ForecastPayload {
+            generated_at: 0,
+            forecast_fetched_at: None,
+            forecast_age_seconds: None,
+            status: Vec::new(),
+            performance_ratio: None,
+            performance_ratio_days: None,
+            solar: bands
+                .iter()
+                .enumerate()
+                .map(|(i, (kwh, low, high))| crate::forecast::ForecastSolarHour {
+                    timestamp: 1_800_000_000 + i as i64 * 3600,
+                    kwh: *kwh,
+                    band_low: *low,
+                    band_high: *high,
+                })
+                .collect(),
+            solar_today_remaining_kwh: 0.0,
+            solar_tomorrow_kwh: 0.0,
+            consumption_weekday: flat.clone(),
+            consumption_weekend: flat,
+            consumption_days_observed: 7,
+            consumption_sufficient: true,
+            consumption_tomorrow_kwh: 12.0,
+            battery: None,
+            import_tomorrow_kwh: 0.0,
+            export_tomorrow_kwh: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_planner_hours_use_the_median_or_the_low_solar_band() {
+        let forecast = forecast_with_bands(&[(2.0, 1.2, 2.8), (0.0, 0.0, 0.0), (1.0, 1.4, 1.6)]);
+        let median = forecast_sim_hours(&forecast, SolarBand::Median);
+        let low = forecast_sim_hours(&forecast, SolarBand::Low);
+        assert_eq!(
+            median.iter().map(|h| h.solar_kwh).collect::<Vec<_>>(),
+            vec![2.0, 0.0, 1.0]
+        );
+        // Never above the median, even if the band is malformed.
+        assert_eq!(
+            low.iter().map(|h| h.solar_kwh).collect::<Vec<_>>(),
+            vec![1.2, 0.0, 1.0]
+        );
+        // Same hours, same consumption.
+        for (m, l) in median.iter().zip(&low) {
+            assert_eq!(
+                (m.timestamp, m.consumption_kwh),
+                (l.timestamp, l.consumption_kwh)
+            );
+        }
     }
 }

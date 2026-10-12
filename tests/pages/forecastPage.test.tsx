@@ -389,7 +389,11 @@ describe('ForecastPage', () => {
 
   it('uses a composed chart so both consumption median lines render and join the tooltip', async () => {
     render(<ForecastPage />);
-    expect(await screen.findByTestId('forecast-composed-chart')).toBeTruthy();
+    // The solar chart is composed too (it draws the past lines), so scope
+    // to the consumption panel.
+    await screen.findByText('Weekday median');
+    const panel = document.getElementById('forecast-chart-panel-consumption')!;
+    expect(within(panel).getByTestId('forecast-composed-chart')).toBeTruthy();
     expect(screen.getByText('Weekday median')).toBeTruthy();
     expect(screen.getByText('Weekend median')).toBeTruthy();
   });
@@ -1308,26 +1312,81 @@ describe('ForecastPage planner strategy (issue #359)', () => {
     });
   });
 
-  it('notes the hold is unconfirmed on a model other than Gen3', async () => {
-    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
-    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
-    render(<ForecastPage />);
-    expect(await screen.findByTestId('forecast-plan-strategy-note')).toHaveTextContent(
-      /confirmed on Gen 3/i,
-    );
+  it('shows no caution about holding on any model (hold plans or not)', async () => {
+    for (const device of ['Gen3Hybrid', 'Gen2Hybrid', 'Gen3PlusHybrid']) {
+      useInverterStore.setState({ snapshot: { device_type: device } } as never);
+      mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
+      render(<ForecastPage />);
+      await screen.findByTestId('forecast-plan-target');
+      expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
+      expect(screen.queryByText(/only been confirmed/i)).toBeNull();
+      cleanup();
+    }
   });
 
-  it('shows no hold note on a Gen3 or for the minimum strategy', async () => {
-    useInverterStore.setState({ snapshot: { device_type: 'Gen3Hybrid' } } as never);
-    mockPage(holdPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'hold_window' });
-    render(<ForecastPage />);
-    await screen.findByTestId('forecast-plan-target');
-    expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
-    cleanup();
-    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
+  const cheapestPlan = () => {
+    const plan = holdPlan();
+    (plan.data as { recommendation: Record<string, unknown> }).recommendation.strategy = 'cheapest';
+    return plan;
+  };
+
+  it('offers a cheapest-overall strategy option', async () => {
     mockPage(planPayload('charge'));
     render(<ForecastPage />);
-    await screen.findByTestId('forecast-plan-apply');
+    await screen.findByTestId('forecast-plan-strategy');
+    expect(screen.getByRole('option', { name: /cheapest overall/i })).toBeTruthy();
+  });
+
+  it('shows the saved cheapest strategy as selected', async () => {
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    await waitFor(() => {
+      expect((screen.getByTestId('forecast-plan-strategy') as HTMLSelectElement).value).toBe(
+        'cheapest',
+      );
+    });
+  });
+
+  it('saves the cheapest strategy when chosen', async () => {
+    mockPage(planPayload('charge'));
+    render(<ForecastPage />);
+    const select = await screen.findByTestId('forecast-plan-strategy');
+    apiPostMocked.mockClear();
+    fireEvent.change(select, { target: { value: 'cheapest' } });
+    await waitFor(() => {
+      expect(apiPostMocked).toHaveBeenCalledWith('/api/settings', {
+        forecast_plan_strategy: 'cheapest',
+      });
+    });
+  });
+
+  it('explains the cheapest strategy in the description', async () => {
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-target');
+    expect(
+      screen.getByText(/Charges as far as the cheap rate saves money, then holds the battery there/),
+    ).toBeTruthy();
+  });
+
+  it('shows the cheapest target on the plan card and applies it', async () => {
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    expect(await screen.findByTestId('forecast-plan-target')).toHaveTextContent(
+      'to 75%, then hold',
+    );
+    fireEvent.click(screen.getByTestId('forecast-plan-apply'));
+    await waitFor(() => {
+      const slotCall = apiPostMocked.mock.calls.find((c) => c[0] === '/api/control/charge-slot');
+      expect(slotCall?.[1]).toMatchObject({ target_soc: 75 });
+    });
+  });
+
+  it('shows no hold caution for cheapest either', async () => {
+    useInverterStore.setState({ snapshot: { device_type: 'Gen2Hybrid' } } as never);
+    mockPage(cheapestPlan(), { forecast_min_soc_pct: 20, forecast_plan_strategy: 'cheapest' });
+    render(<ForecastPage />);
+    await screen.findByTestId('forecast-plan-target');
     expect(screen.queryByTestId('forecast-plan-strategy-note')).toBeNull();
   });
 

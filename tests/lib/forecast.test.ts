@@ -8,7 +8,6 @@ import {
   formatForecastXAxisTick,
   forecastPlanTitle,
   chargeTargetReadBack,
-  holdStrategyNote,
   holdTargetPct,
   minimumSocNote,
   planAutoApplyTriggerLabel,
@@ -145,6 +144,25 @@ describe('forecastXAxisTicks', () => {
     expect(ticks).toHaveLength(7);
     expect(ticks).toEqual(Array.from({ length: 7 }, (_, i) => start + i * 12 * 3600));
     expect(formatForecastXAxisTick(start)).toMatch(/31 Aug 12:00/);
+  });
+
+  it('takes a wider step so a long past view stays readable (issue #361)', () => {
+    const start = 1_700_000_000;
+    const end = start + 10 * 24 * 3600;
+    const ticks = forecastXAxisTicks(start, end, 24 * 3600);
+    expect(ticks).toHaveLength(11);
+    expect(ticks[1] - ticks[0]).toBe(24 * 3600);
+  });
+
+  it('ignores a step that could never advance', () => {
+    const start = 1_700_000_000;
+    for (const step of [0, -3600, Number.NaN]) {
+      expect(forecastXAxisTicks(start, start + 24 * 3600, step)).toEqual([
+        start,
+        start + 12 * 3600,
+        start + 24 * 3600,
+      ]);
+    }
   });
 });
 
@@ -694,19 +712,28 @@ describe('hold plans (issue #359 review)', () => {
     ).toBe('Overnight charge — Tonight 23:00\u201306:00, 15.0 kWh');
   });
 
+  it('reads the target from a cheapest-overall plan too (issue #359)', () => {
+    expect(holdTargetPct({ ...charge, strategy: 'cheapest', slot_target_soc_pct: 75 })).toBe(75);
+    // Still null without a strategy, even with a target present.
+    expect(holdTargetPct({ ...charge, slot_target_soc_pct: 75 })).toBeNull();
+  });
+
+  it('titles a cheapest-overall plan with its target', () => {
+    expect(
+      forecastPlanTitle({
+        ...charge,
+        window: { start: '23:00', end: '06:00', rate: 0.07, tomorrow: false },
+        kwh: 15,
+        strategy: 'cheapest',
+        slot_target_soc_pct: 75,
+      }),
+    ).toBe('Overnight charge — Tonight 23:00\u201306:00, to 75% then hold');
+  });
+
   it('only needs a target read back when one below 100 was requested', () => {
     expect(chargeTargetReadBack(100, 62)).toBe(true);
     expect(chargeTargetReadBack(75, 75)).toBe(true);
     expect(chargeTargetReadBack(75, 62)).toBe(false);
     expect(chargeTargetReadBack(75, undefined)).toBe(false);
-  });
-
-  it('flags the hold as unconfirmed off Gen3', () => {
-    expect(holdStrategyNote('Gen3Hybrid')).toBeNull();
-    expect(holdStrategyNote(undefined)).toBeNull();
-    // Gen 3 Plus takes a different register path from the confirmed Gen 3.
-    for (const device of ['Gen3PlusHybrid', 'Gen2Hybrid', 'ACCoupled', 'AllInOne6kW', 'ThreePhase']) {
-      expect(holdStrategyNote(device)).toMatch(/confirmed on Gen 3/i);
-    }
   });
 });
